@@ -74,7 +74,7 @@ def calcular_poisson(media_casa, media_fora):
 # ==========================================
 # 3. BUSCAS DE API
 # ==========================================
-def buscar_historico_global(team_id, last_n=20): # <--- MUDANÇA PARA 20 JOGOS AQUI!
+def buscar_historico_global(team_id, last_n=20): 
     url = f"{BASE_URL}/fixtures"
     params = {'team': team_id, 'last': last_n, 'status': 'FT'}
     try:
@@ -305,13 +305,19 @@ if agenda:
 
                         colA, colB = st.columns(2)
                         with colA:
-                            st.markdown(f"**🏠 {j['teams']['home']['name']}**"); st.write(f"Forma: {forma_h}")
+                            st.markdown(f"**🏠 {j['teams']['home']['name']}**")
+                            st.write(f"Forma: {forma_h}")
+                            st.write(f"Média Pró: **{d['h']['media_feita']:.2f}** | Sofrida: **{d['h']['media_sofrida']:.2f}**")
                             if d.get("standings") and d["standings"].get("h"):
-                                std = d["standings"]["h"]; st.caption(f"Posição: {std.get('rank', '-')}º | SG: {std.get('goalsDiff', 0)} | {std['all'].get('win', 0)}V-{std['all'].get('draw', 0)}E-{std['all'].get('lose', 0)}D")
+                                std = d["standings"]["h"]
+                                st.caption(f"Posição: {std.get('rank', '-')}º | SG: {std.get('goalsDiff', 0)} | {std['all'].get('win', 0)}V-{std['all'].get('draw', 0)}E-{std['all'].get('lose', 0)}D")
                         with colB:
-                            st.markdown(f"**🚀 {j['teams']['away']['name']}**"); st.write(f"Forma: {forma_a}")
+                            st.markdown(f"**🚀 {j['teams']['away']['name']}**")
+                            st.write(f"Forma: {forma_a}")
+                            st.write(f"Média Pró: **{d['a']['media_feita']:.2f}** | Sofrida: **{d['a']['media_sofrida']:.2f}**")
                             if d.get("standings") and d["standings"].get("a"):
-                                std = d["standings"]["a"]; st.caption(f"Posição: {std.get('rank', '-')}º | SG: {std.get('goalsDiff', 0)} | {std['all'].get('win', 0)}V-{std['all'].get('draw', 0)}E-{std['all'].get('lose', 0)}D")
+                                std = d["standings"]["a"]
+                                st.caption(f"Posição: {std.get('rank', '-')}º | SG: {std.get('goalsDiff', 0)} | {std['all'].get('win', 0)}V-{std['all'].get('draw', 0)}E-{std['all'].get('lose', 0)}D")
                         st.markdown("---")
                         if d.get('h2h') and len(d['h2h']) > 0:
                             for h2h_match in d['h2h']:
