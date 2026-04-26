@@ -18,10 +18,22 @@ HEADERS = {'x-apisports-key': API_KEY_PRO}
 ARQUIVO_BANCO = "banco_barrios_pro.json"
 
 # CHAVE DO GEMINI (MANTENHA ISSO SEGURO)
-API_KEY_GEMINI = "AIzaSyBFiUQHJ2rmw88iRNLP3PcPjYtX9cIOgMA" 
+# CHAVE DO GEMINI (MANTENHA ISSO SEGURO)
+API_KEY_GEMINI = st.secrets["GEMINI_API_KEY"]
 genai.configure(api_key=API_KEY_GEMINI)
-# Usando o modelo mais rápido e eficiente para produção
-model_ia = genai.GenerativeModel('gemini-1.5-flash') 
+
+# 🚀 BUSCA DINÂMICA: Pergunta pra API qual modelo "Flash" está liberado na sua conta
+def conectar_modelo_ia():
+    for m in genai.list_models():
+        if 'generateContent' in m.supported_generation_methods:
+            if 'flash' in m.name.lower(): # Pega a versão mais rápida e econômica
+                return genai.GenerativeModel(m.name)
+    # Se não achar o Flash, pega o primeiro modelo válido que encontrar
+    for m in genai.list_models():
+        if 'generateContent' in m.supported_generation_methods:
+            return genai.GenerativeModel(m.name)
+
+model_ia = conectar_modelo_ia()
 
 def carregar_banco():
     if os.path.exists(ARQUIVO_BANCO):
