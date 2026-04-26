@@ -5,16 +5,23 @@ import time
 import math
 import json
 import os
+import google.generativeai as genai # NOVA ENGRENAGEM DA IA
 
 st.set_page_config(page_title="QG Barrios PRO", layout="wide")
 
 # ==========================================
-# 0. CONFIGURAÇÕES E CHAVE PRO
+# 0. CONFIGURAÇÕES E CHAVES
 # ==========================================
 API_KEY_PRO = "00374ab0590422053c950ddc399a0ccb"
 BASE_URL = "https://v3.football.api-sports.io"
 HEADERS = {'x-apisports-key': API_KEY_PRO}
 ARQUIVO_BANCO = "banco_barrios_pro.json"
+
+# CHAVE DO GEMINI (MANTENHA ISSO SEGURO)
+API_KEY_GEMINI = "AIzaSyBFiUQHJ2rmw88iRNLP3PcPjYtX9cIOgMA" 
+genai.configure(api_key=API_KEY_GEMINI)
+# Usando o modelo mais rápido e eficiente para produção
+model_ia = genai.GenerativeModel('gemini-1.5-flash') 
 
 def carregar_banco():
     if os.path.exists(ARQUIVO_BANCO):
@@ -72,7 +79,7 @@ def calcular_poisson(media_casa, media_fora):
     }
 
 # ==========================================
-# 3. BUSCAS DE API E LÓGICA DE DADOS (NOVO MOTOR)
+# 3. BUSCAS DE API E LÓGICA DE DADOS (NOVO MOTOR xG)
 # ==========================================
 def calcular_pseudo_xg(stats):
     sog = 0
@@ -152,8 +159,8 @@ def buscar_historico_global(team_id, current_league_id, last_n=12):
                 else: forma.append("🟥")
 
         return {
-            "media_feita": total_gols_f / soma_pesos, # Mantido nome original para não quebrar interface
-            "media_sofrida": total_gols_s / soma_pesos, # Mantido nome original para não quebrar interface
+            "media_feita": total_gols_f / soma_pesos, 
+            "media_sofrida": total_gols_s / soma_pesos, 
             "media_xg_f": total_xg_f / soma_pesos,
             "media_xg_s": total_xg_s / soma_pesos,
             "total_jogos": len(jogos_validos),
@@ -248,7 +255,6 @@ def calcular_ranking_dinamico(f_id, data_str, mercado_alvo, mercados_ativos):
     dados = banco_local["datas"][data_str]["stats"].get(f_id)
     if not dados or "erro" in dados or "h" not in dados or "a" not in dados: return -999
     
-    # Motor Novo: Ponderação Gols + xG
     m_h = (dados['h']['media_xg_f'] * 0.6 + dados['h']['media_feita'] * 0.4 + dados['a']['media_xg_s'] * 0.6 + dados['a']['media_sofrida'] * 0.4) / 2
     m_a = (dados['a']['media_xg_f'] * 0.6 + dados['a']['media_feita'] * 0.4 + dados['h']['media_xg_s'] * 0.6 + dados['h']['media_sofrida'] * 0.4) / 2
     
@@ -278,6 +284,47 @@ def renderizar_mercado(col, titulo, p_dict, key, odds_dict):
     estilo = "border:1px solid #28a745; background-color:#1a2b1f;" if ev > 3 else "border:1px solid #333; background-color:#111;"
     html = f'<div style="{estilo} padding:8px; border-radius:6px; text-align:center; margin-bottom:8px;"><div style="font-size:10px; color:#aaa; margin-bottom:2px; font-weight:bold;">{titulo}</div><div style="font-size:16px; font-weight:bold; color:{'#28a745' if ev > 3 else '#fff'};">{prob:.0f}%</div><div style="font-size:11px; color:#FFFFFF; margin-top:4px;">J: {justa:.2f} | O: {casa if casa > 0 else '-'}</div>{badge_html}</div>'
     with col: st.markdown(html, unsafe_allow_html=True)
+
+# ==========================================
+# 4.1 MÓDULO DE INTELIGÊNCIA ARTIFICIAL (GEMINI)
+# ==========================================
+def chamar_ia_fabrica(textos_jogos):
+    prompt_sistema = """Você é o Analista Chefe e Veterano de uma linha de produção de apostas esportivas. Seu trabalho é receber um lote de dados de Poisson, cruzar com a tabela e a forma recente, aplicar o seu 'Filtro Humano' avançado e me devolver a Ordem de Produção Diária.
+    
+    PARÂMETROS DAS NOSSAS CATEGORIAS:
+    * 🛡️ Zaga: Prob. > 65%. Odd mínima 1.70. Segurança extrema.
+    * 🎯 Meio-Campo: Prob. 50% a 65%. Odd Real entre 1.90 e 2.70. É o nosso ganha-pão.
+    * 🚀 Ataque (Zebra): Prob. > 30%. Odd Real > 3.00. Alto risco, alto EV.
+    
+    SUAS REGRAS DE OPERAÇÃO (O P.O.P.):
+    1. A Guilhotina: REPROVE sumariamente qualquer Odd Real menor que 1.70.
+    2. A Lente do xG: Em TODOS os mercados, cruze as médias de Gols com as de xG. Cace e reprove implacavelmente Falsos Unders e Falsos Overs/BTTS. O xG é a prova da verdade.
+    3. Inteligência de Mercado e Contexto: Avalie a posição na tabela, a forma recente e o peso da camisa. O visitante é zebra matematicamente, mas o mandante é o lanterna desesperado? Leia o cenário tático e psicológico do jogo.
+    4. O Fator X (Livre Arbítrio): Você tem autonomia para aprovar uma entrada que fuja levemente da matemática se a sua intuição e conhecimento de futebol indicarem uma oportunidade de ouro. Justifique se quebrar a regra.
+    
+    LIMITES DA ORDEM DE PRODUÇÃO DIÁRIA:
+    * Selecione no MÁXIMO 6 a 7 operações Titulares e entregue exatamente 2 operações Reservas no final.
+    * Limite o 🚀 Ataque a 1 ou 2 peças no máximo.
+    * Se não houver peças com qualidade suficiente de 🛡️ Zaga ou 🚀 Ataque, preencha essas vagas com as melhores opções de 🎯 Meio-Campo.
+    
+    FORMATO DE SAÍDA OBRIGATÓRIO:
+    Retorne APENAS a lista ranqueada no formato:
+    TITULARES:
+    1. [NOME DO JOGO] 🎯 **[MERCADO Escolhido | ODD: X.XX]**
+    * Veredito: APROVADO [Categoria]
+    * A Lógica: [Explique cruzando xG, tabela e EV]
+    
+    RESERVAS:
+    1. [NOME DO JOGO] 🎯 **[MERCADO Escolhido | ODD: X.XX]**
+    * A Lógica: [Por que ficou na reserva]
+    """
+    prompt_completo = prompt_sistema + "\n\n📋 AQUI ESTÃO OS DADOS DOS JOGOS DO LOTE ATUAL PARA VOCÊ FILTRAR:\n\n" + textos_jogos
+    
+    try:
+        response = model_ia.generate_content(prompt_completo)
+        return response.text
+    except Exception as e:
+        return f"🚨 Erro na comunicação com a API do Gemini: {e}"
 
 # ==========================================
 # 5. INTERFACE
@@ -318,7 +365,55 @@ if agenda:
     jogos_visiveis = [j for j in agenda if not filtro_pro or j['league']['id'] in LIGAS_PRO]
     jogos_visiveis.sort(key=lambda x: calcular_ranking_dinamico(str(x['fixture']['id']), data_str, mercado_filtro, mercados_ativos), reverse=True)
     
-    if st.button(f"🚀 2. Analisar Visíveis ({len(jogos_visiveis)})", type="primary", use_container_width=True): acao_analisar(jogos_visiveis, data_str)
+    col_btn1, col_btn2 = st.columns(2)
+    with col_btn1:
+        if st.button(f"🚀 2. Analisar Visíveis ({len(jogos_visiveis)})", type="primary", use_container_width=True): acao_analisar(jogos_visiveis, data_str)
+    
+    with col_btn2:
+        # BOTÃO NOVO QUE ATIVA A I.A.
+        if st.button(f"🏭 3. Filtrar Lote com IA (Gemini)", type="primary", use_container_width=True):
+            st.info("🔄 O Inspetor Chefe (IA) está avaliando o P.O.P. e o xG. Aguarde...")
+            lote_completo_texto = ""
+            jogos_analisados_count = 0
+            mapping_nomes = {"HOME": "Mandante (1)", "DRAW": "Empate (X)", "AWAY": "Visitante (2)", "1X": "Dupla Casa", "X2": "Dupla Fora", "BTTS": "BTTS (Ambas)", "OVER": "Over 2.5", "UNDER": "Under 2.5"}
+            
+            for j in jogos_visiveis:
+                f_id = str(j['fixture']['id'])
+                d = banco_local["datas"][data_str]["stats"].get(f_id)
+                if d and "h" in d and "erro" not in d:
+                    m_h = (d['h']['media_xg_f'] * 0.6 + d['h']['media_feita'] * 0.4 + d['a']['media_xg_s'] * 0.6 + d['a']['media_sofrida'] * 0.4) / 2
+                    m_a = (d['a']['media_xg_f'] * 0.6 + d['a']['media_feita'] * 0.4 + d['h']['media_xg_s'] * 0.6 + d['h']['media_sofrida'] * 0.4) / 2
+                    p = calcular_poisson(m_h, m_a)
+                    if p:
+                        conf = d['h']['total_jogos'] + d['a']['total_jogos']
+                        forma_h, forma_a = d['h'].get('forma', 'Sem dados'), d['a'].get('forma', 'Sem dados')
+                        
+                        resumo = f"⚽ JOGO: {j['teams']['home']['name']} vs {j['teams']['away']['name']}\n🏆 LIGA: {j['league']['name']}\n🛡️ CONFIANÇA: {conf} jogos\n📊 PROBABILIDADES E VALOR (POISSON):\n"
+                        for mk in mercados_ativos:
+                            ev = get_ev(d, p, mk)
+                            resumo += f"- {mapping_nomes[mk]}: {p[mk]['prob']:.0f}% (Odd Justa: {p[mk]['justa']:.2f} | Casa: {d['odds'].get(mk, 0)}) | EV: {ev:.1f}%\n"
+                        
+                        resumo += f"🏠 {j['teams']['home']['name']}: Forma: {forma_h} | Gols: {d['h']['media_feita']:.2f}/{d['h']['media_sofrida']:.2f} | xG: {d['h']['media_xg_f']:.2f}/{d['h']['media_xg_s']:.2f}\n"
+                        if d.get("standings") and d["standings"].get("h"):
+                            std_h = d["standings"]["h"]
+                            resumo += f"   Tabela: {std_h.get('rank', '-')}º | SG: {std_h.get('goalsDiff', 0)} | Campanha: {std_h['all'].get('win', 0)}V-{std_h['all'].get('draw', 0)}E-{std_h['all'].get('lose', 0)}D\n"
+                        
+                        resumo += f"🚀 {j['teams']['away']['name']}: Forma: {forma_a} | Gols: {d['a']['media_feita']:.2f}/{d['a']['media_sofrida']:.2f} | xG: {d['a']['media_xg_f']:.2f}/{d['a']['media_xg_s']:.2f}\n"
+                        if d.get("standings") and d["standings"].get("a"):
+                            std_a = d["standings"]["a"]
+                            resumo += f"   Tabela: {std_a.get('rank', '-')}º | SG: {std_a.get('goalsDiff', 0)} | Campanha: {std_a['all'].get('win', 0)}V-{std_a['all'].get('draw', 0)}E-{std_a['all'].get('lose', 0)}D\n"
+                        
+                        lote_completo_texto += resumo + "\n" + "-"*30 + "\n"
+                        jogos_analisados_count += 1
+            
+            if jogos_analisados_count > 0:
+                resposta_ia = chamar_ia_fabrica(lote_completo_texto)
+                st.success("✅ Avaliação Concluída!")
+                st.markdown(f"### 📋 Ordem de Serviço Diária (Filtro IA)\n{resposta_ia}")
+            else:
+                st.warning("⚠️ Nenhum jogo analisado ainda. Clique em '2. Analisar Visíveis' primeiro.")
+
+    st.write("---")
 
     for j in jogos_visiveis:
         f_id = str(j['fixture']['id']); d = banco_local["datas"][data_str]["stats"].get(f_id)
