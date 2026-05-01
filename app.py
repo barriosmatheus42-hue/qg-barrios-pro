@@ -5,7 +5,7 @@ import time
 import math
 import json
 import os
-import google.generativeai as genai # NOVA ENGRENAGEM DA IA
+import google.generativeai as genai
 
 st.set_page_config(page_title="QG Barrios PRO", layout="wide")
 
@@ -17,8 +17,6 @@ BASE_URL = "https://v3.football.api-sports.io"
 HEADERS = {'x-apisports-key': API_KEY_PRO}
 ARQUIVO_BANCO = "banco_barrios_pro.json"
 
-# CHAVE DO GEMINI (MANTENHA ISSO SEGURO)
-# CHAVE DO GEMINI (MANTENHA ISSO SEGURO)
 API_KEY_GEMINI = st.secrets["GEMINI_API_KEY"]
 genai.configure(api_key=API_KEY_GEMINI)
 
@@ -26,9 +24,8 @@ genai.configure(api_key=API_KEY_GEMINI)
 def conectar_modelo_ia():
     for m in genai.list_models():
         if 'generateContent' in m.supported_generation_methods:
-            if 'flash' in m.name.lower(): # Pega a versão mais rápida e econômica
+            if 'flash' in m.name.lower(): 
                 return genai.GenerativeModel(m.name)
-    # Se não achar o Flash, pega o primeiro modelo válido que encontrar
     for m in genai.list_models():
         if 'generateContent' in m.supported_generation_methods:
             return genai.GenerativeModel(m.name)
@@ -294,7 +291,7 @@ def renderizar_mercado(col, titulo, p_dict, key, odds_dict):
     icone_fogo = "🔥" if ev > 20 else ""
     badge_html = f'<div style="color:#28a745; font-size:11px; font-weight:bold; margin-top:3px;">VALOR {icone_fogo} (+{ev:.1f}%)</div>' if ev > 3 else ''
     estilo = "border:1px solid #28a745; background-color:#1a2b1f;" if ev > 3 else "border:1px solid #333; background-color:#111;"
-    html = f'<div style="{estilo} padding:8px; border-radius:6px; text-align:center; margin-bottom:8px;"><div style="font-size:10px; color:#aaa; margin-bottom:2px; font-weight:bold;">{titulo}</div><div style="font-size:16px; font-weight:bold; color:{'#28a745' if ev > 3 else '#fff'};">{prob:.0f}%</div><div style="font-size:11px; color:#FFFFFF; margin-top:4px;">J: {justa:.2f} | O: {casa if casa > 0 else '-'}</div>{badge_html}</div>'
+    html = f'<div style="{estilo} padding:8px; border-radius:6px; text-align:center; margin-bottom:8px;"><div style="font-size:10px; color:#aaa; margin-bottom:2px; font-weight:bold;">{titulo}</div><div style="font-size:16px; font-weight:bold; color:{"#28a745" if ev > 3 else "#fff"};">{prob:.0f}%</div><div style="font-size:11px; color:#FFFFFF; margin-top:4px;">J: {justa:.2f} | O: {casa if casa > 0 else "-"}</div>{badge_html}</div>'
     with col: st.markdown(html, unsafe_allow_html=True)
 
 # ==========================================
@@ -354,7 +351,16 @@ with st.sidebar:
     data_str = data_consulta.strftime("%Y-%m-%d")
     
     LIGAS_PRO = [39, 140, 135, 78, 61, 71, 72, 73, 2, 3, 848, 13, 11, 40, 88, 307, 253, 94, 128, 203]
-    filtro_pro = st.checkbox("⭐ Apenas Ligas PRO", value=False); st.write("---")
+    
+    # ⚙️ NOVO SISTEMA DE FILTRO DE CAMADAS
+    tipo_filtro = st.radio(
+        "Filtro de Ligas:",
+        ["🏆 Só Ligas PRO (Segurança Máxima)", 
+         "🌍 PRO + Confiáveis (Recomendado)", 
+         "🗑️ O Mundo Todo (Lento e Arriscado)"],
+         index=1
+    )
+    st.write("---")
     
     st.markdown("### ⚙️ Mercados Ativos")
     todos_mercados = {"HOME": "Vitória Casa", "DRAW": "Empate", "AWAY": "Vitória Fora", "1X": "Dupla Casa", "X2": "Dupla Fora", "BTTS": "Ambas Marcam", "OVER": "Over 2.5", "UNDER": "Under 2.5"}
@@ -377,7 +383,35 @@ if st.button("🔄 1. Carregar Agenda do Dia", use_container_width=True):
     if res.get('response'): banco_local["datas"][data_str]["agenda"] = res['response']; salvar_banco(banco_local); st.rerun()
 
 if agenda:
-    jogos_visiveis = [j for j in agenda if not filtro_pro or j['league']['id'] in LIGAS_PRO]
+    # ⚙️ LÓGICA DO NOVO FILTRO ANTI-VÁRZEA APLICADA AQUI
+    jogos_visiveis = []
+    palavras_proibidas = ['u19', 'u20', 'u21', 'u23', 'youth', 'women', 'feminino', 'reserve', 'amateur', 'regional', 'state']
+    paises_confiaveis = [
+        'Brazil', 'Argentina', 'USA', 'Mexico', 'Netherlands', 'Portugal', 'Turkey', 
+        'Saudi-Arabia', 'Switzerland', 'Japan', 'Colombia', 'Chile', 'South-Korea', 
+        'Scotland', 'Greece', 'Belgium', 'Uruguay', 'Ecuador', 'Paraguay', 'Bolivia', 'Peru', 'Venezuela'
+    ]
+
+    for j in agenda:
+        l_id = j['league']['id']
+        l_name = str(j['league']['name']).lower()
+        l_country = str(j['league']['country'])
+
+        if tipo_filtro == "🏆 Só Ligas PRO (Segurança Máxima)":
+            if l_id in LIGAS_PRO:
+                jogos_visiveis.append(j)
+                
+        elif tipo_filtro == "🌍 PRO + Confiáveis (Recomendado)":
+            eh_varzea = any(palavra in l_name for palavra in palavras_proibidas)
+            # Aprova se for PRO, ou se for de País Confiável sem ser Várzea
+            if l_id in LIGAS_PRO or (l_country in paises_confiaveis and not eh_varzea):
+                if j not in jogos_visiveis:
+                    jogos_visiveis.append(j)
+                    
+        else: # O Mundo Todo
+            jogos_visiveis.append(j)
+
+    # Ordena a lista filtrada pelo ranqueamento dinâmico
     jogos_visiveis.sort(key=lambda x: calcular_ranking_dinamico(str(x['fixture']['id']), data_str, mercado_filtro, mercados_ativos), reverse=True)
     
     col_btn1, col_btn2 = st.columns(2)
@@ -385,7 +419,6 @@ if agenda:
         if st.button(f"🚀 2. Analisar Visíveis ({len(jogos_visiveis)})", type="primary", use_container_width=True): acao_analisar(jogos_visiveis, data_str)
     
     with col_btn2:
-        # BOTÃO NOVO QUE ATIVA A I.A.
         if st.button(f"🏭 3. Filtrar Lote com IA (Gemini)", type="primary", use_container_width=True):
             st.info("🔄 O Inspetor Chefe (IA) está avaliando o P.O.P. e o xG. Aguarde...")
             lote_completo_texto = ""
@@ -432,7 +465,9 @@ if agenda:
 
     for j in jogos_visiveis:
         f_id = str(j['fixture']['id']); d = banco_local["datas"][data_str]["stats"].get(f_id)
-        st.markdown(f'<div style="border:1px solid #333; border-radius:8px; padding:12px; background-color:#0e1117; margin-bottom:10px;"><div style="display:flex; justify-content:space-between; color:#888; font-size:11px;"><span>🕒 {j['fixture']['date'][11:16]} • {j['league']['name']}</span><span style="color:#28a745;">{'● Em Cache' if d else ''}</span></div><div style="font-size:18px; font-weight:bold; color:white; margin: 8px 0;">{j['teams']['home']['name']} <span style="color:#555; font-size:12px;">vs</span> {j['teams']['away']['name']}</div>', unsafe_allow_html=True)
+        
+        # Corrigindo as aspas internas no HTML para evitar erros de sintaxe no Python
+        st.markdown(f"<div style='border:1px solid #333; border-radius:8px; padding:12px; background-color:#0e1117; margin-bottom:10px;'><div style='display:flex; justify-content:space-between; color:#888; font-size:11px;'><span>🕒 {j['fixture']['date'][11:16]} • {j['league']['name']}</span><span style='color:#28a745;'>{'● Em Cache' if d else ''}</span></div><div style='font-size:18px; font-weight:bold; color:white; margin: 8px 0;'>{j['teams']['home']['name']} <span style='color:#555; font-size:12px;'>vs</span> {j['teams']['away']['name']}</div>", unsafe_allow_html=True)
         
         if d:
             if "erro" in d or "h" not in d or "a" not in d: st.warning(f"⚠️ {d.get('erro', 'Dados corrompidos.')}")
@@ -498,6 +533,6 @@ if agenda:
                             for h2h_match in d['h2h']:
                                 data_jogo, casa_nome, fora_nome = h2h_match['fixture']['date'][:10], h2h_match['teams']['home']['name'], h2h_match['teams']['away']['name']
                                 st.caption(f"📅 {data_jogo} | {casa_nome} {h2h_match['goals']['home']} x {h2h_match['goals']['away']} {fora_nome}")
-            if st.button("🔄 Refazer", key=f"ref_{f_id}"): acao_analisar([j], data_str, force=True)
-        else: st.button(f"🔍 Analisar", key=f"btn_{f_id}", on_click=acao_analisar, args=([j], data_str))
-        st.markdown("</div>", unsafe_allow_html=True)
+        if st.button("🔄 Refazer", key=f"ref_{f_id}"): acao_analisar([j], data_str, force=True)
+    else: st.button(f"🔍 Analisar", key=f"btn_{f_id}", on_click=acao_analisar, args=([j], data_str))
+    st.markdown("</div>", unsafe_allow_html=True)
