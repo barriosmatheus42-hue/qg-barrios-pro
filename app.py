@@ -20,7 +20,6 @@ ARQUIVO_BANCO = "banco_barrios_pro.json"
 API_KEY_GEMINI = st.secrets["GEMINI_API_KEY"]
 genai.configure(api_key=API_KEY_GEMINI)
 
-# 🚀 BUSCA DINÂMICA: Pergunta pra API qual modelo "Flash" está liberado na sua conta
 def conectar_modelo_ia():
     for m in genai.list_models():
         if 'generateContent' in m.supported_generation_methods:
@@ -51,7 +50,9 @@ def atualizar_saldo_realtime():
             rem = res['response']['requests']['limit_day'] - res['response']['requests']['current']
             banco_local["creditos_restantes"] = rem
             return rem
-    except: return banco_local.get("creditos_restantes", 0)
+    except: pass
+    # Garante que NUNCA retorne None
+    return banco_local.get("creditos_restantes", 0) or 0
 
 # ==========================================
 # 2. MOTOR MATEMÁTICO (POISSON)
@@ -235,25 +236,51 @@ def buscar_h2h(h_id, a_id):
     return []
 
 # ==========================================
-# 4. MOTOR DE ANÁLISE COMPLETO
+# 4. MOTOR DE ANÁLISE COMPLETO (COM BLINDAGEM)
 # ==========================================
 def acao_analisar(jogos_alvo, data_str, force=False):
     if "stats" not in banco_local["datas"][data_str]: banco_local["datas"][data_str]["stats"] = {}
     progresso_bar = st.progress(0)
+    
+    saldo_atual = atualizar_saldo_realtime()
+
     for idx, jogo in enumerate(jogos_alvo):
+        # 🚨 FREIO DE EMERGÊNCIA: Se os créditos baterem em 40, o sistema para de analisar novos jogos
+        if saldo_atual is not None and saldo_atual < 40:
+            st.error(f"⚠️ FREIO DE EMERGÊNCIA! Seus créditos estão no limite (Restam aprox. {saldo_atual}). O processamento foi parado para proteger o aplicativo. O que já foi lido está salvo.")
+            time.sleep(4)
+            break 
+
         f_id = str(jogo['fixture']['id'])
         if force and f_id in banco_local["datas"][data_str]["stats"]: del banco_local["datas"][data_str]["stats"][f_id]
+        
         if f_id not in banco_local["datas"][data_str]["stats"]:
             h_id, a_id = jogo['teams']['home']['id'], jogo['teams']['away']['id']
             l_id, season = jogo['league']['id'], jogo['league']['season']
-            odds = buscar_odds_vips(f_id); s_h = buscar_historico_global(h_id, l_id); s_a = buscar_historico_global(a_id, l_id)
-            standings = buscar_standings(l_id, season, h_id, a_id); h2h = buscar_h2h(h_id, a_id)
+            
+            odds = buscar_odds_vips(f_id)
+            s_h = buscar_historico_global(h_id, l_id)
+            s_a = buscar_historico_global(a_id, l_id)
+            standings = buscar_standings(l_id, season, h_id, a_id)
+            h2h = buscar_h2h(h_id, a_id)
+            
             if s_h and s_a: 
                 banco_local["datas"][data_str]["stats"][f_id] = {"odds": odds if odds else {"BTTS":0, "OVER":0, "UNDER":0, "HOME":0, "DRAW":0, "AWAY":0, "1X":0, "X2":0}, "h": s_h, "a": s_a, "standings": standings, "h2h": h2h}
-            else: banco_local["datas"][data_str]["stats"][f_id] = {"erro": "Sem histórico suficiente"}
+            else: 
+                banco_local["datas"][data_str]["stats"][f_id] = {"erro": "Sem histórico suficiente"}
+            
+            # 💾 SALVAMENTO INCREMENTAL (Tijolo por Tijolo)
+            salvar_banco(banco_local)
+            
+            if saldo_atual is not None:
+                saldo_atual -= 17 # Desconta o valor estimado para a máquina saber a hora de frear
+                
             time.sleep(0.2)
+            
         progresso_bar.progress((idx + 1) / len(jogos_alvo))
-    progresso_bar.empty(); salvar_banco(banco_local); st.rerun()
+        
+    progresso_bar.empty()
+    st.rerun()
 
 def get_ev(dados, p_dict, key):
     casa = dados['odds'].get(key, 0)
@@ -309,7 +336,7 @@ SUAS REGRAS DE OPERAÇÃO (O P.O.P.):
 1. A Guilhotina: REPROVE sumariamente qualquer Odd Real menor que 1.70.
 2. A Lente do xG: Em TODOS os mercados, cruze as médias de Gols com as de xG. Cace e reprove implacavelmente Falsos Unders e Falsos Overs/BTTS. O xG é a prova da verdade.
 3. Inteligência de Mercado e Contexto: Avalie a posição na tabela, a forma recente e o peso da camisa. O mercado costuma superestimar mandantes. Leia o cenário tático e psicológico do jogo.
-4. O Pedágio do Visitante (Acesso Restrito): Para aprovar uma aposta a favor do Visitante (Zebra/Ataque), a exigência é brutal. O xG Ofensivo do Visitante DEVE ser muito superior ao xG Defensivo do Mandante, e o EV deve justificar o risco de jogar fora de casa. Se a matemática e o contexto não forem espetaculares, descarte o visitante.
+4. O Pedágio do Visitante (Acesso Restrito): Para aprovar uma aposta a favor do Visitante (Zebra/Ataque), a exigência é brutal. O xG Ofensivo do Visitante DEVE ser muito superior ao xG Defensivo do Mandante, e o EV deve justify o risco de jogar fora de casa. Se a matemática e o contexto não forem espetaculares, descarte o visitante.
 5. O Fator X (Livre Arbítrio): Você tem autonomia para aprovar uma entrada que fuja levemente da matemática se a sua intuição e conhecimento de futebol indicarem uma oportunidade de ouro. Justifique se quebrar a regra.
 6. O Filtro Anti-Várzea (Sobrecarga de Lote): Em dias com centenas de jogos (lote global), o rigor deve ser triplicado. Ignore completamente "anomalias matemáticas" de ligas obscuras, divisões inferiores ou futebol alternativo, a menos que o EV seja descomunal E a forma recente seja perfeita. Priorize sempre times de ligas rastreáveis. A várzea destrói a matemática.
 7. A Trava de Consistência (Para Zaga e Meio-Campo): Não confie apenas na "média" do xG. Para aprovar um Under ou Over, exija consistência. Se um time tem média baixa de gols, mas a forma recente mostra placares malucos (ex: 4x1, 3x2), REPROVE o Under. A fundação da banca precisa de times estáveis, não de médias mentirosas.
@@ -344,15 +371,21 @@ RESERVAS:
 with st.sidebar:
     st.markdown("## 👑 QG Barrios PRO")
     saldo = atualizar_saldo_realtime()
+    
+    # 🛡️ BLINDAGEM DO PAINEL LATERAL
+    if saldo is None:
+        saldo = 0
+        
     st.metric("Créditos Disponíveis", f"{saldo}/7500")
-    st.progress(saldo / 7500); st.write("---")
+    progresso = max(0.0, min(saldo / 7500, 1.0))
+    st.progress(progresso)
+    st.write("---")
     
     data_consulta = st.date_input("Data do Scanner", datetime.date.today())
     data_str = data_consulta.strftime("%Y-%m-%d")
     
     LIGAS_PRO = [39, 140, 135, 78, 61, 71, 72, 73, 2, 3, 848, 13, 11, 40, 88, 307, 253, 94, 128, 203]
     
-    # ⚙️ NOVO SISTEMA DE FILTRO DE CAMADAS
     tipo_filtro = st.radio(
         "Filtro de Ligas:",
         ["🏆 Só Ligas PRO (Segurança Máxima)", 
@@ -383,7 +416,6 @@ if st.button("🔄 1. Carregar Agenda do Dia", use_container_width=True):
     if res.get('response'): banco_local["datas"][data_str]["agenda"] = res['response']; salvar_banco(banco_local); st.rerun()
 
 if agenda:
-    # ⚙️ LÓGICA DO NOVO FILTRO ANTI-VÁRZEA APLICADA AQUI
     jogos_visiveis = []
     palavras_proibidas = ['u19', 'u20', 'u21', 'u23', 'youth', 'women', 'feminino', 'reserve', 'amateur', 'regional', 'state']
     paises_confiaveis = [
@@ -403,15 +435,13 @@ if agenda:
                 
         elif tipo_filtro == "🌍 PRO + Confiáveis (Recomendado)":
             eh_varzea = any(palavra in l_name for palavra in palavras_proibidas)
-            # Aprova se for PRO, ou se for de País Confiável sem ser Várzea
             if l_id in LIGAS_PRO or (l_country in paises_confiaveis and not eh_varzea):
                 if j not in jogos_visiveis:
                     jogos_visiveis.append(j)
                     
-        else: # O Mundo Todo
+        else:
             jogos_visiveis.append(j)
 
-    # Ordena a lista filtrada pelo ranqueamento dinâmico
     jogos_visiveis.sort(key=lambda x: calcular_ranking_dinamico(str(x['fixture']['id']), data_str, mercado_filtro, mercados_ativos), reverse=True)
     
     col_btn1, col_btn2 = st.columns(2)
@@ -420,53 +450,54 @@ if agenda:
     
     with col_btn2:
         if st.button(f"🏭 3. Filtrar Lote com IA (Gemini)", type="primary", use_container_width=True):
-            st.info("🔄 O Inspetor Chefe (IA) está avaliando o P.O.P. e o xG. Aguarde...")
-            lote_completo_texto = ""
-            jogos_analisados_count = 0
-            mapping_nomes = {"HOME": "Mandante (1)", "DRAW": "Empate (X)", "AWAY": "Visitante (2)", "1X": "Dupla Casa", "X2": "Dupla Fora", "BTTS": "BTTS (Ambas)", "OVER": "Over 2.5", "UNDER": "Under 2.5"}
             
-            for j in jogos_visiveis:
-                f_id = str(j['fixture']['id'])
-                d = banco_local["datas"][data_str]["stats"].get(f_id)
-                if d and "h" in d and "erro" not in d:
-                    m_h = (d['h']['media_xg_f'] * 0.6 + d['h']['media_feita'] * 0.4 + d['a']['media_xg_s'] * 0.6 + d['a']['media_sofrida'] * 0.4) / 2
-                    m_a = (d['a']['media_xg_f'] * 0.6 + d['a']['media_feita'] * 0.4 + d['h']['media_xg_s'] * 0.6 + d['h']['media_sofrida'] * 0.4) / 2
-                    p = calcular_poisson(m_h, m_a)
-                    if p:
-                        conf = d['h']['total_jogos'] + d['a']['total_jogos']
-                        forma_h, forma_a = d['h'].get('forma', 'Sem dados'), d['a'].get('forma', 'Sem dados')
-                        
-                        resumo = f"⚽ JOGO: {j['teams']['home']['name']} vs {j['teams']['away']['name']}\n🏆 LIGA: {j['league']['name']}\n🛡️ CONFIANÇA: {conf} jogos\n📊 PROBABILIDADES E VALOR (POISSON):\n"
-                        for mk in mercados_ativos:
-                            ev = get_ev(d, p, mk)
-                            resumo += f"- {mapping_nomes[mk]}: {p[mk]['prob']:.0f}% (Odd Justa: {p[mk]['justa']:.2f} | Casa: {d['odds'].get(mk, 0)}) | EV: {ev:.1f}%\n"
-                        
-                        resumo += f"🏠 {j['teams']['home']['name']}: Forma: {forma_h} | Gols: {d['h']['media_feita']:.2f}/{d['h']['media_sofrida']:.2f} | xG: {d['h']['media_xg_f']:.2f}/{d['h']['media_xg_s']:.2f}\n"
-                        if d.get("standings") and d["standings"].get("h"):
-                            std_h = d["standings"]["h"]
-                            resumo += f"   Tabela: {std_h.get('rank', '-')}º | SG: {std_h.get('goalsDiff', 0)} | Campanha: {std_h['all'].get('win', 0)}V-{std_h['all'].get('draw', 0)}E-{std_h['all'].get('lose', 0)}D\n"
-                        
-                        resumo += f"🚀 {j['teams']['away']['name']}: Forma: {forma_a} | Gols: {d['a']['media_feita']:.2f}/{d['a']['media_sofrida']:.2f} | xG: {d['a']['media_xg_f']:.2f}/{d['a']['media_xg_s']:.2f}\n"
-                        if d.get("standings") and d["standings"].get("a"):
-                            std_a = d["standings"]["a"]
-                            resumo += f"   Tabela: {std_a.get('rank', '-')}º | SG: {std_a.get('goalsDiff', 0)} | Campanha: {std_a['all'].get('win', 0)}V-{std_a['all'].get('draw', 0)}E-{std_a['all'].get('lose', 0)}D\n"
-                        
-                        lote_completo_texto += resumo + "\n" + "-"*30 + "\n"
-                        jogos_analisados_count += 1
-            
-            if jogos_analisados_count > 0:
-                resposta_ia = chamar_ia_fabrica(lote_completo_texto)
-                st.success("✅ Avaliação Concluída!")
-                st.markdown(f"### 📋 Ordem de Serviço Diária (Filtro IA)\n{resposta_ia}")
-            else:
-                st.warning("⚠️ Nenhum jogo analisado ainda. Clique em '2. Analisar Visíveis' primeiro.")
+            # 🔄 SPINNER ANIMADO DA IA (Correção visual)
+            with st.spinner("🔄 O Inspetor Chefe (IA) está lendo o lote inteiro e aplicando o P.O.P... Aguarde!"):
+                lote_completo_texto = ""
+                jogos_analisados_count = 0
+                mapping_nomes = {"HOME": "Mandante (1)", "DRAW": "Empate (X)", "AWAY": "Visitante (2)", "1X": "Dupla Casa", "X2": "Dupla Fora", "BTTS": "BTTS (Ambas)", "OVER": "Over 2.5", "UNDER": "Under 2.5"}
+                
+                for j in jogos_visiveis:
+                    f_id = str(j['fixture']['id'])
+                    d = banco_local["datas"][data_str]["stats"].get(f_id)
+                    if d and "h" in d and "erro" not in d:
+                        m_h = (d['h']['media_xg_f'] * 0.6 + d['h']['media_feita'] * 0.4 + d['a']['media_xg_s'] * 0.6 + d['a']['media_sofrida'] * 0.4) / 2
+                        m_a = (d['a']['media_xg_f'] * 0.6 + d['a']['media_feita'] * 0.4 + d['h']['media_xg_s'] * 0.6 + d['h']['media_sofrida'] * 0.4) / 2
+                        p = calcular_poisson(m_h, m_a)
+                        if p:
+                            conf = d['h']['total_jogos'] + d['a']['total_jogos']
+                            forma_h, forma_a = d['h'].get('forma', 'Sem dados'), d['a'].get('forma', 'Sem dados')
+                            
+                            resumo = f"⚽ JOGO: {j['teams']['home']['name']} vs {j['teams']['away']['name']}\n🏆 LIGA: {j['league']['name']}\n🛡️ CONFIANÇA: {conf} jogos\n📊 PROBABILIDADES E VALOR (POISSON):\n"
+                            for mk in mercados_ativos:
+                                ev = get_ev(d, p, mk)
+                                resumo += f"- {mapping_nomes[mk]}: {p[mk]['prob']:.0f}% (Odd Justa: {p[mk]['justa']:.2f} | Casa: {d['odds'].get(mk, 0)}) | EV: {ev:.1f}%\n"
+                            
+                            resumo += f"🏠 {j['teams']['home']['name']}: Forma: {forma_h} | Gols: {d['h']['media_feita']:.2f}/{d['h']['media_sofrida']:.2f} | xG: {d['h']['media_xg_f']:.2f}/{d['h']['media_xg_s']:.2f}\n"
+                            if d.get("standings") and d["standings"].get("h"):
+                                std_h = d["standings"]["h"]
+                                resumo += f"   Tabela: {std_h.get('rank', '-')}º | SG: {std_h.get('goalsDiff', 0)} | Campanha: {std_h['all'].get('win', 0)}V-{std_h['all'].get('draw', 0)}E-{std_h['all'].get('lose', 0)}D\n"
+                            
+                            resumo += f"🚀 {j['teams']['away']['name']}: Forma: {forma_a} | Gols: {d['a']['media_feita']:.2f}/{d['a']['media_sofrida']:.2f} | xG: {d['a']['media_xg_f']:.2f}/{d['a']['media_xg_s']:.2f}\n"
+                            if d.get("standings") and d["standings"].get("a"):
+                                std_a = d["standings"]["a"]
+                                resumo += f"   Tabela: {std_a.get('rank', '-')}º | SG: {std_a.get('goalsDiff', 0)} | Campanha: {std_a['all'].get('win', 0)}V-{std_a['all'].get('draw', 0)}E-{std_a['all'].get('lose', 0)}D\n"
+                            
+                            lote_completo_texto += resumo + "\n" + "-"*30 + "\n"
+                            jogos_analisados_count += 1
+                
+                if jogos_analisados_count > 0:
+                    resposta_ia = chamar_ia_fabrica(lote_completo_texto)
+                    st.success("✅ Avaliação Concluída!")
+                    st.markdown(f"### 📋 Ordem de Serviço Diária (Filtro IA)\n{resposta_ia}")
+                else:
+                    st.warning("⚠️ Nenhum jogo analisado ainda. Clique em '2. Analisar Visíveis' primeiro.")
 
     st.write("---")
 
     for j in jogos_visiveis:
         f_id = str(j['fixture']['id']); d = banco_local["datas"][data_str]["stats"].get(f_id)
         
-        # Corrigindo as aspas internas no HTML para evitar erros de sintaxe no Python
         st.markdown(f"<div style='border:1px solid #333; border-radius:8px; padding:12px; background-color:#0e1117; margin-bottom:10px;'><div style='display:flex; justify-content:space-between; color:#888; font-size:11px;'><span>🕒 {j['fixture']['date'][11:16]} • {j['league']['name']}</span><span style='color:#28a745;'>{'● Em Cache' if d else ''}</span></div><div style='font-size:18px; font-weight:bold; color:white; margin: 8px 0;'>{j['teams']['home']['name']} <span style='color:#555; font-size:12px;'>vs</span> {j['teams']['away']['name']}</div>", unsafe_allow_html=True)
         
         if d:
