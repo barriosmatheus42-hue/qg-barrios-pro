@@ -503,6 +503,26 @@ ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
                 resposta = chamar_ia_fabrica(textos, modo="RESULTADO")
                 st.session_state["ia_resultado"] = resposta
 
+# ==========================================================
+    # 👇 PARA MOSTRAR OS RESULTADOS 👇
+    # ==========================================================
+    st.write("---")
+    
+    if "ia_gols" in st.session_state:
+        st.markdown("#### 🔥 Sugestões IA - GOLS")
+        # Se a IA for muito rigorosa e não aprovar nada, ela avisa em vez de ficar em branco
+        if st.session_state["ia_gols"].strip() == "":
+            st.warning("A IA analisou os dados, mas foi rigorosa e não encontrou nenhum jogo com EV/Forma seguros para Gols.")
+        else:
+            st.info(st.session_state["ia_gols"])
+            
+    if "ia_resultado" in st.session_state:
+        st.markdown("#### ⚔️ Sugestões IA - RESULTADO")
+        if st.session_state["ia_resultado"].strip() == "":
+            st.warning("A IA analisou os dados, mas foi rigorosa e não encontrou nenhum jogo com EV/Forma seguros para Resultado.")
+        else:
+            st.info(st.session_state["ia_resultado"])
+    
     # ==========================================================
     # ABAS PRINCIPAIS DE CÁLCULO E RENDERIZAÇÃO
     # ==========================================================
