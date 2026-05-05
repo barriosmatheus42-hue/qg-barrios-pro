@@ -8,7 +8,7 @@ import os
 import google.generativeai as genai
 import re
 
-st.set_page_config(page_title="QG Barrios PRO - V6 Fundo Quant", layout="wide")
+st.set_page_config(page_title="QG Barrios PRO - V6.1 Final Quant", layout="wide")
 
 # ==========================================
 # 0. CONFIGURAÇÕES E CHAVES
@@ -63,7 +63,7 @@ def atualizar_saldo_realtime():
     return banco_local.get("creditos_restantes", 0) or 0
 
 # ==========================================
-# 2. MOTOR MATEMÁTICO (POISSON V6)
+# 2. MOTOR MATEMÁTICO (POISSON V6.1)
 # ==========================================
 def calcular_poisson(media_casa, media_fora):
     if media_casa <= 0.05 and media_fora <= 0.05: return None
@@ -74,8 +74,9 @@ def calcular_poisson(media_casa, media_fora):
     
     m_h, m_a = max(media_casa, 0.1), max(media_fora, 0.1)
     
-    for gc in range(8):
-        for gf in range(8):
+    # AUDITORIA FINAL: Ampliado para 10 gols para não cortar a cauda
+    for gc in range(10):
+        for gf in range(10):
             p_casa = (math.exp(-m_h) * (m_h**gc)) / math.factorial(gc)
             p_fora = (math.exp(-m_a) * (m_a**gf)) / math.factorial(gf)
             p_placar = p_casa * p_fora
@@ -120,7 +121,7 @@ def buscar_stats_partida(fixture_id, team_id, gols_reais):
                 if s['type'] == 'expected_goals' and s['value']: xg_api = float(s['value'])
                 if s['type'] == 'Shots on Goal' and s['value']: sog = int(s['value'])
     except: pass
-    if xg_api is not None: return (xg_api * 0.85) + (gols_reais * 0.15) # Mais peso no xG puro como sugerido
+    if xg_api is not None: return (xg_api * 0.85) + (gols_reais * 0.15)
     return (gols_reais * 0.70) + (sog * 0.10)
 
 def buscar_historico_global(team_id, current_league_id, last_n=12): 
@@ -191,7 +192,7 @@ def buscar_odds_vips(fixture_id):
     return odds
 
 # ==========================================
-# 4. MOTOR DE ANÁLISE E CÁLCULO QUANT
+# 4. MOTOR DE ANÁLISE QUANTITATIVA
 # ==========================================
 def acao_analisar(jogos_alvo, data_str, force=False):
     if "stats" not in banco_local["datas"][data_str]: banco_local["datas"][data_str]["stats"] = {}
@@ -218,16 +219,13 @@ def calcular_matematica_quant(d):
     m_a = ((d['a']['media_xg_f'] + d['h']['media_xg_s']) / 2) * coef_liga * 0.95 
     return m_h, m_a
 
-# AUDITORIA FINAL: Remoção do Overround (Juice) da Casa
 def normalizar_prob_mercado(dados, key):
     odds = dados['odds']
     odd_alvo = odds.get(key, 0)
     if odd_alvo <= 1.0: return 0
-    
     margem = 0
     if key in ["HOME", "DRAW", "AWAY"]:
-        if odds.get("HOME") and odds.get("DRAW") and odds.get("AWAY"):
-            margem = (1/odds["HOME"]) + (1/odds["DRAW"]) + (1/odds["AWAY"])
+        if odds.get("HOME") and odds.get("DRAW") and odds.get("AWAY"): margem = (1/odds["HOME"]) + (1/odds["DRAW"]) + (1/odds["AWAY"])
     elif key in ["OVER_15", "UNDER_15"]:
         if odds.get("OVER_15") and odds.get("UNDER_15"): margem = (1/odds["OVER_15"]) + (1/odds["UNDER_15"])
     elif key in ["OVER_25", "UNDER_25"]:
@@ -235,51 +233,86 @@ def normalizar_prob_mercado(dados, key):
     elif key in ["OVER_35", "UNDER_35"]:
         if odds.get("OVER_35") and odds.get("UNDER_35"): margem = (1/odds["OVER_35"]) + (1/odds["UNDER_35"])
     elif key == "BTTS":
-        return (1 / odd_alvo) * 100 * 0.95 # Fallback aproximado se não tiver o "No BTTS"
-        
+        return (1 / odd_alvo) * 100 * 0.95 
     if margem > 0: return ((1 / odd_alvo) / margem) * 100
     return (1 / odd_alvo) * 100
 
+# AUDITORIA FINAL: Blend Dinâmico baseado na Força da Liga
 def get_blended_prob(dados, p_dict, key):
     prob_nossa = p_dict[key]['prob']
-    prob_mercado = normalizar_prob_mercado(dados, key)
-    if prob_mercado > 0: return (prob_nossa * 0.80) + (prob_mercado * 0.20)
+    odd_casa = dados['odds'].get(key, 0)
+    l_id = dados.get('l_id', 0)
+    
+    if odd_casa > 1.0:
+        prob_mercado = normalizar_prob_mercado(dados, key)
+        if prob_mercado > 0:
+            if l_id in [39, 140, 135]: # Top Ligas (Espanha, Inglaterra, Itália)
+                return (prob_nossa * 0.65) + (prob_mercado * 0.35)
+            elif l_id in [78, 61, 2, 3]: # Fortes
+                return (prob_nossa * 0.75) + (prob_mercado * 0.25)
+            elif l_id in [71, 72, 73]: # Médias (BR A, B, C)
+                return (prob_nossa * 0.80) + (prob_mercado * 0.20)
+            else: # Obscuras e Várzea
+                return (prob_nossa * 0.90) + (prob_mercado * 0.10)
     return prob_nossa
 
-# AUDITORIA FINAL: Critério de Kelly (Gestão de Stake Profissional)
+# AUDITORIA FINAL: Kelly Reduzido (15%)
 def calcular_kelly(prob_blended, odd):
     if odd <= 1.0 or prob_blended <= 0: return 0
     p = prob_blended / 100.0
     q = 1 - p
     b = odd - 1
     kelly_puro = (b * p - q) / b
-    return max(0, kelly_puro * 0.25) # 25% Fractional Kelly (Segurança)
+    return max(0, kelly_puro * 0.15) 
 
 def get_ev(dados, p_dict, key):
     casa = dados['odds'].get(key, 0)
     prob_blended = get_blended_prob(dados, p_dict, key)
     if casa <= 0 or prob_blended <= 0: return -100
     ev = ((prob_blended / 100.0) * casa - 1) * 100
-    if ev > 45 or (prob_blended < 35 and key in ["HOME", "AWAY"]): return -999 
+    # AUDITORIA FINAL: Relaxamento do EV para 60 (Já que temos o Kelly controlando o risco)
+    if ev > 60 or (prob_blended < 35 and key in ["HOME", "AWAY"]): return -999 
     return ev
+
+def avaliar_perfil_jogo(p_dict):
+    if p_dict["UNDER_25"]["prob"] > 60: return "🧱 JOGO TRAVADO"
+    elif p_dict["OVER_25"]["prob"] > 55: return "🧨 JOGO ABERTO"
+    else: return "⚖️ JOGO EQUILIBRADO"
 
 def renderizar_mercado(col, titulo, p_dict, key, odds_dict, dados, banca_atual):
     prob_blended = get_blended_prob(dados, p_dict, key)
     justa = 100 / prob_blended if prob_blended > 0 else 0
     casa = odds_dict.get(key, 0)
     ev = get_ev(dados, p_dict, key)
-    
     frac_kelly = calcular_kelly(prob_blended, casa)
     stake_sugerida = frac_kelly * banca_atual
     
-    icone_fogo = "🔥" if 15 < ev < 45 else ""
-    badge_html = f'<div style="color:#28a745; font-size:11px; font-weight:bold; margin-top:3px;">VALOR {icone_fogo} (+{ev:.1f}%)</div>' if 3 < ev < 45 else ''
-    
+    icone_fogo = "🔥" if 15 < ev < 60 else ""
+    badge_html = f'<div style="color:#28a745; font-size:11px; font-weight:bold; margin-top:3px;">VALOR {icone_fogo} (+{ev:.1f}%)</div>' if 3 < ev < 60 else ''
     kelly_html = f'<div style="color:#17a2b8; font-size:10px; margin-top:4px;">🎯 Stake: R$ {stake_sugerida:.2f} ({(frac_kelly*100):.1f}%)</div>' if frac_kelly > 0 and ev > 3 else ''
-    
-    estilo = "border:1px solid #28a745; background-color:#1a2b1f;" if 3 < ev < 45 else "border:1px solid #333; background-color:#111;"
-    html = f'<div style="{estilo} padding:8px; border-radius:6px; text-align:center; margin-bottom:8px;"><div style="font-size:10px; color:#aaa; margin-bottom:2px; font-weight:bold;">{titulo}</div><div style="font-size:16px; font-weight:bold; color:{"#28a745" if 3 < ev < 45 else "#fff"};">{prob_blended:.0f}%</div><div style="font-size:11px; color:#FFFFFF; margin-top:4px;">J: {justa:.2f} | O: {casa if casa > 0 else "-"}</div>{badge_html}{kelly_html}</div>'
+    estilo = "border:1px solid #28a745; background-color:#1a2b1f;" if 3 < ev < 60 else "border:1px solid #333; background-color:#111;"
+    html = f'<div style="{estilo} padding:8px; border-radius:6px; text-align:center; margin-bottom:8px;"><div style="font-size:10px; color:#aaa; margin-bottom:2px; font-weight:bold;">{titulo}</div><div style="font-size:16px; font-weight:bold; color:{"#28a745" if 3 < ev < 60 else "#fff"};">{prob_blended:.0f}%</div><div style="font-size:11px; color:#FFFFFF; margin-top:4px;">J: {justa:.2f} | O: {casa if casa > 0 else "-"}</div>{badge_html}{kelly_html}</div>'
     with col: st.markdown(html, unsafe_allow_html=True)
+
+# ==========================================
+# 4.1 MÓDULO DE INTELIGÊNCIA ARTIFICIAL
+# ==========================================
+def chamar_ia_fabrica(textos_jogos, modo="GOLS"):
+    foco = "mercados de Gols (Over/Under/BTTS)" if modo == "GOLS" else "mercados de Resultado (Match Odds)"
+    prompt_sistema = f"""Você é um Auditor Estatístico Sênior. Sua missão é auditar dados quantitativos de Poisson e validar as melhores oportunidades para {foco}.
+
+REGRAS:
+1. Justifique estritamente por métricas numéricas (EV e xG). Sem narrativas como "peso da camisa".
+2. Comece cada aprovação obrigatoriamente com o ID: [ID: XXXXXX].
+
+FORMATO OBRIGATÓRIO:
+TITULARES:
+1. [ID: XXXXXX] [NOME DO JOGO] 🎯 **[MERCADO | ODD: X.XX]**
+* A Lógica: [Explique cruzando xG e EV.]
+""" 
+    try:
+        return model_ia.generate_content(prompt_sistema + "\n\n📋 DADOS (MÉDIAS JÁ PENALIZADAS):\n\n" + textos_jogos).text
+    except Exception as e: return f"🚨 Erro na IA: {e}"
 
 # ==========================================
 # 5. INTERFACE COMPLETA 
@@ -300,7 +333,7 @@ with st.sidebar:
     lucro_total = 0.0
     for p in banco_local["picks"]:
         status = p.get("status", "Pendente")
-        stake_usada = p.get("stake", 1.0) # Usa a stake registrada
+        stake_usada = p.get("stake", 1.0) 
         if status == "Green": lucro_total += stake_usada * (p.get("odd", 1.0) - 1.0)
         elif status == "Red": lucro_total -= stake_usada
             
@@ -377,8 +410,10 @@ if agenda:
             if d and "erro" not in d:
                 m_h, m_a = calcular_matematica_quant(d); p = calcular_poisson(m_h, m_a)
                 if p:
+                    perfil = avaliar_perfil_jogo(p)
+                    cor_perfil = "#dc3545" if "ABERTO" in perfil else "#6c757d" if "TRAVADO" in perfil else "#ffc107"
                     st.markdown(f"""<div style='border:1px solid #333; border-radius:8px; padding:12px; background-color:#0e1117; margin-bottom:10px;'>
-                        <div style='display:flex; justify-content:space-between; color:#888; font-size:11px;'><span>🕒 {j['fixture']['date'][11:16]} • {j['league']['name']}</span></div>
+                        <div style='display:flex; justify-content:space-between; color:#888; font-size:11px;'><span>🕒 {j['fixture']['date'][11:16]} • {j['league']['name']}</span><span style='color:{cor_perfil}; font-weight:bold;'>{perfil}</span></div>
                         <div style='font-size:18px; font-weight:bold; color:white; margin: 8px 0;'>{j['teams']['home']['name']} <span style='color:#555; font-size:12px;'>vs</span> {j['teams']['away']['name']}</div>
                         """, unsafe_allow_html=True)
                     cols = st.columns(3); idx_col = 0
