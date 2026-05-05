@@ -237,7 +237,6 @@ def normalizar_prob_mercado(dados, key):
     if margem > 0: return ((1 / odd_alvo) / margem) * 100
     return (1 / odd_alvo) * 100
 
-# AUDITORIA FINAL: Blend Dinâmico baseado na Força da Liga
 def get_blended_prob(dados, p_dict, key):
     prob_nossa = p_dict[key]['prob']
     odd_casa = dados['odds'].get(key, 0)
@@ -246,32 +245,51 @@ def get_blended_prob(dados, p_dict, key):
     if odd_casa > 1.0:
         prob_mercado = normalizar_prob_mercado(dados, key)
         if prob_mercado > 0:
-            if l_id in [39, 140, 135]: # Top Ligas (Espanha, Inglaterra, Itália)
+            if l_id in [39, 140, 135]:
                 return (prob_nossa * 0.65) + (prob_mercado * 0.35)
-            elif l_id in [78, 61, 2, 3]: # Fortes
+            elif l_id in [78, 61, 2, 3]:
                 return (prob_nossa * 0.75) + (prob_mercado * 0.25)
-            elif l_id in [71, 72, 73]: # Médias (BR A, B, C)
+            elif l_id in [71, 72, 73]:
                 return (prob_nossa * 0.80) + (prob_mercado * 0.20)
-            else: # Obscuras e Várzea
+            else:
                 return (prob_nossa * 0.90) + (prob_mercado * 0.10)
     return prob_nossa
 
-# AUDITORIA FINAL: Kelly Reduzido (15%)
+# ================================
+# ALTERAÇÃO 1: KELLY SEGURO (Ajustado para 10%)
+# ================================
 def calcular_kelly(prob_blended, odd):
-    if odd <= 1.0 or prob_blended <= 0: return 0
+    if odd <= 1.0 or prob_blended <= 0:
+        return 0
+    
     p = prob_blended / 100.0
     q = 1 - p
     b = odd - 1
-    kelly_puro = (b * p - q) / b
-    return max(0, kelly_puro * 0.15) 
+    
+    if b <= 0:  # 🔒 proteção extra
+        return 0
 
+    kelly_puro = (b * p - q) / b
+    
+    # AJUSTE PRO: Reduzido para 10% para melhor proteção de banca no longo prazo
+    return max(0, kelly_puro * 0.10)
+
+
+# ================================
+# ALTERAÇÃO 2: EV MAIS SEGURO
+# ================================
 def get_ev(dados, p_dict, key):
     casa = dados['odds'].get(key, 0)
     prob_blended = get_blended_prob(dados, p_dict, key)
-    if casa <= 0 or prob_blended <= 0: return -100
+
+    if casa <= 1.0 or prob_blended <= 0:
+        return -100
+
     ev = ((prob_blended / 100.0) * casa - 1) * 100
-    # AUDITORIA FINAL: Relaxamento do EV para 60 (Já que temos o Kelly controlando o risco)
-    if ev > 60 or (prob_blended < 35 and key in ["HOME", "AWAY"]): return -999 
+
+    if ev > 60 or (prob_blended < 35 and key in ["HOME", "AWAY"]):
+        return -999
+
     return ev
 
 def avaliar_perfil_jogo(p_dict):
@@ -279,20 +297,41 @@ def avaliar_perfil_jogo(p_dict):
     elif p_dict["OVER_25"]["prob"] > 55: return "🧨 JOGO ABERTO"
     else: return "⚖️ JOGO EQUILIBRADO"
 
+
+# ================================
+# ALTERAÇÃO 3: STAKE PROTEGIDA
+# ================================
 def renderizar_mercado(col, titulo, p_dict, key, odds_dict, dados, banca_atual):
     prob_blended = get_blended_prob(dados, p_dict, key)
-    justa = 100 / prob_blended if prob_blended > 0 else 0
+    
     casa = odds_dict.get(key, 0)
     ev = get_ev(dados, p_dict, key)
+
+    justa = 100 / prob_blended if prob_blended > 0 else 0
+
     frac_kelly = calcular_kelly(prob_blended, casa)
-    stake_sugerida = frac_kelly * banca_atual
-    
+
+    # 🔒 proteção contra stake absurda
+    stake_sugerida = max(0, frac_kelly * banca_atual)
+
     icone_fogo = "🔥" if 15 < ev < 60 else ""
     badge_html = f'<div style="color:#28a745; font-size:11px; font-weight:bold; margin-top:3px;">VALOR {icone_fogo} (+{ev:.1f}%)</div>' if 3 < ev < 60 else ''
     kelly_html = f'<div style="color:#17a2b8; font-size:10px; margin-top:4px;">🎯 Stake: R$ {stake_sugerida:.2f} ({(frac_kelly*100):.1f}%)</div>' if frac_kelly > 0 and ev > 3 else ''
+
     estilo = "border:1px solid #28a745; background-color:#1a2b1f;" if 3 < ev < 60 else "border:1px solid #333; background-color:#111;"
-    html = f'<div style="{estilo} padding:8px; border-radius:6px; text-align:center; margin-bottom:8px;"><div style="font-size:10px; color:#aaa; margin-bottom:2px; font-weight:bold;">{titulo}</div><div style="font-size:16px; font-weight:bold; color:{"#28a745" if 3 < ev < 60 else "#fff"};">{prob_blended:.0f}%</div><div style="font-size:11px; color:#FFFFFF; margin-top:4px;">J: {justa:.2f} | O: {casa if casa > 0 else "-"}</div>{badge_html}{kelly_html}</div>'
-    with col: st.markdown(html, unsafe_allow_html=True)
+
+    html = f'''
+    <div style="{estilo} padding:8px; border-radius:6px; text-align:center; margin-bottom:8px;">
+        <div style="font-size:10px; color:#aaa; margin-bottom:2px; font-weight:bold;">{titulo}</div>
+        <div style="font-size:16px; font-weight:bold; color:{"#28a745" if 3 < ev < 60 else "#fff"};">{prob_blended:.0f}%</div>
+        <div style="font-size:11px; color:#FFFFFF; margin-top:4px;">J: {justa:.2f} | O: {casa if casa > 0 else "-"}</div>
+        {badge_html}
+        {kelly_html}
+    </div>
+    '''
+    
+    with col:
+        st.markdown(html, unsafe_allow_html=True)
 
 # ==========================================
 # 4.1 MÓDULO DE INTELIGÊNCIA ARTIFICIAL
@@ -398,6 +437,83 @@ if agenda:
         if st.button(f"🚀 2. Analisar Visíveis ({len(jogos_visiveis)})", type="primary", use_container_width=True): acao_analisar(jogos_visiveis, data_str)
     
     st.write("---")
+
+    # ==========================================================
+    # 5.1 INTELIGÊNCIA ARTIFICIAL (Auditoria Final)
+    # ==========================================================
+    st.write("### 🤖 Inteligência Artificial (Auditoria Final)")
+    
+    col_ia1, col_ia2 = st.columns(2)
+    
+    with col_ia1:
+        if st.button("🧠 Filtrar com IA (GOLS)", use_container_width=True):
+            textos = ""
+            for j in jogos_visiveis:
+                f_id = str(j['fixture']['id'])
+                d = banco_local["datas"][data_str]["stats"].get(f_id)
+                
+                if d and "erro" not in d:
+                    m_h, m_a = calcular_matematica_quant(d)
+                    p = calcular_poisson(m_h, m_a)
+                    
+                    if p:
+                        linha = f"""
+ID: {f_id}
+Jogo: {j['teams']['home']['name']} vs {j['teams']['away']['name']}
+xG Casa: {m_h:.2f}
+xG Fora: {m_a:.2f}
+Over 2.5 Prob: {p['OVER_25']['prob']:.1f}
+Over 2.5 EV: {get_ev(d, p, 'OVER_25'):.1f}
+BTTS Prob: {p['BTTS']['prob']:.1f}
+BTTS EV: {get_ev(d, p, 'BTTS'):.1f}
+"""
+                        textos += linha + "\n"
+            
+            with st.spinner("IA analisando gols..."):
+                resposta = chamar_ia_fabrica(textos, modo="GOLS")
+                st.session_state["ia_gols"] = resposta
+
+    with col_ia2:
+        if st.button("⚔️ Filtrar com IA (RESULTADO)", use_container_width=True):
+            textos = ""
+            for j in jogos_visiveis:
+                f_id = str(j['fixture']['id'])
+                d = banco_local["datas"][data_str]["stats"].get(f_id)
+                
+                if d and "erro" not in d:
+                    m_h, m_a = calcular_matematica_quant(d)
+                    p = calcular_poisson(m_h, m_a)
+                    
+                    if p:
+                        linha = f"""
+ID: {f_id}
+Jogo: {j['teams']['home']['name']} vs {j['teams']['away']['name']}
+xG Casa: {m_h:.2f}
+xG Fora: {m_a:.2f}
+Home Prob: {p['HOME']['prob']:.1f}
+Home EV: {get_ev(d, p, 'HOME'):.1f}
+Away Prob: {p['AWAY']['prob']:.1f}
+Away EV: {get_ev(d, p, 'AWAY'):.1f}
+"""
+                        textos += linha + "\n"
+            
+            with st.spinner("IA analisando resultados..."):
+                resposta = chamar_ia_fabrica(textos, modo="RESULTADO")
+                st.session_state["ia_resultado"] = resposta
+
+    if "ia_gols" in st.session_state:
+        st.markdown("#### 🔥 Sugestões IA - GOLS")
+        st.markdown(st.session_state["ia_gols"])
+        
+    if "ia_resultado" in st.session_state:
+        st.markdown("#### ⚔️ Sugestões IA - RESULTADO")
+        st.markdown(st.session_state["ia_resultado"])
+        
+    st.write("---")
+
+    # ==========================================================
+    # ABAS PRINCIPAIS DE CÁLCULO E RENDERIZAÇÃO
+    # ==========================================================
     tab_gols, tab_result = st.tabs(["🔥 MODO GOLS", "⚔️ MODO RESULTADO"])
     
     dict_m_gols = {"OVER_15": "Over 1.5", "OVER_25": "Over 2.5", "OVER_35": "Over 3.5", "UNDER_25": "Under 2.5", "UNDER_35": "Under 3.5", "BTTS": "Ambas Marcam"}
@@ -420,7 +536,22 @@ if agenda:
                     for m_key in dict_m_gols.keys(): 
                         renderizar_mercado(cols[idx_col % 3], dict_m_gols[m_key], p, m_key, d['odds'], d, banca_atual); idx_col += 1
                     
-                    with st.expander("💾 Salvar Pick (Com Kelly)"):
+                    # === INÍCIO: MENU EXPANDÍVEL RESTAURADO ===
+                    with st.expander("📊 Info Detalhada & Salvar Pick"):
+                        col_info_h, col_info_a = st.columns(2)
+                        with col_info_h:
+                            st.markdown(f"🏠 **{j['teams']['home']['name']}**")
+                            st.markdown(f"**Forma Recente:** {d['h']['forma']}")
+                            st.markdown(f"**xG Médio (Faz):** {d['h']['media_xg_f']:.2f}")
+                            st.markdown(f"**xG Médio (Sofre):** {d['h']['media_xg_s']:.2f}")
+                        with col_info_a:
+                            st.markdown(f"✈️ **{j['teams']['away']['name']}**")
+                            st.markdown(f"**Forma Recente:** {d['a']['forma']}")
+                            st.markdown(f"**xG Médio (Faz):** {d['a']['media_xg_f']:.2f}")
+                            st.markdown(f"**xG Médio (Sofre):** {d['a']['media_xg_s']:.2f}")
+                        
+                        st.write("---")
+                        
                         c_sel, c_stk, c_btn = st.columns([2, 1, 1])
                         mk_sel = c_sel.selectbox("Mercado:", list(dict_m_gols.keys()), format_func=lambda x: dict_m_gols[x], key=f"sg_{f_id}", label_visibility="collapsed")
                         stake_sug = calcular_kelly(get_blended_prob(d, p, mk_sel), d['odds'].get(mk_sel,0)) * banca_atual
@@ -428,6 +559,7 @@ if agenda:
                         if c_btn.button("✅ Salvar", key=f"bsg_{f_id}"):
                             banco_local["picks"].append({"data": data_str, "jogo": f"{j['teams']['home']['name']} v {j['teams']['away']['name']}", "mercado": dict_m_gols[mk_sel], "odd": d['odds'].get(mk_sel, 0), "prob": round(get_blended_prob(d, p, mk_sel),1), "ev": round(get_ev(d, p, mk_sel),1), "status": "Pendente", "stake": stk_input})
                             salvar_banco(banco_local); st.toast("Salvo!")
+                    # === FIM: MENU EXPANDÍVEL RESTAURADO ===
                     st.markdown("</div>", unsafe_allow_html=True)
 
     # ============================== ABA RESULTADO
@@ -445,7 +577,22 @@ if agenda:
                     for m_key in dict_m_res.keys(): 
                         renderizar_mercado(cols[idx_col % 3], dict_m_res[m_key], p, m_key, d['odds'], d, banca_atual); idx_col += 1
                     
-                    with st.expander("💾 Salvar Pick (Com Kelly)"):
+                    # === INÍCIO: MENU EXPANDÍVEL RESTAURADO ===
+                    with st.expander("📊 Info Detalhada & Salvar Pick"):
+                        col_info_h, col_info_a = st.columns(2)
+                        with col_info_h:
+                            st.markdown(f"🏠 **{j['teams']['home']['name']}**")
+                            st.markdown(f"**Forma Recente:** {d['h']['forma']}")
+                            st.markdown(f"**xG Médio (Faz):** {d['h']['media_xg_f']:.2f}")
+                            st.markdown(f"**xG Médio (Sofre):** {d['h']['media_xg_s']:.2f}")
+                        with col_info_a:
+                            st.markdown(f"✈️ **{j['teams']['away']['name']}**")
+                            st.markdown(f"**Forma Recente:** {d['a']['forma']}")
+                            st.markdown(f"**xG Médio (Faz):** {d['a']['media_xg_f']:.2f}")
+                            st.markdown(f"**xG Médio (Sofre):** {d['a']['media_xg_s']:.2f}")
+                        
+                        st.write("---")
+                        
                         c_sel, c_stk, c_btn = st.columns([2, 1, 1])
                         mk_sel = c_sel.selectbox("Mercado:", list(dict_m_res.keys()), format_func=lambda x: dict_m_res[x], key=f"sr_{f_id}", label_visibility="collapsed")
                         stake_sug = calcular_kelly(get_blended_prob(d, p, mk_sel), d['odds'].get(mk_sel,0)) * banca_atual
@@ -453,4 +600,5 @@ if agenda:
                         if c_btn.button("✅ Salvar", key=f"bsr_{f_id}"):
                             banco_local["picks"].append({"data": data_str, "jogo": f"{j['teams']['home']['name']} v {j['teams']['away']['name']}", "mercado": dict_m_res[mk_sel], "odd": d['odds'].get(mk_sel, 0), "prob": round(get_blended_prob(d, p, mk_sel),1), "ev": round(get_ev(d, p, mk_sel),1), "status": "Pendente", "stake": stk_input})
                             salvar_banco(banco_local); st.toast("Salvo!")
+                    # === FIM: MENU EXPANDÍVEL RESTAURADO ===
                     st.markdown("</div>", unsafe_allow_html=True)
