@@ -460,14 +460,17 @@ if agenda:
                     p = calcular_poisson(m_h, m_a)
                     
                     if p:
-                        # INSERINDO FORMA, MÉDIA REAL DE GOLS E ODDS
+                        # INSERINDO TODOS OS MERCADOS DE GOLS
                         linha = f"""
 ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
 - Forma Casa: {d['h']['forma']} | Gols Pró (Média): {d['h']['media_feita']:.2f} | xG Pró: {d['h']['media_xg_f']:.2f}
 - Forma Fora: {d['a']['forma']} | Gols Pró (Média): {d['a']['media_feita']:.2f} | xG Pró: {d['a']['media_xg_f']:.2f}
 - Projeção do Jogo (Poisson): Casa {m_h:.2f} vs Fora {m_a:.2f}
+- Over 1.5 -> Odd: {d['odds'].get('OVER_15', 0)} | Prob: {p['OVER_15']['prob']:.1f}% | EV: {get_ev(d, p, 'OVER_15'):.1f}%
+- Under 2.5 -> Odd: {d['odds'].get('UNDER_25', 0)} | Prob: {p['UNDER_25']['prob']:.1f}% | EV: {get_ev(d, p, 'UNDER_25'):.1f}%
 - Over 2.5 -> Odd: {d['odds'].get('OVER_25', 0)} | Prob: {p['OVER_25']['prob']:.1f}% | EV: {get_ev(d, p, 'OVER_25'):.1f}%
-- BTTS -> Odd: {d['odds'].get('BTTS', 0)} | Prob: {p['BTTS']['prob']:.1f}% | EV: {get_ev(d, p, 'BTTS'):.1f}%
+- Under 3.5 -> Odd: {d['odds'].get('UNDER_35', 0)} | Prob: {p['UNDER_35']['prob']:.1f}% | EV: {get_ev(d, p, 'UNDER_35'):.1f}%
+- BTTS (Ambas) -> Odd: {d['odds'].get('BTTS', 0)} | Prob: {p['BTTS']['prob']:.1f}% | EV: {get_ev(d, p, 'BTTS'):.1f}%
 """
                         textos += linha + "\n"
             
@@ -488,14 +491,17 @@ ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
                     p = calcular_poisson(m_h, m_a)
                     
                     if p:
-                        # INSERINDO FORMA, MÉDIA REAL DE GOLS E ODDS
+                        # INSERINDO TODOS OS MERCADOS DE RESULTADO
                         linha = f"""
 ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
 - Forma Casa: {d['h']['forma']} | Gols Pró: {d['h']['media_feita']:.2f} | Sofre: {d['h']['media_sofrida']:.2f} | xG Pró: {d['h']['media_xg_f']:.2f}
 - Forma Fora: {d['a']['forma']} | Gols Pró: {d['a']['media_feita']:.2f} | Sofre: {d['a']['media_sofrida']:.2f} | xG Pró: {d['a']['media_xg_f']:.2f}
 - Projeção do Jogo (Poisson): Casa {m_h:.2f} vs Fora {m_a:.2f}
 - Vitória Casa -> Odd: {d['odds'].get('HOME', 0)} | Prob: {p['HOME']['prob']:.1f}% | EV: {get_ev(d, p, 'HOME'):.1f}%
+- Empate -> Odd: {d['odds'].get('DRAW', 0)} | Prob: {p['DRAW']['prob']:.1f}% | EV: {get_ev(d, p, 'DRAW'):.1f}%
 - Vitória Fora -> Odd: {d['odds'].get('AWAY', 0)} | Prob: {p['AWAY']['prob']:.1f}% | EV: {get_ev(d, p, 'AWAY'):.1f}%
+- Dupla Casa (1X) -> Odd: {d['odds'].get('1X', 0)} | Prob: {p['1X']['prob']:.1f}% | EV: {get_ev(d, p, '1X'):.1f}%
+- Dupla Fora (X2) -> Odd: {d['odds'].get('X2', 0)} | Prob: {p['X2']['prob']:.1f}% | EV: {get_ev(d, p, 'X2'):.1f}%
 """
                         textos += linha + "\n"
             
