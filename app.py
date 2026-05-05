@@ -338,16 +338,18 @@ def renderizar_mercado(col, titulo, p_dict, key, odds_dict, dados, banca_atual):
 # ==========================================
 def chamar_ia_fabrica(textos_jogos, modo="GOLS"):
     foco = "mercados de Gols (Over/Under/BTTS)" if modo == "GOLS" else "mercados de Resultado (Match Odds)"
-    prompt_sistema = f"""Você é um Auditor Estatístico Sênior. Sua missão é auditar dados quantitativos de Poisson e validar as melhores oportunidades para {foco}.
+    prompt_sistema = f"""Você é um Analista Quantitativo Sênior. Sua missão é cruzar modelos matemáticos (xG, Poisson e EV) com o Momento Recente (Forma) das equipes para validar as melhores oportunidades em {foco}.
 
-REGRAS:
-1. Justifique estritamente por métricas numéricas (EV e xG). Sem narrativas como "peso da camisa".
-2. Comece cada aprovação obrigatoriamente com o ID: [ID: XXXXXX].
+REGRAS DE OURO:
+1. ANÁLISE MISTA: A decisão DEVE ser baseada em EV positivo (acima de 3.0). Use a "Forma" (ex: 🟩 vitórias, 🟥 derrotas) e os "Gols Pró/Sofridos" apenas para validar se o time sustenta a matemática na vida real.
+2. ZERO ACHISMO: É estritamente proibido criar narrativas como "peso da camisa", "tradição", "precisa vencer". Restrinja-se aos números fornecidos.
+3. ALERTA DE VARIAÇÃO: Se um time tem xG alto, mas a Forma é terrível (ex: 🟥🟥🟥) ou faz poucos gols reais, alerte sobre a ineficiência.
 
-FORMATO OBRIGATÓRIO:
-TITULARES:
-1. [ID: XXXXXX] [NOME DO JOGO] 🎯 **[MERCADO | ODD: X.XX]**
-* A Lógica: [Explique cruzando xG e EV.]
+FORMATO OBRIGATÓRIO (retorne apenas as aprovações):
+💎 APROVADOS PARA INVESTIMENTO:
+1. [ID: XXXXXX] [NOME DO JOGO] 🎯 **[MERCADO SUGERIDO]**
+* 📊 **Lógica Quantitativa:** [Justifique cruzando o EV com a Forma Recente e a diferença entre xG e Gols Reais.]
+* ⚠️ **Ponto de Atenção:** [Destaque um risco real baseado estritamente nos dados de Gols/xG/Forma.]
 """ 
     try:
         return model_ia.generate_content(prompt_sistema + "\n\n📋 DADOS (MÉDIAS JÁ PENALIZADAS):\n\n" + textos_jogos).text
@@ -445,6 +447,7 @@ if agenda:
     
     col_ia1, col_ia2 = st.columns(2)
     
+    # --- MODO GOLS ---
     with col_ia1:
         if st.button("🧠 Filtrar com IA (GOLS)", use_container_width=True):
             textos = ""
@@ -457,22 +460,22 @@ if agenda:
                     p = calcular_poisson(m_h, m_a)
                     
                     if p:
+                        # INSERINDO FORMA, MÉDIA REAL DE GOLS E ODDS
                         linha = f"""
-ID: {f_id}
-Jogo: {j['teams']['home']['name']} vs {j['teams']['away']['name']}
-xG Casa: {m_h:.2f}
-xG Fora: {m_a:.2f}
-Over 2.5 Prob: {p['OVER_25']['prob']:.1f}
-Over 2.5 EV: {get_ev(d, p, 'OVER_25'):.1f}
-BTTS Prob: {p['BTTS']['prob']:.1f}
-BTTS EV: {get_ev(d, p, 'BTTS'):.1f}
+ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
+- Forma Casa: {d['h']['forma']} | Gols Pró (Média): {d['h']['media_feita']:.2f} | xG Pró: {d['h']['media_xg_f']:.2f}
+- Forma Fora: {d['a']['forma']} | Gols Pró (Média): {d['a']['media_feita']:.2f} | xG Pró: {d['a']['media_xg_f']:.2f}
+- Projeção do Jogo (Poisson): Casa {m_h:.2f} vs Fora {m_a:.2f}
+- Over 2.5 -> Odd: {d['odds'].get('OVER_25', 0)} | Prob: {p['OVER_25']['prob']:.1f}% | EV: {get_ev(d, p, 'OVER_25'):.1f}%
+- BTTS -> Odd: {d['odds'].get('BTTS', 0)} | Prob: {p['BTTS']['prob']:.1f}% | EV: {get_ev(d, p, 'BTTS'):.1f}%
 """
                         textos += linha + "\n"
             
-            with st.spinner("IA analisando gols..."):
+            with st.spinner("IA cruzando Forma e xG para Gols..."):
                 resposta = chamar_ia_fabrica(textos, modo="GOLS")
                 st.session_state["ia_gols"] = resposta
 
+    # --- MODO RESULTADO ---
     with col_ia2:
         if st.button("⚔️ Filtrar com IA (RESULTADO)", use_container_width=True):
             textos = ""
@@ -485,31 +488,20 @@ BTTS EV: {get_ev(d, p, 'BTTS'):.1f}
                     p = calcular_poisson(m_h, m_a)
                     
                     if p:
+                        # INSERINDO FORMA, MÉDIA REAL DE GOLS E ODDS
                         linha = f"""
-ID: {f_id}
-Jogo: {j['teams']['home']['name']} vs {j['teams']['away']['name']}
-xG Casa: {m_h:.2f}
-xG Fora: {m_a:.2f}
-Home Prob: {p['HOME']['prob']:.1f}
-Home EV: {get_ev(d, p, 'HOME'):.1f}
-Away Prob: {p['AWAY']['prob']:.1f}
-Away EV: {get_ev(d, p, 'AWAY'):.1f}
+ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
+- Forma Casa: {d['h']['forma']} | Gols Pró: {d['h']['media_feita']:.2f} | Sofre: {d['h']['media_sofrida']:.2f} | xG Pró: {d['h']['media_xg_f']:.2f}
+- Forma Fora: {d['a']['forma']} | Gols Pró: {d['a']['media_feita']:.2f} | Sofre: {d['a']['media_sofrida']:.2f} | xG Pró: {d['a']['media_xg_f']:.2f}
+- Projeção do Jogo (Poisson): Casa {m_h:.2f} vs Fora {m_a:.2f}
+- Vitória Casa -> Odd: {d['odds'].get('HOME', 0)} | Prob: {p['HOME']['prob']:.1f}% | EV: {get_ev(d, p, 'HOME'):.1f}%
+- Vitória Fora -> Odd: {d['odds'].get('AWAY', 0)} | Prob: {p['AWAY']['prob']:.1f}% | EV: {get_ev(d, p, 'AWAY'):.1f}%
 """
                         textos += linha + "\n"
             
-            with st.spinner("IA analisando resultados..."):
+            with st.spinner("IA cruzando Forma e xG para Resultados..."):
                 resposta = chamar_ia_fabrica(textos, modo="RESULTADO")
                 st.session_state["ia_resultado"] = resposta
-
-    if "ia_gols" in st.session_state:
-        st.markdown("#### 🔥 Sugestões IA - GOLS")
-        st.markdown(st.session_state["ia_gols"])
-        
-    if "ia_resultado" in st.session_state:
-        st.markdown("#### ⚔️ Sugestões IA - RESULTADO")
-        st.markdown(st.session_state["ia_resultado"])
-        
-    st.write("---")
 
     # ==========================================================
     # ABAS PRINCIPAIS DE CÁLCULO E RENDERIZAÇÃO
