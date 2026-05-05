@@ -341,16 +341,17 @@ def chamar_ia_fabrica(textos_jogos, modo="GOLS"):
     prompt_sistema = f"""Você é um Analista Quantitativo Sênior. Sua missão é cruzar modelos matemáticos (xG, Poisson e EV) com o Momento Recente (Forma) das equipes para validar as melhores oportunidades em {foco}.
 
 REGRAS DE OURO:
-1. ANÁLISE MISTA: A decisão DEVE ser baseada em EV positivo (acima de 3.0). Use a "Forma" (ex: 🟩 vitórias, 🟥 derrotas) e os "Gols Pró/Sofridos" apenas para validar se o time sustenta a matemática na vida real.
-2. ZERO ACHISMO: É estritamente proibido criar narrativas como "peso da camisa", "tradição", "precisa vencer". Restrinja-se aos números fornecidos.
-3. ALERTA DE VARIAÇÃO: Se um time tem xG alto, mas a Forma é terrível (ex: 🟥🟥🟥) ou faz poucos gols reais, alerte sobre a ineficiência.
+1. ANÁLISE MISTA: Busque oportunidades com EV entre 3.0 e 20.0. (ATENÇÃO: Seja EXTREMAMENTE cético com EVs acima de 20%, especialmente em mercados de "Under", pois geralmente indicam distorções do modelo de Poisson em ligas de poucos gols. Se aprovar, exija uma justificativa de Forma perfeita).
+2. DIVERSIFICAÇÃO OBRIGATÓRIA: Não me entregue um relatório contendo apenas um tipo de mercado. Se a lista for de Gols, esforce-se para encontrar e validar também as melhores oportunidades de Over 1.5, Over 2.5 e BTTS, desde que o EV seja positivo e a Forma sustente.
+3. ZERO ACHISMO: Proibido narrativas como "peso da camisa". Use apenas os números.
+4. ALERTA DE VARIAÇÃO: Se o EV for alto, mas a Forma for contrária aos gols esperados, alerte sobre a ineficiência.
 
 FORMATO OBRIGATÓRIO (retorne apenas as aprovações):
 💎 APROVADOS PARA INVESTIMENTO:
 1. [ID: XXXXXX] [NOME DO JOGO] 🎯 **[MERCADO SUGERIDO]**
 * 📊 **Lógica Quantitativa:** [Justifique cruzando o EV com a Forma Recente e a diferença entre xG e Gols Reais.]
 * ⚠️ **Ponto de Atenção:** [Destaque um risco real baseado estritamente nos dados de Gols/xG/Forma.]
-""" 
+"""
     try:
         return model_ia.generate_content(prompt_sistema + "\n\n📋 DADOS (MÉDIAS JÁ PENALIZADAS):\n\n" + textos_jogos).text
     except Exception as e: return f"🚨 Erro na IA: {e}"
