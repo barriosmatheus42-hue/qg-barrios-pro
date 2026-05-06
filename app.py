@@ -337,171 +337,89 @@ def renderizar_mercado(col, titulo, p_dict, key, odds_dict, dados, banca_atual):
 # 4.1 MÓDULO DE INTELIGÊNCIA ARTIFICIAL
 # ==========================================
 def chamar_ia_fabrica(textos_jogos, modo="GOLS"):
-    foco = "mercados de Gols (Over/Under/BTTS)" if modo == "GOLS" else "mercados de Resultado (Match Odds)"
-    prompt_sistema = f"""Você é um Auditor Quantitativo Profissional especializado em apostas esportivas no mercado de gols.
+    if modo == "GOLS":
+        prompt_sistema = """Você é um Auditor Quantitativo Profissional especializado em apostas esportivas no mercado de gols.
 
 Seu objetivo NÃO é listar muitas apostas, e sim identificar APENAS oportunidades com vantagem estatística real (value bets), priorizando qualidade sobre quantidade.
 
 ---
-
 ## 🎯 OBJETIVO
-
 Encontrar apostas com:
-
 - Valor real (probabilidade > probabilidade implícita da odd)
 - Coerência estatística (xG compatível com o mercado)
 - Boa relação risco/retorno
-- Odds que permitam lucratividade sustentável
 
 ---
-
-## ⚙️ REGRAS GERAIS
-
-1. NÃO existe número mínimo ou máximo de apostas
-→ Se não houver valor, retorne vazio
-
-2. NÃO forçar mercados
-→ A IA deve seguir o valor, não equilibrar artificialmente
-
-3. Evitar concentração excessiva em um único mercado
-→ Se houver muitos UNDERs, aplicar penalização de diversidade
+## ⚙️ REGRAS GERAIS E RÉGUA ASSIMÉTRICA DE EV (CRÍTICO)
+O mercado costuma inflacionar odds de Under e esmagar odds de Over. Portanto, aplique a seguinte régua:
+1. Para aprovar UNDER: Exija um EV alto (ex: > 10%) E um xG Total projetado baixíssimo. Seja extremamente rigoroso com o contexto.
+2. Para aprovar OVER ou BTTS: Aceite EVs menores (ex: > 3%). Se a odd tiver valor e o xG confirmar a tendência ofensiva das equipes, pode aprovar.
+3. NÃO force mercados. Apenas siga os números.
 
 ---
-
 ## 💰 FILTRO DE ODDS (CRÍTICO)
-
-- Odds < 1.70 → DESCARTAR
-- Odds 1.70–1.79 → FORTE penalização
-- Odds ≥ 1.80 → padrão mínimo aceitável
-- Odds ≥ 1.90 → IDEAL (bônus no score)
-- Odds ≥ 2.10 → ALTO VALOR (se coerente)
-
-⚠️ A IA deve priorizar odds que permitam menor necessidade de acerto.
+- Odds < 1.70 → DESCARTAR SUMARIAMENTE (Proteção de banca para taxa de acerto)
+- Odds 1.70–1.79 → Aceitável se o EV e xG forem perfeitos
+- Odds ≥ 1.80 → Padrão mínimo ideal
+- Odds ≥ 2.00 → ALTO VALOR (se coerente)
 
 ---
-
 ## 📊 CRITÉRIOS DE ANÁLISE
-
-Cada aposta deve ser avaliada com base em:
-
-### 1. VALOR (CORE)
-- EV (valor esperado)
-- Diferença entre probabilidade real vs implícita
-
-### 2. MODELAGEM
-- xG casa
-- xG fora
-- xG total
-- Coerência com o mercado escolhido
-
-### 3. PROBABILIDADE
-- Probabilidade real estimada
-- Compatibilidade com a odd
-
-### 4. KELLY
-- Usar como indicador de vantagem
-- Kelly muito alto (>35%) = possível distorção → penalizar levemente
-
-### 5. CONTEXTO
-- Forma recente (gols e consistência)
-- Padrão ofensivo/defensivo
-- Possível variância
+1. VALOR (CORE): EV (valor esperado) e Diferença entre probabilidade real vs implícita.
+2. MODELAGEM: xG casa, xG fora, xG total e Coerência.
+3. KELLY: Usar como indicador de vantagem. Kelly > 20% = FORTE PENALIZAÇÃO (risco de anomalia no modelo). Se for muito alto, rejeite ou exija cautela extrema.
+4. CONTEXTO: Forma recente e variância.
 
 ---
-
 ## 🧮 SCORE DE QUALIDADE (0–100)
-
-Baseado em:
-
-- + Valor (EV + Prob vs Odd)
-- + Coerência xG
-- + Qualidade da odd
-- + Estabilidade dos dados
-- - Penalizações (inconsistência, risco, distorções)
-
-### Penalizações importantes:
-
-- Odd baixa (<1.80)
-- xG incompatível com o mercado
-- Probabilidade inflada (ex: 85% com xG alto)
-- Kelly exagerado
-- Mercado saturado (ex: muitos unders)
+Baseado em: + Valor (EV), + Coerência xG, + Qualidade da odd, + Estabilidade.
+Penalizações: Odd < 1.70 (Descarte automático), xG incompatível, Probabilidade inflada, Kelly > 20%.
+✅ FILTRO FINAL: Score mínimo: 75 | Alta qualidade: ≥ 80 | Elite: ≥ 85
 
 ---
-
-## 🚫 REGRAS DE CORTE
-
-DESCARTAR automaticamente:
-
-- EV < 3%
-- Kelly ≤ 0
-- Odds < 1.70
-- xG incoerente com o mercado
-
----
-
-## ✅ FILTRO FINAL
-
-- Score mínimo: 75
-- Alta qualidade: ≥ 80
-- Elite: ≥ 85
-
----
-
 ## 🎯 PERFIL DA APOSTA
-
 Classificar cada pick:
-
 - Conservador → prob alta + odd menor
 - Equilibrado → boa relação risco/retorno
 - Agressivo → odd alta + valor identificado
 
 ---
-
-## 📤 FORMATO DE SAÍDA (OBRIGATÓRIO)
-
-[ID: XXXX]  
-Jogo: Time A vs Time B  
-Mercado: (Over / Under / BTTS)  
-Odd: X.XX  
+## 📤 FORMATO DE SAÍDA (OBRIGATÓRIO PARA CADA PICK APROVADA)
+[ID: XXXX]
+Jogo: Time A vs Time B
+Mercado: (Over / Under / BTTS)
+Odd: X.XX
 Perfil: (Conservador / Equilibrado / Agressivo)
 
 📊 Dados:
-Probabilidade: XX%  
-EV: +X%  
-xG Casa: X.XX  
-xG Fora: X.XX  
-xG Total: X.XX  
-Kelly: XX%  
-Score: XX/100  
+Probabilidade: XX%
+EV: +X%
+xG Casa: X.XX | xG Fora: X.XX | xG Total: X.XX
+Kelly: XX%
+Score: XX/100
 
 🧠 Justificativa:
-Explicação objetiva baseada em:
-- Valor vs odd
-- Coerência do xG
-- Leitura do jogo
+Explicação objetiva baseada em: Valor vs odd, Coerência do xG e a Régua Assimétrica.
 
 ⚠️ Risco:
-Principal fator que pode quebrar a aposta
+Principal fator que pode quebrar a aposta.
+"""
+    else:
+        prompt_sistema = """Você é um Analista Quantitativo Sênior. Sua missão é cruzar modelos matemáticos (xG, Poisson e EV) com o Momento Recente (Forma) das equipes para validar as melhores oportunidades em mercados de Resultado (Match Odds).
 
----
+REGRAS DE OURO:
+1. ANÁLISE MISTA: A decisão DEVE ser baseada em EV positivo (acima de 3.0). Use a "Forma" e os "Gols Pró/Sofridos" apenas para validar se o time sustenta a matemática.
+2. ZERO ACHISMO: Proibido criar narrativas como "peso da camisa".
+3. ALERTA DE VARIAÇÃO: Se a Forma for terrível, mas o modelo apontar valor, alerte sobre a ineficiência.
 
-## 🧠 COMPORTAMENTO ESPERADO
-
-- Pensar como gestor de banca, não como apostador recreativo
-- Buscar longo prazo, não acerto imediato
-- Evitar armadilhas de odds baixas
-- Não confiar cegamente no EV — cruzar com xG e contexto
-- Ser seletivo e disciplinado
-
----
-
-## 🎯 OBJETIVO FINAL
-
-Gerar uma lista enxuta, confiável e com valor real, onde o usuário possa operar com consistência e confiança no longo prazo.
+FORMATO OBRIGATÓRIO (retorne apenas as aprovações):
+💎 APROVADOS PARA INVESTIMENTO:
+1. [ID: XXXXXX] [NOME DO JOGO] 🎯 **[MERCADO SUGERIDO]**
+* 📊 **Lógica Quantitativa:** [Justifique o cruzamento]
+* ⚠️ **Ponto de Atenção:** [Destaque um risco real]
 """
     try:
-        return model_ia.generate_content(prompt_sistema + "\n\n📋 DADOS (MÉDIAS JÁ PENALIZADAS):\n\n" + textos_jogos).text
+        return model_ia.generate_content(prompt_sistema + "\n\n📋 DADOS PARA ANÁLISE:\n\n" + textos_jogos).text
     except Exception as e: return f"🚨 Erro na IA: {e}"
 
 # ==========================================
@@ -609,21 +527,29 @@ if agenda:
                     p = calcular_poisson(m_h, m_a)
                     
                     if p:
-                        # INSERINDO TODOS OS MERCADOS DE GOLS
+                        xg_total = m_h + m_a
+                        # Calculando o Kelly para enviar à IA (multiplicado por 100 para percentual legível)
+                        k_o15 = calcular_kelly(get_blended_prob(d, p, 'OVER_15'), d['odds'].get('OVER_15', 0)) * 100
+                        k_u25 = calcular_kelly(get_blended_prob(d, p, 'UNDER_25'), d['odds'].get('UNDER_25', 0)) * 100
+                        k_o25 = calcular_kelly(get_blended_prob(d, p, 'OVER_25'), d['odds'].get('OVER_25', 0)) * 100
+                        k_u35 = calcular_kelly(get_blended_prob(d, p, 'UNDER_35'), d['odds'].get('UNDER_35', 0)) * 100
+                        k_btts = calcular_kelly(get_blended_prob(d, p, 'BTTS'), d['odds'].get('BTTS', 0)) * 100
+
+                        # INSERINDO TODOS OS DADOS COM O XG TOTAL E O KELLY ATUALIZADOS
                         linha = f"""
 ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
-- Forma Casa: {d['h']['forma']} | Gols Pró (Média): {d['h']['media_feita']:.2f} | xG Pró: {d['h']['media_xg_f']:.2f}
-- Forma Fora: {d['a']['forma']} | Gols Pró (Média): {d['a']['media_feita']:.2f} | xG Pró: {d['a']['media_xg_f']:.2f}
-- Projeção do Jogo (Poisson): Casa {m_h:.2f} vs Fora {m_a:.2f}
-- Over 1.5 -> Odd: {d['odds'].get('OVER_15', 0)} | Prob: {p['OVER_15']['prob']:.1f}% | EV: {get_ev(d, p, 'OVER_15'):.1f}%
-- Under 2.5 -> Odd: {d['odds'].get('UNDER_25', 0)} | Prob: {p['UNDER_25']['prob']:.1f}% | EV: {get_ev(d, p, 'UNDER_25'):.1f}%
-- Over 2.5 -> Odd: {d['odds'].get('OVER_25', 0)} | Prob: {p['OVER_25']['prob']:.1f}% | EV: {get_ev(d, p, 'OVER_25'):.1f}%
-- Under 3.5 -> Odd: {d['odds'].get('UNDER_35', 0)} | Prob: {p['UNDER_35']['prob']:.1f}% | EV: {get_ev(d, p, 'UNDER_35'):.1f}%
-- BTTS (Ambas) -> Odd: {d['odds'].get('BTTS', 0)} | Prob: {p['BTTS']['prob']:.1f}% | EV: {get_ev(d, p, 'BTTS'):.1f}%
+- Forma Casa: {d['h']['forma']} | Gols Pró: {d['h']['media_feita']:.2f} | xG Casa: {m_h:.2f}
+- Forma Fora: {d['a']['forma']} | Gols Pró: {d['a']['media_feita']:.2f} | xG Fora: {m_a:.2f}
+- xG Total Projetado: {xg_total:.2f}
+- Over 1.5 -> Odd: {d['odds'].get('OVER_15', 0)} | Prob: {p['OVER_15']['prob']:.1f}% | EV: {get_ev(d, p, 'OVER_15'):.1f}% | Kelly: {k_o15:.1f}%
+- Under 2.5 -> Odd: {d['odds'].get('UNDER_25', 0)} | Prob: {p['UNDER_25']['prob']:.1f}% | EV: {get_ev(d, p, 'UNDER_25'):.1f}% | Kelly: {k_u25:.1f}%
+- Over 2.5 -> Odd: {d['odds'].get('OVER_25', 0)} | Prob: {p['OVER_25']['prob']:.1f}% | EV: {get_ev(d, p, 'OVER_25'):.1f}% | Kelly: {k_o25:.1f}%
+- Under 3.5 -> Odd: {d['odds'].get('UNDER_35', 0)} | Prob: {p['UNDER_35']['prob']:.1f}% | EV: {get_ev(d, p, 'UNDER_35'):.1f}% | Kelly: {k_u35:.1f}%
+- BTTS (Ambas) -> Odd: {d['odds'].get('BTTS', 0)} | Prob: {p['BTTS']['prob']:.1f}% | EV: {get_ev(d, p, 'BTTS'):.1f}% | Kelly: {k_btts:.1f}%
 """
                         textos += linha + "\n"
             
-            with st.spinner("IA cruzando Forma e xG para Gols..."):
+            with st.spinner("IA aplicando crivo de Auditoria Avançada (Gols)..."):
                 resposta = chamar_ia_fabrica(textos, modo="GOLS")
                 st.session_state["ia_gols"] = resposta
 
@@ -658,7 +584,7 @@ ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
                 resposta = chamar_ia_fabrica(textos, modo="RESULTADO")
                 st.session_state["ia_resultado"] = resposta
 
-# ==========================================================
+    # ==========================================================
     # 👇 PARA MOSTRAR OS RESULTADOS 👇
     # ==========================================================
     st.write("---")
