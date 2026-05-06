@@ -338,105 +338,167 @@ def renderizar_mercado(col, titulo, p_dict, key, odds_dict, dados, banca_atual):
 # ==========================================
 def chamar_ia_fabrica(textos_jogos, modo="GOLS"):
     foco = "mercados de Gols (Over/Under/BTTS)" if modo == "GOLS" else "mercados de Resultado (Match Odds)"
-    prompt_sistema = f"""Você é um Auditor Quantitativo Profissional especializado em apostas esportivas.
+    prompt_sistema = f"""Você é um Auditor Quantitativo Profissional especializado em apostas esportivas no mercado de gols.
 
-Sua função é encontrar apostas com vantagem real, mas também identificar distorções e excesso de confiança nos dados.
-
----
-
-🎯 OBJETIVO:
-
-Selecionar apenas apostas de alta qualidade, evitando armadilhas estatísticas e falsas vantagens.
+Seu objetivo NÃO é listar muitas apostas, e sim identificar APENAS oportunidades com vantagem estatística real (value bets), priorizando qualidade sobre quantidade.
 
 ---
 
-📊 CRITÉRIOS DE SCORE (0–100):
+## 🎯 OBJETIVO
 
-1. EV (25%)
-2. Probabilidade vs Odd (25%)
-3. xG / cenário (20%)
-4. Kelly (15%)
-5. Consistência / risco (15%)
+Encontrar apostas com:
 
----
-
-🚨 REGRAS AVANÇADAS (OBRIGATÓRIO):
-
-1. TRAVA DE REALISMO:
-Se probabilidade ≥ 75%:
-→ verificar se o xG sustenta isso claramente
-→ se xG total estiver no limite do mercado, penalizar
+- Valor real (probabilidade > probabilidade implícita da odd)
+- Coerência estatística (xG compatível com o mercado)
+- Boa relação risco/retorno
+- Odds que permitam lucratividade sustentável
 
 ---
 
-2. TRAVA DE KELLY:
-Se Kelly > 25%:
-→ considerar possível distorção
-→ penalizar score
-→ só manter se xG for extremamente coerente
+## ⚙️ REGRAS GERAIS
+
+1. NÃO existe número mínimo ou máximo de apostas
+→ Se não houver valor, retorne vazio
+
+2. NÃO forçar mercados
+→ A IA deve seguir o valor, não equilibrar artificialmente
+
+3. Evitar concentração excessiva em um único mercado
+→ Se houver muitos UNDERs, aplicar penalização de diversidade
 
 ---
 
-3. TRAVA DE SATURAÇÃO:
-Se houver muitos jogos do mesmo mercado:
-→ manter apenas os melhores (maior equilíbrio entre EV + xG + risco)
-→ eliminar entradas redundantes
+## 💰 FILTRO DE ODDS (CRÍTICO)
+
+- Odds < 1.70 → DESCARTAR
+- Odds 1.70–1.79 → FORTE penalização
+- Odds ≥ 1.80 → padrão mínimo aceitável
+- Odds ≥ 1.90 → IDEAL (bônus no score)
+- Odds ≥ 2.10 → ALTO VALOR (se coerente)
+
+⚠️ A IA deve priorizar odds que permitam menor necessidade de acerto.
 
 ---
 
-4. TRAVA DE LIMITE DE xG:
+## 📊 CRITÉRIOS DE ANÁLISE
 
-Para UNDER 2.5:
-→ xG total > 2.4 = penalizar
-→ xG total > 2.6 = forte risco
+Cada aposta deve ser avaliada com base em:
 
-Para OVER 2.5:
-→ xG total < 2.4 = penalizar
+### 1. VALOR (CORE)
+- EV (valor esperado)
+- Diferença entre probabilidade real vs implícita
+
+### 2. MODELAGEM
+- xG casa
+- xG fora
+- xG total
+- Coerência com o mercado escolhido
+
+### 3. PROBABILIDADE
+- Probabilidade real estimada
+- Compatibilidade com a odd
+
+### 4. KELLY
+- Usar como indicador de vantagem
+- Kelly muito alto (>35%) = possível distorção → penalizar levemente
+
+### 5. CONTEXTO
+- Forma recente (gols e consistência)
+- Padrão ofensivo/defensivo
+- Possível variância
 
 ---
 
-🚫 REGRAS DE CORTE:
+## 🧮 SCORE DE QUALIDADE (0–100)
 
-- Kelly ≤ 0 → DESCARTAR
-- EV < 3% → DESCARTAR
-- Odds < 1.60 → exigir dominância absurda
-- xG conflitante → DESCARTAR
+Baseado em:
+
+- + Valor (EV + Prob vs Odd)
+- + Coerência xG
+- + Qualidade da odd
+- + Estabilidade dos dados
+- - Penalizações (inconsistência, risco, distorções)
+
+### Penalizações importantes:
+
+- Odd baixa (<1.80)
+- xG incompatível com o mercado
+- Probabilidade inflada (ex: 85% com xG alto)
+- Kelly exagerado
+- Mercado saturado (ex: muitos unders)
 
 ---
 
-📦 FORMATO:
+## 🚫 REGRAS DE CORTE
 
-💎 APROVADOS:
+DESCARTAR automaticamente:
 
-[ID: XXXXX]  
-Jogo: TIME A vs TIME B  
-Mercado: XXXXX  
+- EV < 3%
+- Kelly ≤ 0
+- Odds < 1.70
+- xG incoerente com o mercado
+
+---
+
+## ✅ FILTRO FINAL
+
+- Score mínimo: 75
+- Alta qualidade: ≥ 80
+- Elite: ≥ 85
+
+---
+
+## 🎯 PERFIL DA APOSTA
+
+Classificar cada pick:
+
+- Conservador → prob alta + odd menor
+- Equilibrado → boa relação risco/retorno
+- Agressivo → odd alta + valor identificado
+
+---
+
+## 📤 FORMATO DE SAÍDA (OBRIGATÓRIO)
+
+[ID: XXXX]  
+Jogo: Time A vs Time B  
+Mercado: (Over / Under / BTTS)  
 Odd: X.XX  
+Perfil: (Conservador / Equilibrado / Agressivo)
 
 📊 Dados:
-- Probabilidade: XX%
-- EV: +X.X%
-- xG total: X.XX
-- Kelly: X.X%
-- SCORE: XX/100
+Probabilidade: XX%  
+EV: +X%  
+xG Casa: X.XX  
+xG Fora: X.XX  
+xG Total: X.XX  
+Kelly: XX%  
+Score: XX/100  
 
 🧠 Justificativa:
-Explicar o valor REAL (sem exagero)
+Explicação objetiva baseada em:
+- Valor vs odd
+- Coerência do xG
+- Leitura do jogo
 
 ⚠️ Risco:
-Apontar o principal risco
+Principal fator que pode quebrar a aposta
 
 ---
 
-📋 FILTRO FINAL:
+## 🧠 COMPORTAMENTO ESPERADO
 
-→ Mostrar apenas SCORE ≥ 78  
-→ Prioridade ≥ 82  
+- Pensar como gestor de banca, não como apostador recreativo
+- Buscar longo prazo, não acerto imediato
+- Evitar armadilhas de odds baixas
+- Não confiar cegamente no EV — cruzar com xG e contexto
+- Ser seletivo e disciplinado
 
 ---
 
-📥 DADOS:
-(INSERIR DADOS)
+## 🎯 OBJETIVO FINAL
+
+Gerar uma lista enxuta, confiável e com valor real, onde o usuário possa operar com consistência e confiança no longo prazo.
 """
     try:
         return model_ia.generate_content(prompt_sistema + "\n\n📋 DADOS (MÉDIAS JÁ PENALIZADAS):\n\n" + textos_jogos).text
