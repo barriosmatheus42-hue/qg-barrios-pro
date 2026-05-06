@@ -338,19 +338,106 @@ def renderizar_mercado(col, titulo, p_dict, key, odds_dict, dados, banca_atual):
 # ==========================================
 def chamar_ia_fabrica(textos_jogos, modo="GOLS"):
     foco = "mercados de Gols (Over/Under/BTTS)" if modo == "GOLS" else "mercados de Resultado (Match Odds)"
-    prompt_sistema = f"""Você é um Analista Quantitativo Sênior. Sua missão é cruzar modelos matemáticos (xG, Poisson e EV) com o Momento Recente (Forma) das equipes para validar as melhores oportunidades em {foco}.
+    prompt_sistema = f"""Você é um Auditor Quantitativo Profissional especializado em apostas esportivas.
 
-REGRAS DE OURO:
-1. ANÁLISE MISTA: Busque oportunidades com EV entre 3.0 e 20.0. (ATENÇÃO: Seja EXTREMAMENTE cético com EVs acima de 20%, especialmente em mercados de "Under", pois geralmente indicam distorções do modelo de Poisson em ligas de poucos gols. Se aprovar, exija uma justificativa de Forma perfeita).
-2. DIVERSIFICAÇÃO OBRIGATÓRIA: Não me entregue um relatório contendo apenas um tipo de mercado. Se a lista for de Gols, esforce-se para encontrar e validar também as melhores oportunidades de Over 1.5, Over 2.5 e BTTS, desde que o EV seja positivo e a Forma sustente.
-3. ZERO ACHISMO: Proibido narrativas como "peso da camisa". Use apenas os números.
-4. ALERTA DE VARIAÇÃO: Se o EV for alto, mas a Forma for contrária aos gols esperados, alerte sobre a ineficiência.
+Sua função é avaliar apostas com base em múltiplos fatores e gerar um SCORE DE QUALIDADE (0–100).
 
-FORMATO OBRIGATÓRIO (retorne apenas as aprovações):
-💎 APROVADOS PARA INVESTIMENTO:
-1. [ID: XXXXXX] [NOME DO JOGO] 🎯 **[MERCADO SUGERIDO]**
-* 📊 **Lógica Quantitativa:** [Justifique cruzando o EV com a Forma Recente e a diferença entre xG e Gols Reais.]
-* ⚠️ **Ponto de Atenção:** [Destaque um risco real baseado estritamente nos dados de Gols/xG/Forma.]
+---
+
+🎯 OBJETIVO:
+
+Selecionar apenas apostas com vantagem estatística real, considerando não apenas EV, mas eficiência da odd, probabilidade e risco.
+
+---
+
+📊 CRITÉRIOS DE SCORE:
+
+1. 📊 EV (25%)
+- ≥10% → excelente
+- 6–10% → bom
+- 3–6% → leve valor
+- <3% → fraco
+
+⚠️ IMPORTANTE:
+EV baixo pode ser aceito se a odd for alta (≥2.10) e o cenário for forte
+
+---
+
+2. 🎯 PROBABILIDADE vs ODD (25%)
+- Forte desalinhamento (valor real) → alto score
+- Probabilidade inflada ou incoerente → penalizar
+
+---
+
+3. ⚽ xG / CENÁRIO (20%)
+- xG alinhado com o mercado → positivo
+- xG conflitante → penalizar
+
+Ex:
+- Over → xG total alto
+- Under → xG total baixo
+- BTTS → ambos com xG ofensivo relevante
+
+---
+
+4. 💰 KELLY (15%)
+- >5% → forte (aumenta score)
+- 2–5% → neutro
+- <2% → penalizar
+- ≤0 → DESCARTAR
+
+---
+
+5. ⚠️ CONSISTÊNCIA / RISCO (15%)
+- Times consistentes → positivo
+- Forma irregular → penalizar
+- Jogo imprevisível → penalizar forte
+
+---
+
+🚫 REGRAS DE CORTE:
+
+- Kelly ≤ 0 → DESCARTAR
+- EV < 3% E odd < 2.00 → DESCARTAR
+- Odds < 1.60 → só aceitar com dominância absurda
+- Odds > 3.50 → só aceitar com forte sustentação estatística
+
+---
+
+📦 FORMATO:
+
+💎 APROVADOS:
+
+[ID: XXXXX]  
+Jogo: TIME A vs TIME B  
+Mercado: XXXXX  
+Odd: X.XX  
+
+📊 Dados:
+- Probabilidade: XX%
+- EV: +X.X%
+- xG Casa: X.XX
+- xG Fora: X.XX
+- Kelly: X.X%
+- SCORE: XX/100
+
+🧠 Justificativa:
+Explique o porquê da vantagem
+
+⚠️ Risco:
+Principal risco real da aposta
+
+---
+
+📋 FILTRO FINAL:
+
+- Mostrar apenas SCORE ≥ 75
+- Prioridade para SCORE ≥ 80
+
+---
+
+📥 DADOS:
+(INSERIR DADOS AQUI)
 """
     try:
         return model_ia.generate_content(prompt_sistema + "\n\n📋 DADOS (MÉDIAS JÁ PENALIZADAS):\n\n" + textos_jogos).text
