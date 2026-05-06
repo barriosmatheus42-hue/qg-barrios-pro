@@ -74,23 +74,36 @@ def calcular_poisson(media_casa, media_fora):
     
     m_h, m_a = max(media_casa, 0.1), max(media_fora, 0.1)
     
-    # AUDITORIA FINAL: Ampliado para 10 gols para não cortar a cauda
+    # 🎯 CORREÇÃO DIXON-COLES (Fator Rho) E NORMALIZAÇÃO
+    rho = 0.10 
+    matriz_prob = {}
+    total_prob = 0
+    
     for gc in range(10):
         for gf in range(10):
             p_casa = (math.exp(-m_h) * (m_h**gc)) / math.factorial(gc)
             p_fora = (math.exp(-m_a) * (m_a**gf)) / math.factorial(gf)
             p_placar = p_casa * p_fora
             
-            if gc > 0 and gf > 0: prob_ambas += p_placar
-            if (gc + gf) > 1.5: prob_over_15 += p_placar
-            if (gc + gf) > 2.5: prob_over_25 += p_placar
-            if (gc + gf) > 3.5: prob_over_35 += p_placar
+            if gc == 0 and gf == 0: p_placar *= (1 - rho)
+            elif gc == 1 and gf == 1: p_placar *= (1 + rho)
             
-            if gc > gf: prob_home += p_placar
-            elif gc == gf: prob_draw += p_placar
-            else: prob_away += p_placar
+            matriz_prob[(gc, gf)] = p_placar
+            total_prob += p_placar
             
-    # Ajuste de Dixon-Coles (Empate)
+    for (gc, gf), p_placar in matriz_prob.items():
+        p_placar /= total_prob # Normaliza probabilidades
+        
+        if gc > 0 and gf > 0: prob_ambas += p_placar
+        if (gc + gf) > 1.5: prob_over_15 += p_placar
+        if (gc + gf) > 2.5: prob_over_25 += p_placar
+        if (gc + gf) > 3.5: prob_over_35 += p_placar
+        
+        if gc > gf: prob_home += p_placar
+        elif gc == gf: prob_draw += p_placar
+        else: prob_away += p_placar
+            
+    # Ajuste de Dixon-Coles (Empate Clássico já existente mantido)
     total_1x2 = prob_home + prob_draw + prob_away
     if total_1x2 > 0:
         adj_h, adj_d, adj_a = prob_home * 0.97, prob_draw * 1.06, prob_away * 0.97
@@ -121,7 +134,9 @@ def buscar_stats_partida(fixture_id, team_id, gols_reais):
                 if s['type'] == 'expected_goals' and s['value']: xg_api = float(s['value'])
                 if s['type'] == 'Shots on Goal' and s['value']: sog = int(s['value'])
     except: pass
-    if xg_api is not None: return (xg_api * 0.85) + (gols_reais * 0.15)
+    
+    # 🎯 CORREÇÃO DO CÁLCULO DE xG (Sem viés duplo de Gols Reais)
+    if xg_api is not None: return (xg_api * 0.90) + (sog * 0.05)
     return (gols_reais * 0.70) + (sog * 0.10)
 
 def buscar_historico_global(team_id, current_league_id, last_n=12): 
@@ -161,32 +176,39 @@ def buscar_historico_global(team_id, current_league_id, last_n=12):
 
 def buscar_odds_vips(fixture_id):
     url = f"{BASE_URL}/odds"
-    params = {'fixture': fixture_id, 'bookmaker': 8}
+    params = {'fixture': fixture_id} # 🎯 BUSCA ABERTA (Sem prender na casa 8)
     odds = {"BTTS":0, "OVER_15":0, "UNDER_15":0, "OVER_25":0, "UNDER_25":0, "OVER_35":0, "UNDER_35":0, "HOME":0, "DRAW":0, "AWAY":0, "1X":0, "X2":0}
     try:
         res = requests.get(url, headers=HEADERS, params=params).json()
         if res.get('response') and len(res['response']) > 0:
-            for bkm in res['response'][0].get('bookmakers', []):
-                if bkm['id'] == 8:
-                    for bet in bkm['bets']:
-                        if bet['name'] == 'Both Teams Score': odds['BTTS'] = float(bet['values'][0]['odd'])
-                        elif bet['name'] == 'Goals Over/Under':
-                            for v in bet['values']:
-                                if v['value'] == 'Over 1.5': odds['OVER_15'] = float(v['odd'])
-                                if v['value'] == 'Under 1.5': odds['UNDER_15'] = float(v['odd'])
-                                if v['value'] == 'Over 2.5': odds['OVER_25'] = float(v['odd'])
-                                if v['value'] == 'Under 2.5': odds['UNDER_25'] = float(v['odd'])
-                                if v['value'] == 'Over 3.5': odds['OVER_35'] = float(v['odd'])
-                                if v['value'] == 'Under 3.5': odds['UNDER_35'] = float(v['odd'])
-                        elif bet['name'] == 'Match Winner':
-                            for v in bet['values']:
-                                if v['value'] == 'Home': odds['HOME'] = float(v['odd'])
-                                elif v['value'] == 'Draw': odds['DRAW'] = float(v['odd'])
-                                elif v['value'] == 'Away': odds['AWAY'] = float(v['odd'])
-                        elif bet['name'] == 'Double Chance':
-                            for v in bet['values']:
-                                if v['value'] == 'Home/Draw': odds['1X'] = float(v['odd'])
-                                if v['value'] == 'Draw/Away': odds['X2'] = float(v['odd'])
+            bookmakers = res['response'][0].get('bookmakers', [])
+            
+            bkm_to_use = None
+            # 🎯 BUSCA SEQUENCIAL DE FALLBACK (Bet365, Pinnacle, 1xBet)
+            for target_id in [8, 4, 1]:
+                bkm_to_use = next((b for b in bookmakers if b['id'] == target_id), None)
+                if bkm_to_use: break
+
+            if bkm_to_use:
+                for bet in bkm_to_use['bets']:
+                    if bet['name'] == 'Both Teams Score': odds['BTTS'] = float(bet['values'][0]['odd'])
+                    elif bet['name'] == 'Goals Over/Under':
+                        for v in bet['values']:
+                            if v['value'] == 'Over 1.5': odds['OVER_15'] = float(v['odd'])
+                            if v['value'] == 'Under 1.5': odds['UNDER_15'] = float(v['odd'])
+                            if v['value'] == 'Over 2.5': odds['OVER_25'] = float(v['odd'])
+                            if v['value'] == 'Under 2.5': odds['UNDER_25'] = float(v['odd'])
+                            if v['value'] == 'Over 3.5': odds['OVER_35'] = float(v['odd'])
+                            if v['value'] == 'Under 3.5': odds['UNDER_35'] = float(v['odd'])
+                    elif bet['name'] == 'Match Winner':
+                        for v in bet['values']:
+                            if v['value'] == 'Home': odds['HOME'] = float(v['odd'])
+                            elif v['value'] == 'Draw': odds['DRAW'] = float(v['odd'])
+                            elif v['value'] == 'Away': odds['AWAY'] = float(v['odd'])
+                    elif bet['name'] == 'Double Chance':
+                        for v in bet['values']:
+                            if v['value'] == 'Home/Draw': odds['1X'] = float(v['odd'])
+                            if v['value'] == 'Draw/Away': odds['X2'] = float(v['odd'])
             return odds
     except: pass
     return odds
@@ -214,7 +236,8 @@ def acao_analisar(jogos_alvo, data_str, force=False):
     p_bar.empty(); st.rerun()
 
 def calcular_matematica_quant(d):
-    coef_liga = PESOS_LIGAS.get(d.get('l_id', 0), 0.75) 
+    # 🎯 CORREÇÃO DO FALLBACK DE LIGA (De 0.75 para 0.95)
+    coef_liga = PESOS_LIGAS.get(d.get('l_id', 0), 0.95) 
     m_h = ((d['h']['media_xg_f'] + d['a']['media_xg_s']) / 2) * coef_liga * 1.05
     m_a = ((d['a']['media_xg_f'] + d['h']['media_xg_s']) / 2) * coef_liga * 0.95 
     return m_h, m_a
@@ -256,7 +279,7 @@ def get_blended_prob(dados, p_dict, key):
     return prob_nossa
 
 # ================================
-# ALTERAÇÃO 1: KELLY SEGURO (Ajustado para 10%)
+# ALTERAÇÃO 1: KELLY SEGURO (Ajustado para 10% com CAP)
 # ================================
 def calcular_kelly(prob_blended, odd):
     if odd <= 1.0 or prob_blended <= 0:
@@ -270,24 +293,24 @@ def calcular_kelly(prob_blended, odd):
         return 0
 
     kelly_puro = (b * p - q) / b
+    kelly_ajustado = max(0, kelly_puro * 0.10)
     
-    # AJUSTE PRO: Reduzido para 10% para melhor proteção de banca no longo prazo
-    return max(0, kelly_puro * 0.10)
-
+    # 🎯 CAP DE SEGURANÇA: MÁXIMO 3% DA BANCA
+    return min(kelly_ajustado, 0.03)
 
 # ================================
-# ALTERAÇÃO 2: EV MAIS SEGURO
+# ALTERAÇÃO 2: EV MAIS SEGURO (Limpo)
 # ================================
 def get_ev(dados, p_dict, key):
     casa = dados['odds'].get(key, 0)
-    prob_blended = get_blended_prob(dados, p_dict, key)
+    prob_modelo = p_dict[key]['prob'] # 🎯 CORREÇÃO: EV_Modelo puro
 
-    if casa <= 1.0 or prob_blended <= 0:
+    if casa <= 1.0 or prob_modelo <= 0:
         return -100
 
-    ev = ((prob_blended / 100.0) * casa - 1) * 100
+    ev = ((prob_modelo / 100.0) * casa - 1) * 100
 
-    if ev > 60 or (prob_blended < 35 and key in ["HOME", "AWAY"]):
+    if ev > 60 or (prob_modelo < 35 and key in ["HOME", "AWAY"]):
         return -999
 
     return ev
