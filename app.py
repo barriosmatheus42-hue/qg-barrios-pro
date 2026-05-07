@@ -53,7 +53,6 @@ def carregar_banco():
     if "banco_local" in st.session_state:
         return st.session_state["banco_local"]
         
-    # PASSO 1: Tenta carregar o cache pesado (Agenda e Análises) do arquivo antigo
     banco = {"datas": {}, "creditos_restantes": 7500, "picks": [], "banca_inicial": 30.0}
     if os.path.exists(ARQUIVO_BANCO):
         try:
@@ -63,7 +62,6 @@ def carregar_banco():
                     banco["datas"] = banco_lido["datas"]
         except: pass
         
-    # PASSO 2: Puxa o cofre na nuvem para garantir que o saldo e apostas estão protegidos
     try:
         res = requests.get(f"{JSONBIN_URL}/latest", headers=JSONBIN_HEADERS, timeout=10)
         if res.status_code == 200:
@@ -79,13 +77,11 @@ def carregar_banco():
 def salvar_banco(dados):
     st.session_state["banco_local"] = dados
     
-    # PASSO 1: Salva TUDO no arquivo local (Isso recria a memória do dia inteiro que você gostava)
     try:
         with open(ARQUIVO_BANCO, "w") as f:
             json.dump(dados, f)
     except: pass
 
-    # PASSO 2: Salva só Dinheiro e Apostas na Nuvem (Foge do Erro 413)
     try:
         dados_nuvem = {
             "banca_inicial": dados.get("banca_inicial", 30.0),
@@ -460,8 +456,7 @@ FORMATO OBRIGATÓRIO (Do melhor para o pior):
 * 📊 **Lógica Quantitativa:** [Justifique o cruzamento]
 * ⚠️ **Ponto de Atenção:** [Destaque um risco real]
 """
-   try:
-        # 🎯 CADEADO DE TEMPERATURA ZERO (Respostas sempre 100% idênticas)
+    try:
         configuracao = genai.types.GenerationConfig(temperature=0.0)
         return model_ia.generate_content(prompt_sistema + "\n\n📋 DADOS PARA ANÁLISE:\n\n" + textos_jogos, generation_config=configuracao).text
     except Exception as e: return f"🚨 Erro na IA: {e}"
@@ -550,6 +545,22 @@ if agenda:
         l_id, l_name, l_country = j['league']['id'], str(j['league']['name']).lower(), str(j['league']['country'])
         if (tipo_filtro == "🏆 Só Ligas PRO" and l_id in LIGAS_PRO) or (tipo_filtro == "🌍 PRO + Confiáveis" and (l_id in LIGAS_PRO or (l_country in paises_confiaveis and not any(p in l_name for p in palavras_proibidas)))) or tipo_filtro == "🗑️ O Mundo Todo":
             if j not in jogos_visiveis: jogos_visiveis.append(j)
+
+    with st.expander(f"👀 Ver Lista de Jogos Encontrados ({len(jogos_visiveis)})", expanded=True):
+        for j in jogos_visiveis:
+            f_id = str(j['fixture']['id'])
+            ja_analisado = f_id in banco_local["datas"][data_str]["stats"]
+            
+            c1, c2 = st.columns([4, 1])
+            c1.markdown(f"<div style='font-size:13px;'>🕒 <b>{j['fixture']['date'][11:16]}</b> | {j['league']['name']}<br>🏠 {j['teams']['home']['name']} <b>vs</b> ✈️ {j['teams']['away']['name']}</div>", unsafe_allow_html=True)
+            
+            with c2:
+                if ja_analisado:
+                    st.button("✅ Analisado", key=f"btn_ind_{f_id}", disabled=True)
+                else:
+                    if st.button("Analisar", key=f"btn_ind_{f_id}"):
+                        acao_analisar([j], data_str)
+            st.markdown("<hr style='margin: 5px 0; opacity: 0.2;'>", unsafe_allow_html=True)
 
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
@@ -670,7 +681,6 @@ ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
             f_id = str(j['fixture']['id'])
             d = banco_local["datas"][data_str]["stats"].get(f_id)
             
-            # SE AINDA NÃO FOI ANALISADO (CARD MINI)
             if not d or "erro" in d:
                 st.markdown(f"""<div style='border: 1px solid #333; border-radius:8px; padding:12px; background-color:#0e1117; margin-bottom:5px; border-left: 4px solid #555;'>
                     <div style='color:#888; font-size:11px;'>🕒 {j['fixture']['date'][11:16]} • {j['league']['name']}</div>
@@ -679,7 +689,6 @@ ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
                 if st.button("📊 Analisar Jogo", key=f"btn_mini_gols_{f_id}"):
                     acao_analisar([j], data_str, force=True)
 
-            # SE JÁ FOI ANALISADO COM SUCESSO (CARD FULL)
             else:
                 m_h, m_a = calcular_matematica_quant(d); p = calcular_poisson(m_h, m_a)
                 if p:
@@ -732,7 +741,6 @@ ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
             f_id = str(j['fixture']['id'])
             d = banco_local["datas"][data_str]["stats"].get(f_id)
             
-            # SE AINDA NÃO FOI ANALISADO (CARD MINI)
             if not d or "erro" in d:
                 st.markdown(f"""<div style='border: 1px solid #333; border-radius:8px; padding:12px; background-color:#0e1117; margin-bottom:5px; border-left: 4px solid #555;'>
                     <div style='color:#888; font-size:11px;'>🕒 {j['fixture']['date'][11:16]} • {j['league']['name']}</div>
@@ -741,7 +749,6 @@ ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
                 if st.button("📊 Analisar Jogo", key=f"btn_mini_res_{f_id}"):
                     acao_analisar([j], data_str, force=True)
 
-            # SE JÁ FOI ANALISADO COM SUCESSO (CARD FULL)
             else:
                 m_h, m_a = calcular_matematica_quant(d); p = calcular_poisson(m_h, m_a)
                 if p:
