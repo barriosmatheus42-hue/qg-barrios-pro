@@ -48,33 +48,45 @@ model_ia = conectar_modelo_ia()
 # 1. GERENCIAMENTO DO BANCO NA NUVEM (JSONBin)
 # ==========================================
 def carregar_banco():
+    # 1. Tenta carregar da memória rápida da sessão primeiro (impede o apagão)
+    if "banco_local" in st.session_state:
+        return st.session_state["banco_local"]
+        
     try:
-        res = requests.get(f"{JSONBIN_URL}/latest", headers=JSONBIN_HEADERS, timeout=10).json()
-        banco = res.get("record", {})
+        res = requests.get(f"{JSONBIN_URL}/latest", headers=JSONBIN_HEADERS, timeout=10)
+        
+        # Se o cofre reclamar da senha ou ID, joga na tela!
+        if res.status_code != 200:
+            st.error(f"🚨 ERRO NO COFRE: Verifique se o seu BIN_ID tem só letras/números (sem 'jsonbin.io/'). Erro: {res.text}")
+            banco = {"datas": {}, "creditos_restantes": 7500, "picks": [], "banca_inicial": 30.0}
+        else:
+            banco = res.json().get("record", {})
+            
         if "picks" not in banco: banco["picks"] = []
         if "banca_inicial" not in banco: banco["banca_inicial"] = 30.0
         if "datas" not in banco: banco["datas"] = {}
+        
+        st.session_state["banco_local"] = banco # Salva na memória rápida
         return banco
     except Exception as e:
+        st.error(f"🚨 Falha de internet ao ler o cofre: {e}")
         return {"datas": {}, "creditos_restantes": 7500, "picks": [], "banca_inicial": 30.0}
 
 def salvar_banco(dados):
+    # Salva na memória rápida primeiro para os jogos não sumirem da tela
+    st.session_state["banco_local"] = dados
     try:
-        requests.put(JSONBIN_URL, headers=JSONBIN_HEADERS, json=dados, timeout=10)
+        # Impede o JSONBin de criar 1000 versões e travar sua conta
+        headers_put = JSONBIN_HEADERS.copy()
+        headers_put["X-Bin-Versioning"] = "false" 
+        
+        res = requests.put(JSONBIN_URL, headers=headers_put, json=dados, timeout=10)
+        if res.status_code != 200:
+            st.error(f"🚨 ERRO AO SALVAR NO COFRE: {res.text}")
     except Exception as e:
-        pass
+        st.error(f"🚨 Falha de internet ao salvar: {e}")
 
 banco_local = carregar_banco()
-
-def atualizar_saldo_realtime():
-    try:
-        res = requests.get(f"{BASE_URL}/status", headers=HEADERS, timeout=5).json()
-        if res.get('response'):
-            rem = res['response']['requests']['limit_day'] - res['response']['requests']['current']
-            banco_local["creditos_restantes"] = rem
-            return rem
-    except: pass
-    return banco_local.get("creditos_restantes", 0) or 0
 
 # ==========================================
 # 2. MOTOR MATEMÁTICO (POISSON V6.1)
