@@ -16,7 +16,15 @@ st.set_page_config(page_title="QG Barrios PRO - V6.1 Final Quant", layout="wide"
 API_KEY_PRO = "00374ab0590422053c950ddc399a0ccb"
 BASE_URL = "https://v3.football.api-sports.io"
 HEADERS = {'x-apisports-key': API_KEY_PRO}
-ARQUIVO_BANCO = "banco_barrios_pro.json"
+
+# CONFIGURAÇÕES DO COFRE NA NUVEM (JSONBin)
+JSONBIN_KEY = st.secrets["JSONBIN_KEY"]
+JSONBIN_BIN_ID = st.secrets["JSONBIN_BIN_ID"]
+JSONBIN_URL = f"https://api.jsonbin.io/v3/b/{JSONBIN_BIN_ID}"
+JSONBIN_HEADERS = {
+    "X-Master-Key": JSONBIN_KEY,
+    "Content-Type": "application/json"
+}
 
 API_KEY_GEMINI = st.secrets["GEMINI_API_KEY"]
 genai.configure(api_key=API_KEY_GEMINI)
@@ -36,19 +44,25 @@ def conectar_modelo_ia():
 
 model_ia = conectar_modelo_ia()
 
+# ==========================================
+# 1. GERENCIAMENTO DO BANCO NA NUVEM (JSONBin)
+# ==========================================
 def carregar_banco():
-    if os.path.exists(ARQUIVO_BANCO):
-        try:
-            with open(ARQUIVO_BANCO, "r") as f: 
-                banco = json.load(f)
-                if "picks" not in banco: banco["picks"] = []
-                if "banca_inicial" not in banco: banco["banca_inicial"] = 100.0
-                return banco
-        except: pass
-    return {"datas": {}, "creditos_restantes": 7500, "picks": [], "banca_inicial": 100.0}
+    try:
+        res = requests.get(f"{JSONBIN_URL}/latest", headers=JSONBIN_HEADERS, timeout=10).json()
+        banco = res.get("record", {})
+        if "picks" not in banco: banco["picks"] = []
+        if "banca_inicial" not in banco: banco["banca_inicial"] = 30.0
+        if "datas" not in banco: banco["datas"] = {}
+        return banco
+    except Exception as e:
+        return {"datas": {}, "creditos_restantes": 7500, "picks": [], "banca_inicial": 30.0}
 
 def salvar_banco(dados):
-    with open(ARQUIVO_BANCO, "w") as f: json.dump(dados, f)
+    try:
+        requests.put(JSONBIN_URL, headers=JSONBIN_HEADERS, json=dados, timeout=10)
+    except Exception as e:
+        pass
 
 banco_local = carregar_banco()
 
@@ -74,6 +88,7 @@ def calcular_poisson(media_casa, media_fora):
     
     m_h, m_a = max(media_casa, 0.1), max(media_fora, 0.1)
     
+    # 🎯 CORREÇÃO DIXON-COLES (Fator Rho) E NORMALIZAÇÃO
     rho = 0.10 
     matriz_prob = {}
     total_prob = 0
@@ -263,14 +278,19 @@ def get_blended_prob(dados, p_dict, key):
     if odd_casa > 1.0:
         prob_mercado = normalizar_prob_mercado(dados, key)
         if prob_mercado > 0:
-            if l_id in [39, 140, 135]: return (prob_nossa * 0.65) + (prob_mercado * 0.35)
-            elif l_id in [78, 61, 2, 3]: return (prob_nossa * 0.75) + (prob_mercado * 0.25)
-            elif l_id in [71, 72, 73]: return (prob_nossa * 0.80) + (prob_mercado * 0.20)
-            else: return (prob_nossa * 0.90) + (prob_mercado * 0.10)
+            if l_id in [39, 140, 135]:
+                return (prob_nossa * 0.65) + (prob_mercado * 0.35)
+            elif l_id in [78, 61, 2, 3]:
+                return (prob_nossa * 0.75) + (prob_mercado * 0.25)
+            elif l_id in [71, 72, 73]:
+                return (prob_nossa * 0.80) + (prob_mercado * 0.20)
+            else:
+                return (prob_nossa * 0.90) + (prob_mercado * 0.10)
     return prob_nossa
 
 def calcular_kelly(prob_blended, odd):
-    if odd <= 1.0 or prob_blended <= 0: return 0
+    if odd <= 1.0 or prob_blended <= 0:
+        return 0
     p = prob_blended / 100.0
     q = 1 - p
     b = odd - 1
@@ -281,10 +301,12 @@ def calcular_kelly(prob_blended, odd):
 
 def get_ev(dados, p_dict, key):
     casa = dados['odds'].get(key, 0)
-    prob_modelo = p_dict[key]['prob'] 
-    if casa <= 1.0 or prob_modelo <= 0: return -100
+    prob_modelo = p_dict[key]['prob']
+    if casa <= 1.0 or prob_modelo <= 0:
+        return -100
     ev = ((prob_modelo / 100.0) * casa - 1) * 100
-    if ev > 60 or (prob_modelo < 35 and key in ["HOME", "AWAY"]): return -999
+    if ev > 60 or (prob_modelo < 35 and key in ["HOME", "AWAY"]):
+        return -999
     return ev
 
 def avaliar_perfil_jogo(p_dict):
@@ -331,22 +353,38 @@ Seu objetivo NÃO é listar muitas apostas, e sim identificar APENAS oportunidad
 Você DEVE retornar a lista ranqueada do MELHOR jogo (maior Score/Valor/EV) para o PIOR. O card número 1 do seu relatório deve ser a aposta de maior segurança e valor do dia. A ordem dos resultados é fundamental para o painel do usuário.
 
 ---
-## ⚙️ REGRAS GERAIS E RÉGUA ASSIMÉTRICA DE EV
-O mercado costuma inflacionar odds de Under e esmagar odds de Over. Aplique a régua:
-1. Para aprovar UNDER: Exija EV alto (> 10%) E um xG Total projetado baixíssimo.
-2. Para aprovar OVER ou BTTS: Aceite EVs menores (> 3%). Se a odd tiver valor e o xG confirmar a tendência ofensiva, aprove.
+## ⚙️ REGRAS GERAIS E RÉGUA ASSIMÉTRICA DE EV (CRÍTICO)
+O mercado costuma inflacionar odds de Under e esmagar odds de Over. Portanto, aplique a seguinte régua:
+1. Para aprovar UNDER: Exija um EV alto (ex: > 10%) E um xG Total projetado baixíssimo. Seja extremamente rigoroso com o contexto.
+2. Para aprovar OVER ou BTTS: Aceite EVs menores (ex: > 3%). Se a odd tiver valor e o xG confirmar a tendência ofensiva das equipes, pode aprovar.
+3. NÃO force mercados. Apenas siga os números.
 
 ---
-## 💰 FILTRO DE ODDS
-- Odds < 1.70 → DESCARTAR SUMARIAMENTE
-- Odds 1.70–1.79 → Aceitável se EV perfeito
+## 💰 FILTRO DE ODDS (CRÍTICO)
+- Odds < 1.70 → DESCARTAR SUMARIAMENTE (Proteção de banca para taxa de acerto)
+- Odds 1.70–1.79 → Aceitável se o EV e xG forem perfeitos
 - Odds ≥ 1.80 → Padrão mínimo ideal
+- Odds ≥ 2.00 → ALTO VALOR (se coerente)
+
+---
+## 📊 CRITÉRIOS DE ANÁLISE
+1. VALOR (CORE): EV (valor esperado) e Diferença entre probabilidade real vs implícita.
+2. MODELAGEM: xG casa, xG fora, xG total e Coerência.
+3. KELLY: Usar como indicador de vantagem. Kelly > 20% = FORTE PENALIZAÇÃO (risco de anomalia no modelo). Se for muito alto, rejeite ou exija cautela extrema.
+4. CONTEXTO: Forma recente e variância.
 
 ---
 ## 🧮 SCORE DE QUALIDADE (0–100)
 Baseado em: + Valor (EV), + Coerência xG, + Qualidade da odd, + Estabilidade.
-Penalizações: Odd < 1.70 (Descarte), Probabilidade inflada, Kelly > 20% (forte penalização).
+Penalizações: Odd < 1.70 (Descarte automático), xG incompatível, Probabilidade inflada, Kelly > 20%.
 ✅ FILTRO FINAL: Score mínimo: 75 | Alta qualidade: ≥ 80 | Elite: ≥ 85
+
+---
+## 🎯 PERFIL DA APOSTA
+Classificar cada pick:
+- Conservador → prob alta + odd menor
+- Equilibrado → boa relação risco/retorno
+- Agressivo → odd alta + valor identificado
 
 ---
 ## 📤 FORMATO DE SAÍDA (Obrigatório para cada pick, do Maior Score para o Menor)
@@ -357,30 +395,35 @@ Odd: X.XX
 Perfil: (Conservador / Equilibrado / Agressivo)
 
 📊 Dados:
-Probabilidade: XX% | EV: +X% | xG Total: X.XX | Kelly: XX% | Score: XX/100
+Probabilidade: XX%
+EV: +X%
+xG Total: X.XX
+Kelly: XX%
+Score: XX/100
 
 🧠 Justificativa:
-Explicação objetiva baseada em: Valor vs odd, Coerência do xG.
+Explicação objetiva baseada em: Valor vs odd, Coerência do xG e a Régua Assimétrica.
 
 ⚠️ Risco:
-Fator que pode quebrar a aposta.
+Principal fator que pode quebrar a aposta.
 """
     else:
-        prompt_sistema = """Você é um Analista Quantitativo Sênior. Sua missão é cruzar modelos matemáticos (xG, Poisson e EV) com a Forma das equipes em mercados de Resultado (Match Odds).
+        prompt_sistema = """Você é um Analista Quantitativo Sênior. Sua missão é cruzar modelos matemáticos (xG, Poisson e EV) com o Momento Recente (Forma) das equipes para validar as melhores oportunidades em mercados de Resultado (Match Odds).
 
 ---
 ## 🎯 ORDENAÇÃO OBRIGATÓRIA E RANKING (TOP DOWN)
 Você DEVE retornar a lista ranqueada da aposta de MAIOR confiança (melhor combinação de EV, xG e Forma) para a MENOR. O primeiro ID deve ser a aposta "premium" da rodada.
 
 REGRAS DE OURO:
-1. ANÁLISE MISTA: Decisão baseada em EV positivo (> 3.0). Use Forma apenas para validar se o time sustenta a matemática.
+1. ANÁLISE MISTA: A decisão DEVE ser baseada em EV positivo (acima de 3.0). Use a "Forma" e os "Gols Pró/Sofridos" apenas para validar se o time sustenta a matemática.
 2. ZERO ACHISMO: Proibido criar narrativas como "peso da camisa".
+3. ALERTA DE VARIAÇÃO: Se a Forma for terrível, mas o modelo apontar valor, alerte sobre a ineficiência.
 
 FORMATO OBRIGATÓRIO (Do melhor para o pior):
 💎 APROVADOS PARA INVESTIMENTO:
 [ID: XXXXXX] [NOME DO JOGO] 🎯 **[MERCADO SUGERIDO]**
-* 📊 **Lógica:** [Justifique]
-* ⚠️ **Atenção:** [Risco real]
+* 📊 **Lógica Quantitativa:** [Justifique o cruzamento]
+* ⚠️ **Ponto de Atenção:** [Destaque um risco real]
 """
     try:
         return model_ia.generate_content(prompt_sistema + "\n\n📋 DADOS PARA ANÁLISE:\n\n" + textos_jogos).text
@@ -397,7 +440,7 @@ with st.sidebar:
     st.write("---")
     
     st.markdown("### 📈 Gestão de Risco (Kelly)")
-    banca_input = st.number_input("Banca Total (R$)", value=float(banco_local.get("banca_inicial", 100.0)), step=10.0)
+    banca_input = st.number_input("Banca Total (R$)", value=float(banco_local.get("banca_inicial", 30.0)), step=10.0)
     if banca_input != banco_local.get("banca_inicial"):
         banco_local["banca_inicial"] = banca_input
         salvar_banco(banco_local)
@@ -484,9 +527,11 @@ if agenda:
             for j in jogos_visiveis:
                 f_id = str(j['fixture']['id'])
                 d = banco_local["datas"][data_str]["stats"].get(f_id)
+                
                 if d and "erro" not in d:
                     m_h, m_a = calcular_matematica_quant(d)
                     p = calcular_poisson(m_h, m_a)
+                    
                     if p:
                         xg_total = m_h + m_a
                         k_o15 = calcular_kelly(get_blended_prob(d, p, 'OVER_15'), d['odds'].get('OVER_15', 0)) * 100
@@ -511,7 +556,6 @@ ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
             with st.spinner("IA Rankeando Melhores Apostas de Gols..."):
                 resposta = chamar_ia_fabrica(textos, modo="GOLS")
                 st.session_state["ia_gols"] = resposta
-                # 🎯 CAPTURA DOS IDs NA ORDEM DE RANKING DA IA
                 st.session_state["ids_gols"] = re.findall(r'\[ID:\s*(\d+)\]', resposta)
 
     with col_ia2:
@@ -520,9 +564,11 @@ ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
             for j in jogos_visiveis:
                 f_id = str(j['fixture']['id'])
                 d = banco_local["datas"][data_str]["stats"].get(f_id)
+                
                 if d and "erro" not in d:
                     m_h, m_a = calcular_matematica_quant(d)
                     p = calcular_poisson(m_h, m_a)
+                    
                     if p:
                         linha = f"""
 ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
@@ -540,23 +586,26 @@ ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
             with st.spinner("IA Rankeando Melhores Resultados..."):
                 resposta = chamar_ia_fabrica(textos, modo="RESULTADO")
                 st.session_state["ia_resultado"] = resposta
-                # 🎯 CAPTURA DOS IDs NA ORDEM DE RANKING DA IA
                 st.session_state["ids_res"] = re.findall(r'\[ID:\s*(\d+)\]', resposta)
 
     st.write("---")
     
     if "ia_gols" in st.session_state:
         st.markdown("#### 🔥 Ranking IA - GOLS")
-        if st.session_state["ia_gols"].strip() == "": st.warning("Nenhum jogo atendeu aos rigorosos critérios de valor para Gols.")
-        else: st.info(st.session_state["ia_gols"])
+        if st.session_state["ia_gols"].strip() == "":
+            st.warning("Nenhum jogo atendeu aos rigorosos critérios de valor para Gols.")
+        else:
+            st.info(st.session_state["ia_gols"])
             
     if "ia_resultado" in st.session_state:
         st.markdown("#### ⚔️ Ranking IA - RESULTADO")
-        if st.session_state["ia_resultado"].strip() == "": st.warning("Nenhum jogo atendeu aos rigorosos critérios de valor para Resultado.")
-        else: st.info(st.session_state["ia_resultado"])
+        if st.session_state["ia_resultado"].strip() == "":
+            st.warning("Nenhum jogo atendeu aos rigorosos critérios de valor para Resultado.")
+        else:
+            st.info(st.session_state["ia_resultado"])
     
     # ==========================================================
-    # 🎯 ORDENAÇÃO INTELIGENTE DOS CARDS (TOP DOWN RANKING)
+    # ORDENAÇÃO INTELIGENTE DOS CARDS (TOP DOWN RANKING)
     # ==========================================================
     ids_gols_rank = st.session_state.get("ids_gols", [])
     jogos_gols_sorted = sorted(jogos_visiveis, key=lambda j: ids_gols_rank.index(str(j['fixture']['id'])) if str(j['fixture']['id']) in ids_gols_rank else 999999)
@@ -574,7 +623,7 @@ ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
 
     # ============================== ABA GOLS
     with tab_gols:
-        for j in jogos_gols_sorted: # 🎯 Loop usando a lista ordenada de gols
+        for j in jogos_gols_sorted:
             f_id = str(j['fixture']['id']); d = banco_local["datas"][data_str]["stats"].get(f_id)
             if d and "erro" not in d:
                 m_h, m_a = calcular_matematica_quant(d); p = calcular_poisson(m_h, m_a)
@@ -582,7 +631,6 @@ ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
                     perfil = avaliar_perfil_jogo(p)
                     cor_perfil = "#dc3545" if "ABERTO" in perfil else "#6c757d" if "TRAVADO" in perfil else "#ffc107"
                     
-                    # 🎯 Destaque visual para os jogos aprovados pela IA
                     borda_rank = "border: 2px solid #ffcc00;" if f_id in ids_gols_rank else "border: 1px solid #333;"
                     posicao = f"<span style='color:#ffcc00; font-weight:bold; margin-right:8px;'>TOP {ids_gols_rank.index(f_id) + 1}</span>" if f_id in ids_gols_rank else ""
 
@@ -620,12 +668,11 @@ ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
 
     # ============================== ABA RESULTADO
     with tab_result:
-        for j in jogos_res_sorted: # 🎯 Loop usando a lista ordenada de resultados
+        for j in jogos_res_sorted:
             f_id = str(j['fixture']['id']); d = banco_local["datas"][data_str]["stats"].get(f_id)
             if d and "erro" not in d:
                 m_h, m_a = calcular_matematica_quant(d); p = calcular_poisson(m_h, m_a)
                 if p:
-                    # 🎯 Destaque visual para os jogos aprovados pela IA
                     borda_rank = "border: 2px solid #ffcc00;" if f_id in ids_res_rank else "border: 1px solid #333;"
                     posicao = f"<span style='color:#ffcc00; font-weight:bold; margin-right:8px;'>TOP {ids_res_rank.index(f_id) + 1}</span>" if f_id in ids_res_rank else ""
 
