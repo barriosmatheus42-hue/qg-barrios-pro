@@ -546,22 +546,6 @@ if agenda:
         if (tipo_filtro == "🏆 Só Ligas PRO" and l_id in LIGAS_PRO) or (tipo_filtro == "🌍 PRO + Confiáveis" and (l_id in LIGAS_PRO or (l_country in paises_confiaveis and not any(p in l_name for p in palavras_proibidas)))) or tipo_filtro == "🗑️ O Mundo Todo":
             if j not in jogos_visiveis: jogos_visiveis.append(j)
 
-    with st.expander(f"👀 Ver Lista de Jogos Encontrados ({len(jogos_visiveis)})", expanded=True):
-        for j in jogos_visiveis:
-            f_id = str(j['fixture']['id'])
-            ja_analisado = f_id in banco_local["datas"][data_str]["stats"]
-            
-            c1, c2 = st.columns([4, 1])
-            c1.markdown(f"<div style='font-size:13px;'>🕒 <b>{j['fixture']['date'][11:16]}</b> | {j['league']['name']}<br>🏠 {j['teams']['home']['name']} <b>vs</b> ✈️ {j['teams']['away']['name']}</div>", unsafe_allow_html=True)
-            
-            with c2:
-                if ja_analisado:
-                    st.button("✅ Analisado", key=f"btn_ind_{f_id}", disabled=True)
-                else:
-                    if st.button("Analisar", key=f"btn_ind_{f_id}"):
-                        acao_analisar([j], data_str)
-            st.markdown("<hr style='margin: 5px 0; opacity: 0.2;'>", unsafe_allow_html=True)
-
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
         if st.button(f"🚀 2. Analisar TODOS Visíveis ({len(jogos_visiveis)})", type="primary", use_container_width=True): acao_analisar(jogos_visiveis, data_str)
