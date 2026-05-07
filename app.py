@@ -74,7 +74,6 @@ def calcular_poisson(media_casa, media_fora):
     
     m_h, m_a = max(media_casa, 0.1), max(media_fora, 0.1)
     
-    # 🎯 CORREÇÃO DIXON-COLES (Fator Rho) E NORMALIZAÇÃO
     rho = 0.10 
     matriz_prob = {}
     total_prob = 0
@@ -92,7 +91,7 @@ def calcular_poisson(media_casa, media_fora):
             total_prob += p_placar
             
     for (gc, gf), p_placar in matriz_prob.items():
-        p_placar /= total_prob # Normaliza probabilidades
+        p_placar /= total_prob 
         
         if gc > 0 and gf > 0: prob_ambas += p_placar
         if (gc + gf) > 1.5: prob_over_15 += p_placar
@@ -103,7 +102,6 @@ def calcular_poisson(media_casa, media_fora):
         elif gc == gf: prob_draw += p_placar
         else: prob_away += p_placar
             
-    # Ajuste de Dixon-Coles (Empate Clássico já existente mantido)
     total_1x2 = prob_home + prob_draw + prob_away
     if total_1x2 > 0:
         adj_h, adj_d, adj_a = prob_home * 0.97, prob_draw * 1.06, prob_away * 0.97
@@ -135,7 +133,6 @@ def buscar_stats_partida(fixture_id, team_id, gols_reais):
                 if s['type'] == 'Shots on Goal' and s['value']: sog = int(s['value'])
     except: pass
     
-    # 🎯 CORREÇÃO DO CÁLCULO DE xG (Sem viés duplo de Gols Reais)
     if xg_api is not None: return (xg_api * 0.90) + (sog * 0.05)
     return (gols_reais * 0.70) + (sog * 0.10)
 
@@ -176,7 +173,7 @@ def buscar_historico_global(team_id, current_league_id, last_n=12):
 
 def buscar_odds_vips(fixture_id):
     url = f"{BASE_URL}/odds"
-    params = {'fixture': fixture_id} # 🎯 BUSCA ABERTA (Sem prender na casa 8)
+    params = {'fixture': fixture_id} 
     odds = {"BTTS":0, "OVER_15":0, "UNDER_15":0, "OVER_25":0, "UNDER_25":0, "OVER_35":0, "UNDER_35":0, "HOME":0, "DRAW":0, "AWAY":0, "1X":0, "X2":0}
     try:
         res = requests.get(url, headers=HEADERS, params=params).json()
@@ -184,7 +181,6 @@ def buscar_odds_vips(fixture_id):
             bookmakers = res['response'][0].get('bookmakers', [])
             
             bkm_to_use = None
-            # 🎯 BUSCA SEQUENCIAL DE FALLBACK (Bet365, Pinnacle, 1xBet)
             for target_id in [8, 4, 1]:
                 bkm_to_use = next((b for b in bookmakers if b['id'] == target_id), None)
                 if bkm_to_use: break
@@ -236,7 +232,6 @@ def acao_analisar(jogos_alvo, data_str, force=False):
     p_bar.empty(); st.rerun()
 
 def calcular_matematica_quant(d):
-    # 🎯 CORREÇÃO DO FALLBACK DE LIGA (De 0.75 para 0.95)
     coef_liga = PESOS_LIGAS.get(d.get('l_id', 0), 0.95) 
     m_h = ((d['h']['media_xg_f'] + d['a']['media_xg_s']) / 2) * coef_liga * 1.05
     m_a = ((d['a']['media_xg_f'] + d['h']['media_xg_s']) / 2) * coef_liga * 0.95 
@@ -268,51 +263,28 @@ def get_blended_prob(dados, p_dict, key):
     if odd_casa > 1.0:
         prob_mercado = normalizar_prob_mercado(dados, key)
         if prob_mercado > 0:
-            if l_id in [39, 140, 135]:
-                return (prob_nossa * 0.65) + (prob_mercado * 0.35)
-            elif l_id in [78, 61, 2, 3]:
-                return (prob_nossa * 0.75) + (prob_mercado * 0.25)
-            elif l_id in [71, 72, 73]:
-                return (prob_nossa * 0.80) + (prob_mercado * 0.20)
-            else:
-                return (prob_nossa * 0.90) + (prob_mercado * 0.10)
+            if l_id in [39, 140, 135]: return (prob_nossa * 0.65) + (prob_mercado * 0.35)
+            elif l_id in [78, 61, 2, 3]: return (prob_nossa * 0.75) + (prob_mercado * 0.25)
+            elif l_id in [71, 72, 73]: return (prob_nossa * 0.80) + (prob_mercado * 0.20)
+            else: return (prob_nossa * 0.90) + (prob_mercado * 0.10)
     return prob_nossa
 
-# ================================
-# ALTERAÇÃO 1: KELLY SEGURO (Ajustado para 10% com CAP)
-# ================================
 def calcular_kelly(prob_blended, odd):
-    if odd <= 1.0 or prob_blended <= 0:
-        return 0
-    
+    if odd <= 1.0 or prob_blended <= 0: return 0
     p = prob_blended / 100.0
     q = 1 - p
     b = odd - 1
-    
-    if b <= 0:  # 🔒 proteção extra
-        return 0
-
+    if b <= 0: return 0
     kelly_puro = (b * p - q) / b
     kelly_ajustado = max(0, kelly_puro * 0.10)
-    
-    # 🎯 CAP DE SEGURANÇA: MÁXIMO 3% DA BANCA
     return min(kelly_ajustado, 0.03)
 
-# ================================
-# ALTERAÇÃO 2: EV MAIS SEGURO (Limpo)
-# ================================
 def get_ev(dados, p_dict, key):
     casa = dados['odds'].get(key, 0)
-    prob_modelo = p_dict[key]['prob'] # 🎯 CORREÇÃO: EV_Modelo puro
-
-    if casa <= 1.0 or prob_modelo <= 0:
-        return -100
-
+    prob_modelo = p_dict[key]['prob'] 
+    if casa <= 1.0 or prob_modelo <= 0: return -100
     ev = ((prob_modelo / 100.0) * casa - 1) * 100
-
-    if ev > 60 or (prob_modelo < 35 and key in ["HOME", "AWAY"]):
-        return -999
-
+    if ev > 60 or (prob_modelo < 35 and key in ["HOME", "AWAY"]): return -999
     return ev
 
 def avaliar_perfil_jogo(p_dict):
@@ -320,27 +292,17 @@ def avaliar_perfil_jogo(p_dict):
     elif p_dict["OVER_25"]["prob"] > 55: return "🧨 JOGO ABERTO"
     else: return "⚖️ JOGO EQUILIBRADO"
 
-
-# ================================
-# ALTERAÇÃO 3: STAKE PROTEGIDA
-# ================================
 def renderizar_mercado(col, titulo, p_dict, key, odds_dict, dados, banca_atual):
     prob_blended = get_blended_prob(dados, p_dict, key)
-    
     casa = odds_dict.get(key, 0)
     ev = get_ev(dados, p_dict, key)
-
     justa = 100 / prob_blended if prob_blended > 0 else 0
-
     frac_kelly = calcular_kelly(prob_blended, casa)
-
-    # 🔒 proteção contra stake absurda
     stake_sugerida = max(0, frac_kelly * banca_atual)
 
     icone_fogo = "🔥" if 15 < ev < 60 else ""
     badge_html = f'<div style="color:#28a745; font-size:11px; font-weight:bold; margin-top:3px;">VALOR {icone_fogo} (+{ev:.1f}%)</div>' if 3 < ev < 60 else ''
     kelly_html = f'<div style="color:#17a2b8; font-size:10px; margin-top:4px;">🎯 Stake: R$ {stake_sugerida:.2f} ({(frac_kelly*100):.1f}%)</div>' if frac_kelly > 0 and ev > 3 else ''
-
     estilo = "border:1px solid #28a745; background-color:#1a2b1f;" if 3 < ev < 60 else "border:1px solid #333; background-color:#111;"
 
     html = f'''
@@ -352,7 +314,6 @@ def renderizar_mercado(col, titulo, p_dict, key, odds_dict, dados, banca_atual):
         {kelly_html}
     </div>
     '''
-    
     with col:
         st.markdown(html, unsafe_allow_html=True)
 
@@ -366,48 +327,29 @@ def chamar_ia_fabrica(textos_jogos, modo="GOLS"):
 Seu objetivo NÃO é listar muitas apostas, e sim identificar APENAS oportunidades com vantagem estatística real (value bets), priorizando qualidade sobre quantidade.
 
 ---
-## 🎯 OBJETIVO
-Encontrar apostas com:
-- Valor real (probabilidade > probabilidade implícita da odd)
-- Coerência estatística (xG compatível com o mercado)
-- Boa relação risco/retorno
+## 🎯 ORDENAÇÃO OBRIGATÓRIA E RANKING (TOP DOWN)
+Você DEVE retornar a lista ranqueada do MELHOR jogo (maior Score/Valor/EV) para o PIOR. O card número 1 do seu relatório deve ser a aposta de maior segurança e valor do dia. A ordem dos resultados é fundamental para o painel do usuário.
 
 ---
-## ⚙️ REGRAS GERAIS E RÉGUA ASSIMÉTRICA DE EV (CRÍTICO)
-O mercado costuma inflacionar odds de Under e esmagar odds de Over. Portanto, aplique a seguinte régua:
-1. Para aprovar UNDER: Exija um EV alto (ex: > 10%) E um xG Total projetado baixíssimo. Seja extremamente rigoroso com o contexto.
-2. Para aprovar OVER ou BTTS: Aceite EVs menores (ex: > 3%). Se a odd tiver valor e o xG confirmar a tendência ofensiva das equipes, pode aprovar.
-3. NÃO force mercados. Apenas siga os números.
+## ⚙️ REGRAS GERAIS E RÉGUA ASSIMÉTRICA DE EV
+O mercado costuma inflacionar odds de Under e esmagar odds de Over. Aplique a régua:
+1. Para aprovar UNDER: Exija EV alto (> 10%) E um xG Total projetado baixíssimo.
+2. Para aprovar OVER ou BTTS: Aceite EVs menores (> 3%). Se a odd tiver valor e o xG confirmar a tendência ofensiva, aprove.
 
 ---
-## 💰 FILTRO DE ODDS (CRÍTICO)
-- Odds < 1.70 → DESCARTAR SUMARIAMENTE (Proteção de banca para taxa de acerto)
-- Odds 1.70–1.79 → Aceitável se o EV e xG forem perfeitos
+## 💰 FILTRO DE ODDS
+- Odds < 1.70 → DESCARTAR SUMARIAMENTE
+- Odds 1.70–1.79 → Aceitável se EV perfeito
 - Odds ≥ 1.80 → Padrão mínimo ideal
-- Odds ≥ 2.00 → ALTO VALOR (se coerente)
-
----
-## 📊 CRITÉRIOS DE ANÁLISE
-1. VALOR (CORE): EV (valor esperado) e Diferença entre probabilidade real vs implícita.
-2. MODELAGEM: xG casa, xG fora, xG total e Coerência.
-3. KELLY: Usar como indicador de vantagem. Kelly > 20% = FORTE PENALIZAÇÃO (risco de anomalia no modelo). Se for muito alto, rejeite ou exija cautela extrema.
-4. CONTEXTO: Forma recente e variância.
 
 ---
 ## 🧮 SCORE DE QUALIDADE (0–100)
 Baseado em: + Valor (EV), + Coerência xG, + Qualidade da odd, + Estabilidade.
-Penalizações: Odd < 1.70 (Descarte automático), xG incompatível, Probabilidade inflada, Kelly > 20%.
+Penalizações: Odd < 1.70 (Descarte), Probabilidade inflada, Kelly > 20% (forte penalização).
 ✅ FILTRO FINAL: Score mínimo: 75 | Alta qualidade: ≥ 80 | Elite: ≥ 85
 
 ---
-## 🎯 PERFIL DA APOSTA
-Classificar cada pick:
-- Conservador → prob alta + odd menor
-- Equilibrado → boa relação risco/retorno
-- Agressivo → odd alta + valor identificado
-
----
-## 📤 FORMATO DE SAÍDA (OBRIGATÓRIO PARA CADA PICK APROVADA)
+## 📤 FORMATO DE SAÍDA (Obrigatório para cada pick, do Maior Score para o Menor)
 [ID: XXXX]
 Jogo: Time A vs Time B
 Mercado: (Over / Under / BTTS)
@@ -415,31 +357,30 @@ Odd: X.XX
 Perfil: (Conservador / Equilibrado / Agressivo)
 
 📊 Dados:
-Probabilidade: XX%
-EV: +X%
-xG Casa: X.XX | xG Fora: X.XX | xG Total: X.XX
-Kelly: XX%
-Score: XX/100
+Probabilidade: XX% | EV: +X% | xG Total: X.XX | Kelly: XX% | Score: XX/100
 
 🧠 Justificativa:
-Explicação objetiva baseada em: Valor vs odd, Coerência do xG e a Régua Assimétrica.
+Explicação objetiva baseada em: Valor vs odd, Coerência do xG.
 
 ⚠️ Risco:
-Principal fator que pode quebrar a aposta.
+Fator que pode quebrar a aposta.
 """
     else:
-        prompt_sistema = """Você é um Analista Quantitativo Sênior. Sua missão é cruzar modelos matemáticos (xG, Poisson e EV) com o Momento Recente (Forma) das equipes para validar as melhores oportunidades em mercados de Resultado (Match Odds).
+        prompt_sistema = """Você é um Analista Quantitativo Sênior. Sua missão é cruzar modelos matemáticos (xG, Poisson e EV) com a Forma das equipes em mercados de Resultado (Match Odds).
+
+---
+## 🎯 ORDENAÇÃO OBRIGATÓRIA E RANKING (TOP DOWN)
+Você DEVE retornar a lista ranqueada da aposta de MAIOR confiança (melhor combinação de EV, xG e Forma) para a MENOR. O primeiro ID deve ser a aposta "premium" da rodada.
 
 REGRAS DE OURO:
-1. ANÁLISE MISTA: A decisão DEVE ser baseada em EV positivo (acima de 3.0). Use a "Forma" e os "Gols Pró/Sofridos" apenas para validar se o time sustenta a matemática.
+1. ANÁLISE MISTA: Decisão baseada em EV positivo (> 3.0). Use Forma apenas para validar se o time sustenta a matemática.
 2. ZERO ACHISMO: Proibido criar narrativas como "peso da camisa".
-3. ALERTA DE VARIAÇÃO: Se a Forma for terrível, mas o modelo apontar valor, alerte sobre a ineficiência.
 
-FORMATO OBRIGATÓRIO (retorne apenas as aprovações):
+FORMATO OBRIGATÓRIO (Do melhor para o pior):
 💎 APROVADOS PARA INVESTIMENTO:
-1. [ID: XXXXXX] [NOME DO JOGO] 🎯 **[MERCADO SUGERIDO]**
-* 📊 **Lógica Quantitativa:** [Justifique o cruzamento]
-* ⚠️ **Ponto de Atenção:** [Destaque um risco real]
+[ID: XXXXXX] [NOME DO JOGO] 🎯 **[MERCADO SUGERIDO]**
+* 📊 **Lógica:** [Justifique]
+* ⚠️ **Atenção:** [Risco real]
 """
     try:
         return model_ia.generate_content(prompt_sistema + "\n\n📋 DADOS PARA ANÁLISE:\n\n" + textos_jogos).text
@@ -537,28 +478,23 @@ if agenda:
     
     col_ia1, col_ia2 = st.columns(2)
     
-    # --- MODO GOLS ---
     with col_ia1:
         if st.button("🧠 Filtrar com IA (GOLS)", use_container_width=True):
             textos = ""
             for j in jogos_visiveis:
                 f_id = str(j['fixture']['id'])
                 d = banco_local["datas"][data_str]["stats"].get(f_id)
-                
                 if d and "erro" not in d:
                     m_h, m_a = calcular_matematica_quant(d)
                     p = calcular_poisson(m_h, m_a)
-                    
                     if p:
                         xg_total = m_h + m_a
-                        # Calculando o Kelly para enviar à IA (multiplicado por 100 para percentual legível)
                         k_o15 = calcular_kelly(get_blended_prob(d, p, 'OVER_15'), d['odds'].get('OVER_15', 0)) * 100
                         k_u25 = calcular_kelly(get_blended_prob(d, p, 'UNDER_25'), d['odds'].get('UNDER_25', 0)) * 100
                         k_o25 = calcular_kelly(get_blended_prob(d, p, 'OVER_25'), d['odds'].get('OVER_25', 0)) * 100
                         k_u35 = calcular_kelly(get_blended_prob(d, p, 'UNDER_35'), d['odds'].get('UNDER_35', 0)) * 100
                         k_btts = calcular_kelly(get_blended_prob(d, p, 'BTTS'), d['odds'].get('BTTS', 0)) * 100
 
-                        # INSERINDO TODOS OS DADOS COM O XG TOTAL E O KELLY ATUALIZADOS
                         linha = f"""
 ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
 - Forma Casa: {d['h']['forma']} | Gols Pró: {d['h']['media_feita']:.2f} | xG Casa: {m_h:.2f}
@@ -572,24 +508,22 @@ ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
 """
                         textos += linha + "\n"
             
-            with st.spinner("IA aplicando crivo de Auditoria Avançada (Gols)..."):
+            with st.spinner("IA Rankeando Melhores Apostas de Gols..."):
                 resposta = chamar_ia_fabrica(textos, modo="GOLS")
                 st.session_state["ia_gols"] = resposta
+                # 🎯 CAPTURA DOS IDs NA ORDEM DE RANKING DA IA
+                st.session_state["ids_gols"] = re.findall(r'\[ID:\s*(\d+)\]', resposta)
 
-    # --- MODO RESULTADO ---
     with col_ia2:
         if st.button("⚔️ Filtrar com IA (RESULTADO)", use_container_width=True):
             textos = ""
             for j in jogos_visiveis:
                 f_id = str(j['fixture']['id'])
                 d = banco_local["datas"][data_str]["stats"].get(f_id)
-                
                 if d and "erro" not in d:
                     m_h, m_a = calcular_matematica_quant(d)
                     p = calcular_poisson(m_h, m_a)
-                    
                     if p:
-                        # INSERINDO TODOS OS MERCADOS DE RESULTADO
                         linha = f"""
 ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
 - Forma Casa: {d['h']['forma']} | Gols Pró: {d['h']['media_feita']:.2f} | Sofre: {d['h']['media_sofrida']:.2f} | xG Pró: {d['h']['media_xg_f']:.2f}
@@ -603,30 +537,33 @@ ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
 """
                         textos += linha + "\n"
             
-            with st.spinner("IA cruzando Forma e xG para Resultados..."):
+            with st.spinner("IA Rankeando Melhores Resultados..."):
                 resposta = chamar_ia_fabrica(textos, modo="RESULTADO")
                 st.session_state["ia_resultado"] = resposta
+                # 🎯 CAPTURA DOS IDs NA ORDEM DE RANKING DA IA
+                st.session_state["ids_res"] = re.findall(r'\[ID:\s*(\d+)\]', resposta)
 
-    # ==========================================================
-    # 👇 PARA MOSTRAR OS RESULTADOS 👇
-    # ==========================================================
     st.write("---")
     
     if "ia_gols" in st.session_state:
-        st.markdown("#### 🔥 Sugestões IA - GOLS")
-        # Se a IA for muito rigorosa e não aprovar nada, ela avisa em vez de ficar em branco
-        if st.session_state["ia_gols"].strip() == "":
-            st.warning("A IA analisou os dados, mas foi rigorosa e não encontrou nenhum jogo com EV/Forma seguros para Gols.")
-        else:
-            st.info(st.session_state["ia_gols"])
+        st.markdown("#### 🔥 Ranking IA - GOLS")
+        if st.session_state["ia_gols"].strip() == "": st.warning("Nenhum jogo atendeu aos rigorosos critérios de valor para Gols.")
+        else: st.info(st.session_state["ia_gols"])
             
     if "ia_resultado" in st.session_state:
-        st.markdown("#### ⚔️ Sugestões IA - RESULTADO")
-        if st.session_state["ia_resultado"].strip() == "":
-            st.warning("A IA analisou os dados, mas foi rigorosa e não encontrou nenhum jogo com EV/Forma seguros para Resultado.")
-        else:
-            st.info(st.session_state["ia_resultado"])
+        st.markdown("#### ⚔️ Ranking IA - RESULTADO")
+        if st.session_state["ia_resultado"].strip() == "": st.warning("Nenhum jogo atendeu aos rigorosos critérios de valor para Resultado.")
+        else: st.info(st.session_state["ia_resultado"])
     
+    # ==========================================================
+    # 🎯 ORDENAÇÃO INTELIGENTE DOS CARDS (TOP DOWN RANKING)
+    # ==========================================================
+    ids_gols_rank = st.session_state.get("ids_gols", [])
+    jogos_gols_sorted = sorted(jogos_visiveis, key=lambda j: ids_gols_rank.index(str(j['fixture']['id'])) if str(j['fixture']['id']) in ids_gols_rank else 999999)
+
+    ids_res_rank = st.session_state.get("ids_res", [])
+    jogos_res_sorted = sorted(jogos_visiveis, key=lambda j: ids_res_rank.index(str(j['fixture']['id'])) if str(j['fixture']['id']) in ids_res_rank else 999999)
+
     # ==========================================================
     # ABAS PRINCIPAIS DE CÁLCULO E RENDERIZAÇÃO
     # ==========================================================
@@ -637,22 +574,26 @@ ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
 
     # ============================== ABA GOLS
     with tab_gols:
-        for j in jogos_visiveis:
+        for j in jogos_gols_sorted: # 🎯 Loop usando a lista ordenada de gols
             f_id = str(j['fixture']['id']); d = banco_local["datas"][data_str]["stats"].get(f_id)
             if d and "erro" not in d:
                 m_h, m_a = calcular_matematica_quant(d); p = calcular_poisson(m_h, m_a)
                 if p:
                     perfil = avaliar_perfil_jogo(p)
                     cor_perfil = "#dc3545" if "ABERTO" in perfil else "#6c757d" if "TRAVADO" in perfil else "#ffc107"
-                    st.markdown(f"""<div style='border:1px solid #333; border-radius:8px; padding:12px; background-color:#0e1117; margin-bottom:10px;'>
-                        <div style='display:flex; justify-content:space-between; color:#888; font-size:11px;'><span>🕒 {j['fixture']['date'][11:16]} • {j['league']['name']}</span><span style='color:{cor_perfil}; font-weight:bold;'>{perfil}</span></div>
+                    
+                    # 🎯 Destaque visual para os jogos aprovados pela IA
+                    borda_rank = "border: 2px solid #ffcc00;" if f_id in ids_gols_rank else "border: 1px solid #333;"
+                    posicao = f"<span style='color:#ffcc00; font-weight:bold; margin-right:8px;'>TOP {ids_gols_rank.index(f_id) + 1}</span>" if f_id in ids_gols_rank else ""
+
+                    st.markdown(f"""<div style='{borda_rank} border-radius:8px; padding:12px; background-color:#0e1117; margin-bottom:10px;'>
+                        <div style='display:flex; justify-content:space-between; color:#888; font-size:11px;'><span>{posicao} 🕒 {j['fixture']['date'][11:16]} • {j['league']['name']}</span><span style='color:{cor_perfil}; font-weight:bold;'>{perfil}</span></div>
                         <div style='font-size:18px; font-weight:bold; color:white; margin: 8px 0;'>{j['teams']['home']['name']} <span style='color:#555; font-size:12px;'>vs</span> {j['teams']['away']['name']}</div>
                         """, unsafe_allow_html=True)
                     cols = st.columns(3); idx_col = 0
                     for m_key in dict_m_gols.keys(): 
                         renderizar_mercado(cols[idx_col % 3], dict_m_gols[m_key], p, m_key, d['odds'], d, banca_atual); idx_col += 1
                     
-                    # === INÍCIO: MENU EXPANDÍVEL RESTAURADO ===
                     with st.expander("📊 Info Detalhada & Salvar Pick"):
                         col_info_h, col_info_a = st.columns(2)
                         with col_info_h:
@@ -675,25 +616,27 @@ ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
                         if c_btn.button("✅ Salvar", key=f"bsg_{f_id}"):
                             banco_local["picks"].append({"data": data_str, "jogo": f"{j['teams']['home']['name']} v {j['teams']['away']['name']}", "mercado": dict_m_gols[mk_sel], "odd": d['odds'].get(mk_sel, 0), "prob": round(get_blended_prob(d, p, mk_sel),1), "ev": round(get_ev(d, p, mk_sel),1), "status": "Pendente", "stake": stk_input})
                             salvar_banco(banco_local); st.toast("Salvo!")
-                    # === FIM: MENU EXPANDÍVEL RESTAURADO ===
                     st.markdown("</div>", unsafe_allow_html=True)
 
     # ============================== ABA RESULTADO
     with tab_result:
-        for j in jogos_visiveis:
+        for j in jogos_res_sorted: # 🎯 Loop usando a lista ordenada de resultados
             f_id = str(j['fixture']['id']); d = banco_local["datas"][data_str]["stats"].get(f_id)
             if d and "erro" not in d:
                 m_h, m_a = calcular_matematica_quant(d); p = calcular_poisson(m_h, m_a)
                 if p:
-                    st.markdown(f"""<div style='border:1px solid #333; border-radius:8px; padding:12px; background-color:#0e1117; margin-bottom:10px;'>
-                        <div style='display:flex; justify-content:space-between; color:#888; font-size:11px;'><span>🕒 {j['fixture']['date'][11:16]} • {j['league']['name']}</span></div>
+                    # 🎯 Destaque visual para os jogos aprovados pela IA
+                    borda_rank = "border: 2px solid #ffcc00;" if f_id in ids_res_rank else "border: 1px solid #333;"
+                    posicao = f"<span style='color:#ffcc00; font-weight:bold; margin-right:8px;'>TOP {ids_res_rank.index(f_id) + 1}</span>" if f_id in ids_res_rank else ""
+
+                    st.markdown(f"""<div style='{borda_rank} border-radius:8px; padding:12px; background-color:#0e1117; margin-bottom:10px;'>
+                        <div style='display:flex; justify-content:space-between; color:#888; font-size:11px;'><span>{posicao} 🕒 {j['fixture']['date'][11:16]} • {j['league']['name']}</span></div>
                         <div style='font-size:18px; font-weight:bold; color:white; margin: 8px 0;'>{j['teams']['home']['name']} <span style='color:#555; font-size:12px;'>vs</span> {j['teams']['away']['name']}</div>
                         """, unsafe_allow_html=True)
                     cols = st.columns(3); idx_col = 0
                     for m_key in dict_m_res.keys(): 
                         renderizar_mercado(cols[idx_col % 3], dict_m_res[m_key], p, m_key, d['odds'], d, banca_atual); idx_col += 1
                     
-                    # === INÍCIO: MENU EXPANDÍVEL RESTAURADO ===
                     with st.expander("📊 Info Detalhada & Salvar Pick"):
                         col_info_h, col_info_a = st.columns(2)
                         with col_info_h:
@@ -716,5 +659,4 @@ ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
                         if c_btn.button("✅ Salvar", key=f"bsr_{f_id}"):
                             banco_local["picks"].append({"data": data_str, "jogo": f"{j['teams']['home']['name']} v {j['teams']['away']['name']}", "mercado": dict_m_res[mk_sel], "odd": d['odds'].get(mk_sel, 0), "prob": round(get_blended_prob(d, p, mk_sel),1), "ev": round(get_ev(d, p, mk_sel),1), "status": "Pendente", "stake": stk_input})
                             salvar_banco(banco_local); st.toast("Salvo!")
-                    # === FIM: MENU EXPANDÍVEL RESTAURADO ===
                     st.markdown("</div>", unsafe_allow_html=True)
