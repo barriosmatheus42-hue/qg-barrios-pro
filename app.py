@@ -460,8 +460,10 @@ FORMATO OBRIGATÓRIO (Do melhor para o pior):
 * 📊 **Lógica Quantitativa:** [Justifique o cruzamento]
 * ⚠️ **Ponto de Atenção:** [Destaque um risco real]
 """
-    try:
-        return model_ia.generate_content(prompt_sistema + "\n\n📋 DADOS PARA ANÁLISE:\n\n" + textos_jogos).text
+   try:
+        # 🎯 CADEADO DE TEMPERATURA ZERO (Respostas sempre 100% idênticas)
+        configuracao = genai.types.GenerationConfig(temperature=0.0)
+        return model_ia.generate_content(prompt_sistema + "\n\n📋 DADOS PARA ANÁLISE:\n\n" + textos_jogos, generation_config=configuracao).text
     except Exception as e: return f"🚨 Erro na IA: {e}"
 
 # ==========================================
