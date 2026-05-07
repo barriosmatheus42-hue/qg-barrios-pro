@@ -45,48 +45,57 @@ def conectar_modelo_ia():
 model_ia = conectar_modelo_ia()
 
 # ==========================================
-# 1. GERENCIAMENTO DO BANCO NA NUVEM (JSONBin)
+# 1. GERENCIAMENTO DO BANCO (HÍBRIDO: NUVEM + LOCAL)
 # ==========================================
+ARQUIVO_BANCO = "banco_barrios_pro.json"
+
 def carregar_banco():
     if "banco_local" in st.session_state:
         return st.session_state["banco_local"]
         
+    # PASSO 1: Tenta carregar o cache pesado (Agenda e Análises) do arquivo antigo
+    banco = {"datas": {}, "creditos_restantes": 7500, "picks": [], "banca_inicial": 30.0}
+    if os.path.exists(ARQUIVO_BANCO):
+        try:
+            with open(ARQUIVO_BANCO, "r") as f:
+                banco_lido = json.load(f)
+                if "datas" in banco_lido:
+                    banco["datas"] = banco_lido["datas"]
+        except: pass
+        
+    # PASSO 2: Puxa o cofre na nuvem para garantir que o saldo e apostas estão protegidos
     try:
         res = requests.get(f"{JSONBIN_URL}/latest", headers=JSONBIN_HEADERS, timeout=10)
-        
-        if res.status_code != 200:
-            st.error(f"🚨 ERRO NO COFRE: Verifique se o seu BIN_ID tem só letras/números. Erro: {res.text}")
-            banco = {"datas": {}, "creditos_restantes": 7500, "picks": [], "banca_inicial": 30.0}
-        else:
+        if res.status_code == 200:
             banco_nuvem = res.json().get("record", {})
-            banco = {
-                "datas": {}, 
-                "picks": banco_nuvem.get("picks", []),
-                "banca_inicial": banco_nuvem.get("banca_inicial", 30.0),
-                "creditos_restantes": 7500
-            }
-            
-        st.session_state["banco_local"] = banco 
-        return banco
+            banco["picks"] = banco_nuvem.get("picks", [])
+            banco["banca_inicial"] = banco_nuvem.get("banca_inicial", 30.0)
     except Exception as e:
-        st.error(f"🚨 Falha de internet ao ler o cofre: {e}")
-        return {"datas": {}, "creditos_restantes": 7500, "picks": [], "banca_inicial": 30.0}
+        pass
+        
+    st.session_state["banco_local"] = banco 
+    return banco
 
 def salvar_banco(dados):
     st.session_state["banco_local"] = dados
     
+    # PASSO 1: Salva TUDO no arquivo local (Isso recria a memória do dia inteiro que você gostava)
+    try:
+        with open(ARQUIVO_BANCO, "w") as f:
+            json.dump(dados, f)
+    except: pass
+
+    # PASSO 2: Salva só Dinheiro e Apostas na Nuvem (Foge do Erro 413)
     try:
         dados_nuvem = {
             "banca_inicial": dados.get("banca_inicial", 30.0),
             "picks": dados.get("picks", [])
         }
-        
         headers_put = JSONBIN_HEADERS.copy()
         headers_put["X-Bin-Versioning"] = "false" 
-        
         requests.put(JSONBIN_URL, headers=headers_put, json=dados_nuvem, timeout=10)
     except Exception as e:
-        st.error(f"🚨 Falha de internet ao salvar: {e}")
+        pass
 
 banco_local = carregar_banco()
 
