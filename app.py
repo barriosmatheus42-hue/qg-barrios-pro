@@ -59,11 +59,11 @@ def carregar_banco():
             banco = {"datas": {}, "creditos_restantes": 7500, "picks": [], "banca_inicial": 30.0}
         else:
             banco_nuvem = res.json().get("record", {})
-            # 🎯 O SEGREDO: Puxa o dinheiro da nuvem, mas a agenda começa limpa no celular
             banco = {
                 "datas": {}, 
                 "picks": banco_nuvem.get("picks", []),
-                "banca_inicial": banco_nuvem.get("banca_inicial", 30.0)
+                "banca_inicial": banco_nuvem.get("banca_inicial", 30.0),
+                "creditos_restantes": 7500
             }
             
         st.session_state["banco_local"] = banco 
@@ -73,7 +73,6 @@ def carregar_banco():
         return {"datas": {}, "creditos_restantes": 7500, "picks": [], "banca_inicial": 30.0}
 
 def salvar_banco(dados):
-    # Salva TUDO (incluindo agenda) na memória rápida do celular para não piscar a tela
     st.session_state["banco_local"] = dados
     
     try:
@@ -86,13 +85,21 @@ def salvar_banco(dados):
         headers_put = JSONBIN_HEADERS.copy()
         headers_put["X-Bin-Versioning"] = "false" 
         
-        res = requests.put(JSONBIN_URL, headers=headers_put, json=dados_nuvem, timeout=10)
-        if res.status_code != 200:
-            st.error(f"🚨 ERRO AO SALVAR NO COFRE: {res.text}")
+        requests.put(JSONBIN_URL, headers=headers_put, json=dados_nuvem, timeout=10)
     except Exception as e:
         st.error(f"🚨 Falha de internet ao salvar: {e}")
 
 banco_local = carregar_banco()
+
+def atualizar_saldo_realtime():
+    try:
+        res = requests.get(f"{BASE_URL}/status", headers=HEADERS, timeout=5).json()
+        if res.get('response'):
+            rem = res['response']['requests']['limit_day'] - res['response']['requests']['current']
+            banco_local["creditos_restantes"] = rem
+            return rem
+    except: pass
+    return banco_local.get("creditos_restantes", 0) or 0
 
 # ==========================================
 # 2. MOTOR MATEMÁTICO (POISSON V6.1)
@@ -525,14 +532,34 @@ if agenda:
     jogos_visiveis = []
     palavras_proibidas = ['u19', 'u20', 'u21', 'u23', 'youth', 'women', 'feminino', 'reserve', 'amateur', 'regional', 'state']
     paises_confiaveis = ['Brazil', 'Argentina', 'USA', 'Mexico', 'Netherlands', 'Portugal', 'Turkey', 'Saudi-Arabia', 'Switzerland', 'Japan', 'Colombia', 'Chile', 'South-Korea', 'Scotland', 'Greece', 'Belgium', 'Uruguay', 'Ecuador', 'Paraguay', 'Bolivia', 'Peru', 'Venezuela']
+    
     for j in agenda:
         l_id, l_name, l_country = j['league']['id'], str(j['league']['name']).lower(), str(j['league']['country'])
         if (tipo_filtro == "🏆 Só Ligas PRO" and l_id in LIGAS_PRO) or (tipo_filtro == "🌍 PRO + Confiáveis" and (l_id in LIGAS_PRO or (l_country in paises_confiaveis and not any(p in l_name for p in palavras_proibidas)))) or tipo_filtro == "🗑️ O Mundo Todo":
             if j not in jogos_visiveis: jogos_visiveis.append(j)
 
+    # ==========================================================
+    # 👇 LISTA PRÉVIA DE JOGOS (COM BOTÃO INDIVIDUAL) RESTAURADA
+    # ==========================================================
+    with st.expander(f"👀 Ver Lista de Jogos Encontrados ({len(jogos_visiveis)})", expanded=True):
+        for j in jogos_visiveis:
+            f_id = str(j['fixture']['id'])
+            ja_analisado = f_id in banco_local["datas"][data_str]["stats"]
+            
+            c1, c2 = st.columns([4, 1])
+            c1.markdown(f"<div style='font-size:13px;'>🕒 <b>{j['fixture']['date'][11:16]}</b> | {j['league']['name']}<br>🏠 {j['teams']['home']['name']} <b>vs</b> ✈️ {j['teams']['away']['name']}</div>", unsafe_allow_html=True)
+            
+            with c2:
+                if ja_analisado:
+                    st.button("✅ Analisado", key=f"btn_ind_{f_id}", disabled=True)
+                else:
+                    if st.button("Analisar", key=f"btn_ind_{f_id}"):
+                        acao_analisar([j], data_str)
+            st.markdown("<hr style='margin: 5px 0; opacity: 0.2;'>", unsafe_allow_html=True)
+
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
-        if st.button(f"🚀 2. Analisar Visíveis ({len(jogos_visiveis)})", type="primary", use_container_width=True): acao_analisar(jogos_visiveis, data_str)
+        if st.button(f"🚀 2. Analisar TODOS Visíveis ({len(jogos_visiveis)})", type="primary", use_container_width=True): acao_analisar(jogos_visiveis, data_str)
     
     st.write("---")
 
