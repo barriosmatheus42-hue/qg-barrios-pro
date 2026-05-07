@@ -55,15 +55,17 @@ def carregar_banco():
         res = requests.get(f"{JSONBIN_URL}/latest", headers=JSONBIN_HEADERS, timeout=10)
         
         if res.status_code != 200:
-            st.error(f"🚨 ERRO NO COFRE: Verifique se o seu BIN_ID tem só letras/números (sem 'jsonbin.io/'). Erro: {res.text}")
+            st.error(f"🚨 ERRO NO COFRE: Verifique se o seu BIN_ID tem só letras/números. Erro: {res.text}")
             banco = {"datas": {}, "creditos_restantes": 7500, "picks": [], "banca_inicial": 30.0}
         else:
-            banco = res.json().get("record", {})
+            banco_nuvem = res.json().get("record", {})
+            # 🎯 O SEGREDO: Puxa o dinheiro da nuvem, mas a agenda começa limpa no celular
+            banco = {
+                "datas": {}, 
+                "picks": banco_nuvem.get("picks", []),
+                "banca_inicial": banco_nuvem.get("banca_inicial", 30.0)
+            }
             
-        if "picks" not in banco: banco["picks"] = []
-        if "banca_inicial" not in banco: banco["banca_inicial"] = 30.0
-        if "datas" not in banco: banco["datas"] = {}
-        
         st.session_state["banco_local"] = banco 
         return banco
     except Exception as e:
@@ -71,28 +73,26 @@ def carregar_banco():
         return {"datas": {}, "creditos_restantes": 7500, "picks": [], "banca_inicial": 30.0}
 
 def salvar_banco(dados):
+    # Salva TUDO (incluindo agenda) na memória rápida do celular para não piscar a tela
     st.session_state["banco_local"] = dados
+    
     try:
+        # 🎯 FILTRO ANTI-ERRO 413: Manda SÓ o dinheiro e as apostas para o cofre
+        dados_nuvem = {
+            "banca_inicial": dados.get("banca_inicial", 30.0),
+            "picks": dados.get("picks", [])
+        }
+        
         headers_put = JSONBIN_HEADERS.copy()
         headers_put["X-Bin-Versioning"] = "false" 
         
-        res = requests.put(JSONBIN_URL, headers=headers_put, json=dados, timeout=10)
+        res = requests.put(JSONBIN_URL, headers=headers_put, json=dados_nuvem, timeout=10)
         if res.status_code != 200:
             st.error(f"🚨 ERRO AO SALVAR NO COFRE: {res.text}")
     except Exception as e:
         st.error(f"🚨 Falha de internet ao salvar: {e}")
 
 banco_local = carregar_banco()
-
-def atualizar_saldo_realtime():
-    try:
-        res = requests.get(f"{BASE_URL}/status", headers=HEADERS, timeout=5).json()
-        if res.get('response'):
-            rem = res['response']['requests']['limit_day'] - res['response']['requests']['current']
-            banco_local["creditos_restantes"] = rem
-            return rem
-    except: pass
-    return banco_local.get("creditos_restantes", 0) or 0
 
 # ==========================================
 # 2. MOTOR MATEMÁTICO (POISSON V6.1)
