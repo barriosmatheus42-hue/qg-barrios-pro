@@ -76,7 +76,6 @@ def salvar_banco(dados):
     st.session_state["banco_local"] = dados
     
     try:
-        # 🎯 FILTRO ANTI-ERRO 413: Manda SÓ o dinheiro e as apostas para o cofre
         dados_nuvem = {
             "banca_inicial": dados.get("banca_inicial", 30.0),
             "picks": dados.get("picks", [])
@@ -260,11 +259,14 @@ def acao_analisar(jogos_alvo, data_str, force=False):
         f_id = str(jogo['fixture']['id'])
         if force or f_id not in banco_local["datas"][data_str]["stats"]:
             h_id, a_id, l_id = jogo['teams']['home']['id'], jogo['teams']['away']['id'], jogo['league']['id']
-            odds, s_h, s_a = buscar_odds_vips(f_id), buscar_historico_global(h_id, l_id), buscar_historico_global(a_id, l_id)
+            odds = buscar_odds_vips(f_id)
+            s_h = buscar_historico_global(h_id, l_id)
+            s_a = buscar_historico_global(a_id, l_id)
             if s_h and s_a: 
                 banco_local["datas"][data_str]["stats"][f_id] = {"odds": odds, "h": s_h, "a": s_a, "l_id": l_id}
                 salvar_banco(banco_local)
-            else: banco_local["datas"][data_str]["stats"][f_id] = {"erro": "Sem histórico suficiente"}
+            else: 
+                banco_local["datas"][data_str]["stats"][f_id] = {"erro": "Sem histórico suficiente"}
             if saldo_atual is not None: saldo_atual -= 17 
             time.sleep(0.2)
         p_bar.progress((idx + 1) / len(jogos_alvo))
@@ -538,25 +540,6 @@ if agenda:
         if (tipo_filtro == "🏆 Só Ligas PRO" and l_id in LIGAS_PRO) or (tipo_filtro == "🌍 PRO + Confiáveis" and (l_id in LIGAS_PRO or (l_country in paises_confiaveis and not any(p in l_name for p in palavras_proibidas)))) or tipo_filtro == "🗑️ O Mundo Todo":
             if j not in jogos_visiveis: jogos_visiveis.append(j)
 
-    # ==========================================================
-    # 👇 LISTA PRÉVIA DE JOGOS (COM BOTÃO INDIVIDUAL) RESTAURADA
-    # ==========================================================
-    with st.expander(f"👀 Ver Lista de Jogos Encontrados ({len(jogos_visiveis)})", expanded=True):
-        for j in jogos_visiveis:
-            f_id = str(j['fixture']['id'])
-            ja_analisado = f_id in banco_local["datas"][data_str]["stats"]
-            
-            c1, c2 = st.columns([4, 1])
-            c1.markdown(f"<div style='font-size:13px;'>🕒 <b>{j['fixture']['date'][11:16]}</b> | {j['league']['name']}<br>🏠 {j['teams']['home']['name']} <b>vs</b> ✈️ {j['teams']['away']['name']}</div>", unsafe_allow_html=True)
-            
-            with c2:
-                if ja_analisado:
-                    st.button("✅ Analisado", key=f"btn_ind_{f_id}", disabled=True)
-                else:
-                    if st.button("Analisar", key=f"btn_ind_{f_id}"):
-                        acao_analisar([j], data_str)
-            st.markdown("<hr style='margin: 5px 0; opacity: 0.2;'>", unsafe_allow_html=True)
-
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
         if st.button(f"🚀 2. Analisar TODOS Visíveis ({len(jogos_visiveis)})", type="primary", use_container_width=True): acao_analisar(jogos_visiveis, data_str)
@@ -673,8 +656,20 @@ ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
     # ============================== ABA GOLS
     with tab_gols:
         for j in jogos_gols_sorted:
-            f_id = str(j['fixture']['id']); d = banco_local["datas"][data_str]["stats"].get(f_id)
-            if d and "erro" not in d:
+            f_id = str(j['fixture']['id'])
+            d = banco_local["datas"][data_str]["stats"].get(f_id)
+            
+            # SE AINDA NÃO FOI ANALISADO (CARD MINI)
+            if not d or "erro" in d:
+                st.markdown(f"""<div style='border: 1px solid #333; border-radius:8px; padding:12px; background-color:#0e1117; margin-bottom:5px; border-left: 4px solid #555;'>
+                    <div style='color:#888; font-size:11px;'>🕒 {j['fixture']['date'][11:16]} • {j['league']['name']}</div>
+                    <div style='font-size:16px; font-weight:bold; color:white; margin-top:4px;'>{j['teams']['home']['name']} <span style='color:#555; font-size:12px;'>vs</span> {j['teams']['away']['name']}</div>
+                </div>""", unsafe_allow_html=True)
+                if st.button("📊 Analisar Jogo", key=f"btn_mini_gols_{f_id}"):
+                    acao_analisar([j], data_str, force=True)
+
+            # SE JÁ FOI ANALISADO COM SUCESSO (CARD FULL)
+            else:
                 m_h, m_a = calcular_matematica_quant(d); p = calcular_poisson(m_h, m_a)
                 if p:
                     perfil = avaliar_perfil_jogo(p)
@@ -691,7 +686,7 @@ ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
                     for m_key in dict_m_gols.keys(): 
                         renderizar_mercado(cols[idx_col % 3], dict_m_gols[m_key], p, m_key, d['odds'], d, banca_atual); idx_col += 1
                     
-                    with st.expander("📊 Info Detalhada & Salvar Pick"):
+                    with st.expander("📊 Info Detalhada, Salvar & Atualizar"):
                         col_info_h, col_info_a = st.columns(2)
                         with col_info_h:
                             st.markdown(f"🏠 **{j['teams']['home']['name']}**")
@@ -706,20 +701,37 @@ ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
                         
                         st.write("---")
                         
-                        c_sel, c_stk, c_btn = st.columns([2, 1, 1])
+                        c_sel, c_stk, c_btn, c_upd = st.columns([2, 1, 1, 1])
                         mk_sel = c_sel.selectbox("Mercado:", list(dict_m_gols.keys()), format_func=lambda x: dict_m_gols[x], key=f"sg_{f_id}", label_visibility="collapsed")
                         stake_sug = calcular_kelly(get_blended_prob(d, p, mk_sel), d['odds'].get(mk_sel,0)) * banca_atual
                         stk_input = c_stk.number_input("R$", value=float(max(1.0, round(stake_sug, 2))), step=1.0, key=f"stkg_{f_id}")
+                        
                         if c_btn.button("✅ Salvar", key=f"bsg_{f_id}"):
                             banco_local["picks"].append({"data": data_str, "jogo": f"{j['teams']['home']['name']} v {j['teams']['away']['name']}", "mercado": dict_m_gols[mk_sel], "odd": d['odds'].get(mk_sel, 0), "prob": round(get_blended_prob(d, p, mk_sel),1), "ev": round(get_ev(d, p, mk_sel),1), "status": "Pendente", "stake": stk_input})
                             salvar_banco(banco_local); st.toast("Salvo!")
+                            
+                        if c_upd.button("🔄 Atualizar", key=f"upd_gols_{f_id}"):
+                            acao_analisar([j], data_str, force=True)
+                            
                     st.markdown("</div>", unsafe_allow_html=True)
 
     # ============================== ABA RESULTADO
     with tab_result:
         for j in jogos_res_sorted:
-            f_id = str(j['fixture']['id']); d = banco_local["datas"][data_str]["stats"].get(f_id)
-            if d and "erro" not in d:
+            f_id = str(j['fixture']['id'])
+            d = banco_local["datas"][data_str]["stats"].get(f_id)
+            
+            # SE AINDA NÃO FOI ANALISADO (CARD MINI)
+            if not d or "erro" in d:
+                st.markdown(f"""<div style='border: 1px solid #333; border-radius:8px; padding:12px; background-color:#0e1117; margin-bottom:5px; border-left: 4px solid #555;'>
+                    <div style='color:#888; font-size:11px;'>🕒 {j['fixture']['date'][11:16]} • {j['league']['name']}</div>
+                    <div style='font-size:16px; font-weight:bold; color:white; margin-top:4px;'>{j['teams']['home']['name']} <span style='color:#555; font-size:12px;'>vs</span> {j['teams']['away']['name']}</div>
+                </div>""", unsafe_allow_html=True)
+                if st.button("📊 Analisar Jogo", key=f"btn_mini_res_{f_id}"):
+                    acao_analisar([j], data_str, force=True)
+
+            # SE JÁ FOI ANALISADO COM SUCESSO (CARD FULL)
+            else:
                 m_h, m_a = calcular_matematica_quant(d); p = calcular_poisson(m_h, m_a)
                 if p:
                     borda_rank = "border: 2px solid #ffcc00;" if f_id in ids_res_rank else "border: 1px solid #333;"
@@ -733,7 +745,7 @@ ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
                     for m_key in dict_m_res.keys(): 
                         renderizar_mercado(cols[idx_col % 3], dict_m_res[m_key], p, m_key, d['odds'], d, banca_atual); idx_col += 1
                     
-                    with st.expander("📊 Info Detalhada & Salvar Pick"):
+                    with st.expander("📊 Info Detalhada, Salvar & Atualizar"):
                         col_info_h, col_info_a = st.columns(2)
                         with col_info_h:
                             st.markdown(f"🏠 **{j['teams']['home']['name']}**")
@@ -748,11 +760,16 @@ ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
                         
                         st.write("---")
                         
-                        c_sel, c_stk, c_btn = st.columns([2, 1, 1])
+                        c_sel, c_stk, c_btn, c_upd = st.columns([2, 1, 1, 1])
                         mk_sel = c_sel.selectbox("Mercado:", list(dict_m_res.keys()), format_func=lambda x: dict_m_res[x], key=f"sr_{f_id}", label_visibility="collapsed")
                         stake_sug = calcular_kelly(get_blended_prob(d, p, mk_sel), d['odds'].get(mk_sel,0)) * banca_atual
                         stk_input = c_stk.number_input("R$", value=float(max(1.0, round(stake_sug, 2))), step=1.0, key=f"stkr_{f_id}")
+                        
                         if c_btn.button("✅ Salvar", key=f"bsr_{f_id}"):
                             banco_local["picks"].append({"data": data_str, "jogo": f"{j['teams']['home']['name']} v {j['teams']['away']['name']}", "mercado": dict_m_res[mk_sel], "odd": d['odds'].get(mk_sel, 0), "prob": round(get_blended_prob(d, p, mk_sel),1), "ev": round(get_ev(d, p, mk_sel),1), "status": "Pendente", "stake": stk_input})
                             salvar_banco(banco_local); st.toast("Salvo!")
+                            
+                        if c_upd.button("🔄 Atualizar", key=f"upd_res_{f_id}"):
+                            acao_analisar([j], data_str, force=True)
+                            
                     st.markdown("</div>", unsafe_allow_html=True)
