@@ -48,14 +48,12 @@ model_ia = conectar_modelo_ia()
 # 1. GERENCIAMENTO DO BANCO NA NUVEM (JSONBin)
 # ==========================================
 def carregar_banco():
-    # 1. Tenta carregar da memória rápida da sessão primeiro (impede o apagão)
     if "banco_local" in st.session_state:
         return st.session_state["banco_local"]
         
     try:
         res = requests.get(f"{JSONBIN_URL}/latest", headers=JSONBIN_HEADERS, timeout=10)
         
-        # Se o cofre reclamar da senha ou ID, joga na tela!
         if res.status_code != 200:
             st.error(f"🚨 ERRO NO COFRE: Verifique se o seu BIN_ID tem só letras/números (sem 'jsonbin.io/'). Erro: {res.text}")
             banco = {"datas": {}, "creditos_restantes": 7500, "picks": [], "banca_inicial": 30.0}
@@ -66,17 +64,15 @@ def carregar_banco():
         if "banca_inicial" not in banco: banco["banca_inicial"] = 30.0
         if "datas" not in banco: banco["datas"] = {}
         
-        st.session_state["banco_local"] = banco # Salva na memória rápida
+        st.session_state["banco_local"] = banco 
         return banco
     except Exception as e:
         st.error(f"🚨 Falha de internet ao ler o cofre: {e}")
         return {"datas": {}, "creditos_restantes": 7500, "picks": [], "banca_inicial": 30.0}
 
 def salvar_banco(dados):
-    # Salva na memória rápida primeiro para os jogos não sumirem da tela
     st.session_state["banco_local"] = dados
     try:
-        # Impede o JSONBin de criar 1000 versões e travar sua conta
         headers_put = JSONBIN_HEADERS.copy()
         headers_put["X-Bin-Versioning"] = "false" 
         
@@ -87,6 +83,16 @@ def salvar_banco(dados):
         st.error(f"🚨 Falha de internet ao salvar: {e}")
 
 banco_local = carregar_banco()
+
+def atualizar_saldo_realtime():
+    try:
+        res = requests.get(f"{BASE_URL}/status", headers=HEADERS, timeout=5).json()
+        if res.get('response'):
+            rem = res['response']['requests']['limit_day'] - res['response']['requests']['current']
+            banco_local["creditos_restantes"] = rem
+            return rem
+    except: pass
+    return banco_local.get("creditos_restantes", 0) or 0
 
 # ==========================================
 # 2. MOTOR MATEMÁTICO (POISSON V6.1)
@@ -100,7 +106,6 @@ def calcular_poisson(media_casa, media_fora):
     
     m_h, m_a = max(media_casa, 0.1), max(media_fora, 0.1)
     
-    # 🎯 CORREÇÃO DIXON-COLES (Fator Rho) E NORMALIZAÇÃO
     rho = 0.10 
     matriz_prob = {}
     total_prob = 0
@@ -509,7 +514,12 @@ agenda = banco_local["datas"][data_str]["agenda"]
 
 if st.button("🔄 1. Carregar Agenda do Dia", use_container_width=True):
     res = requests.get(f"{BASE_URL}/fixtures?date={data_str}&timezone=America/Sao_Paulo", headers=HEADERS).json()
-    if res.get('response'): banco_local["datas"][data_str]["agenda"] = res['response']; salvar_banco(banco_local); st.rerun()
+    if res.get('response'): 
+        banco_local["datas"][data_str]["agenda"] = res['response']
+        salvar_banco(banco_local)
+        st.rerun()
+    else:
+        st.error(f"🚨 A API-Sports não retornou nenhum jogo! Motivo: {res.get('errors', 'A grade de jogos está vazia para esta data.')}")
 
 if agenda:
     jogos_visiveis = []
