@@ -1,875 +1,1261 @@
+"""
+QG Barrios PRO V3 - Interface Streamlit
+========================================
+
+Melhorias sobre V2:
+1. Ligas expandidas (35 ligas) + botão 'Forçar Busca' para ligas avulsas
+2. Bug de banca corrigido: banca_inicial é imutável (denominador do ROI),
+   depósitos/retiradas manuais ficam em banco.depositos
+3. Top 5 Entradas do Dia + Consultora Gemini opcional
+4. Calibração simplificada: um único botão 'Calibrar TODAS' (sem incremental)
+
+Stack: Streamlit, motor.py, dados.py
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+from pathlib import Path
+
 import streamlit as st
-import requests
-import datetime
-import time
-import math
-import json
-import os
-import google.generativeai as genai
-import re
 
-st.set_page_config(page_title="QG Barrios PRO", layout="wide", page_icon="⚽")
+from motor import (
+    ParametrosLiga,
+    prever_jogo,
+    comparar_com_mercado,
+)
+from dados import (
+    BancoQG,
+    DadosManager,
+    LIGAS_SUPORTADAS,
+    LIGAS_TEMPORADA_ANO_ATUAL,
+    INTERVALO_RECALIBRACAO_DIAS,
+    SALDO_MINIMO_EMERGENCIA,
+    CUSTO_ESTIMADO_ODDS_JOGO,
+    CUSTO_ESTIMADO_FIXTURES_DIA,
+    CUSTO_ESTIMADO_HISTORICO_LIGA,
+    TIMEOUT_CALIBRACAO_SEGUNDOS,
+    CreditosInsuficientesError,
+    APIError,
+    criar_dados_manager_de_secrets,
+)
 
-# ==========================================
-# 0. CONFIGURAÇÕES E CHAVES
-# ==========================================
-API_KEY_PRO = "00374ab0590422053c950ddc399a0ccb"
-BASE_URL = "https://v3.football.api-sports.io"
-HEADERS = {'x-apisports-key': API_KEY_PRO}
 
-JSONBIN_KEY = st.secrets["JSONBIN_KEY"]
-JSONBIN_BIN_ID = st.secrets["JSONBIN_BIN_ID"]
-JSONBIN_URL = f"https://api.jsonbin.io/v3/b/{JSONBIN_BIN_ID}"
-JSONBIN_HEADERS = {
-    "X-Master-Key": JSONBIN_KEY,
-    "Content-Type": "application/json"
-}
+st.set_page_config(page_title="QG Barrios PRO V3", layout="wide", page_icon="👑")
 
-API_KEY_GEMINI = st.secrets["GEMINI_API_KEY"]
-genai.configure(api_key=API_KEY_GEMINI)
+# =========================================================================
+# 1. CONSTANTES DE NEGÓCIO
+# =========================================================================
 
-PESOS_LIGAS = {
-    39: 1.0, 140: 0.95, 135: 0.95, 78: 0.95, 61: 0.95,
-    71: 0.85, 72: 0.80, 73: 0.70,
-    2: 1.0, 3: 0.90,
-}
+PISO_KELLY_PADRAO        = 2.0
+TETO_PCT_BANCA_PADRAO    = 0.10
+ODD_MIN_SAVE             = 1.50
+LIMITE_DIVERGENCIA_PP    = 20.0
+MARGEM_BOOKMAKER_DEFAULT = 1.05
 
-def conectar_modelo_ia():
-    for m in genai.list_models():
-        if 'generateContent' in m.supported_generation_methods:
-            if 'flash' in m.name.lower():
-                return genai.GenerativeModel(m.name)
-    return genai.GenerativeModel('gemini-pro')
+# Ranking de qualidade — sem número fixo
+SCORE_MINIMO_RANKING = 35   # picks abaixo disso são filtrados mesmo com EV positivo
+# Pesos do score composto (devem somar 1.0)
+PESO_EV          = 0.35
+PESO_DIVERGENCIA = 0.30
+PESO_PROB        = 0.20
+PESO_KELLY       = 0.15
 
-model_ia = conectar_modelo_ia()
 
-# ==========================================
-# 1. GERENCIAMENTO DO BANCO
-# ==========================================
-ARQUIVO_BANCO = "banco_barrios_pro.json"
+# =========================================================================
+# 2. INICIALIZAÇÃO DO MANAGER
+# =========================================================================
 
-def carregar_banco():
-    if "banco_local" in st.session_state:
-        return st.session_state["banco_local"]
-    banco = {"datas": {}, "creditos_restantes": 7500, "picks": [], "banca_inicial": 30.0}
-    if os.path.exists(ARQUIVO_BANCO):
-        try:
-            with open(ARQUIVO_BANCO, "r") as f:
-                banco_lido = json.load(f)
-                if "datas" in banco_lido:
-                    banco["datas"] = banco_lido["datas"]
-        except: pass
-    try:
-        res = requests.get(f"{JSONBIN_URL}/latest", headers=JSONBIN_HEADERS, timeout=10)
-        if res.status_code == 200:
-            banco_nuvem = res.json().get("record", {})
-            banco["picks"] = banco_nuvem.get("picks", [])
-            banco["banca_inicial"] = banco_nuvem.get("banca_inicial", 30.0)
-    except: pass
-    st.session_state["banco_local"] = banco
-    return banco
+@st.cache_resource
+def get_manager() -> DadosManager:
+    return criar_dados_manager_de_secrets(st.secrets, diretorio_local=".")
 
-def salvar_banco(dados):
-    st.session_state["banco_local"] = dados
-    try:
-        with open(ARQUIVO_BANCO, "w") as f:
-            json.dump(dados, f)
-    except: pass
-    try:
-        dados_nuvem = {
-            "banca_inicial": dados.get("banca_inicial", 30.0),
-            "picks": dados.get("picks", [])
-        }
-        headers_put = JSONBIN_HEADERS.copy()
-        headers_put["X-Bin-Versioning"] = "false"
-        requests.put(JSONBIN_URL, headers=headers_put, json=dados_nuvem, timeout=10)
-    except: pass
 
-banco_local = carregar_banco()
+try:
+    dm = get_manager()
+except Exception as e:
+    st.error(f"Falha ao inicializar manager: {e}")
+    st.stop()
 
-def atualizar_saldo_realtime():
-    try:
-        res = requests.get(f"{BASE_URL}/status", headers=HEADERS, timeout=5).json()
-        if res.get('response'):
-            rem = res['response']['requests']['limit_day'] - res['response']['requests']['current']
-            banco_local["creditos_restantes"] = rem
-            return rem
-    except: pass
-    return banco_local.get("creditos_restantes", 0) or 0
+if "banco" not in st.session_state:
+    st.session_state["banco"] = dm.carregar_banco()
 
-# ==========================================
-# 2. MOTOR MATEMÁTICO — POISSON + DIXON-COLES
-# ==========================================
-def calcular_poisson(media_casa, media_fora):
-    if media_casa <= 0.05 and media_fora <= 0.05: return None
-    prob_ambas = 0
-    prob_over_15, prob_over_25, prob_over_35 = 0, 0, 0
-    prob_home, prob_draw, prob_away = 0, 0, 0
-    m_h, m_a = max(media_casa, 0.1), max(media_fora, 0.1)
-    rho = 0.10
-    matriz_prob = {}
-    total_prob = 0
-    for gc in range(10):
-        for gf in range(10):
-            p_casa = (math.exp(-m_h) * (m_h**gc)) / math.factorial(gc)
-            p_fora = (math.exp(-m_a) * (m_a**gf)) / math.factorial(gf)
-            p_placar = p_casa * p_fora
-            if gc == 0 and gf == 0: p_placar *= (1 - rho)
-            elif gc == 1 and gf == 1: p_placar *= (1 + rho)
-            matriz_prob[(gc, gf)] = p_placar
-            total_prob += p_placar
-    for (gc, gf), p_placar in matriz_prob.items():
-        p_placar /= total_prob
-        if gc > 0 and gf > 0: prob_ambas += p_placar
-        if (gc + gf) > 1.5: prob_over_15 += p_placar
-        if (gc + gf) > 2.5: prob_over_25 += p_placar
-        if (gc + gf) > 3.5: prob_over_35 += p_placar
-        if gc > gf: prob_home += p_placar
-        elif gc == gf: prob_draw += p_placar
-        else: prob_away += p_placar
-    total_1x2 = prob_home + prob_draw + prob_away
-    if total_1x2 > 0:
-        adj_h, adj_d, adj_a = prob_home * 0.97, prob_draw * 1.06, prob_away * 0.97
-        novo_total = adj_h + adj_d + adj_a
-        prob_home = (adj_h / novo_total) * total_1x2
-        prob_draw = (adj_d / novo_total) * total_1x2
-        prob_away = (adj_a / novo_total) * total_1x2
-    return {
-        "HOME": {"prob": prob_home * 100}, "DRAW": {"prob": prob_draw * 100}, "AWAY": {"prob": prob_away * 100},
-        "1X": {"prob": (prob_home + prob_draw) * 100}, "X2": {"prob": (prob_away + prob_draw) * 100},
-        "BTTS": {"prob": prob_ambas * 100},
-        "OVER_15": {"prob": prob_over_15 * 100}, "UNDER_15": {"prob": (1 - prob_over_15) * 100},
-        "OVER_25": {"prob": prob_over_25 * 100}, "UNDER_25": {"prob": (1 - prob_over_25) * 100},
-        "OVER_35": {"prob": prob_over_35 * 100}, "UNDER_35": {"prob": (1 - prob_over_35) * 100},
-    }
+banco: BancoQG = st.session_state["banco"]
 
-# ==========================================
-# 3. BUSCAS DE API
-# ==========================================
-def buscar_stats_partida(fixture_id, team_id, gols_reais):
-    url = f"{BASE_URL}/fixtures/statistics"
-    params = {'fixture': fixture_id, 'team': team_id}
-    sog, xg_api = 0, None
-    try:
-        res = requests.get(url, headers=HEADERS, params=params).json()
-        if res.get('response') and len(res['response']) > 0:
-            stats = res['response'][0]['statistics']
-            for s in stats:
-                if s['type'] == 'expected_goals' and s['value']: xg_api = float(s['value'])
-                if s['type'] == 'Shots on Goal' and s['value']: sog = int(s['value'])
-    except: pass
-    if xg_api is not None: return (xg_api * 0.90) + (sog * 0.05)
-    return (gols_reais * 0.70) + (sog * 0.10)
 
-def buscar_historico_global(team_id, current_league_id, last_n=12):
-    """V6.2 — split home/away para projeção contextual correta."""
-    url = f"{BASE_URL}/fixtures"
-    params = {'team': team_id, 'last': 20, 'status': 'FT'}
-    try:
-        res = requests.get(url, headers=HEADERS, params=params).json()
-        if not res.get('response'): return None
-        hoje = datetime.datetime.now()
-        limite_6_meses = hoje - datetime.timedelta(days=180)
-        jogos_validos = [j for j in res['response']
-                         if datetime.datetime.strptime(j['fixture']['date'][:10], '%Y-%m-%d') > limite_6_meses]
-        if len(jogos_validos) < 5: jogos_validos = res['response'][:8]
-        else: jogos_validos = jogos_validos[:last_n]
+# =========================================================================
+# 3. FUNÇÕES UTILITÁRIAS
+# =========================================================================
 
-        total_gols_f, total_gols_s, total_xg_f, total_xg_s, soma_pesos = 0, 0, 0, 0, 0
-        home_xg_f, home_xg_s, home_peso = 0, 0, 0
-        away_xg_f, away_xg_s, away_peso = 0, 0, 0
-        forma = []
+def calcular_stake_final(kelly_fracao: float, banca: float,
+                          piso: float = PISO_KELLY_PADRAO,
+                          teto_pct_banca: float = TETO_PCT_BANCA_PADRAO) -> float:
+    """Piso R$2 / teto 10% da banca / descarta se acima do teto."""
+    if kelly_fracao <= 0 or banca <= 0:
+        return 0.0
+    stake_kelly = kelly_fracao * banca
+    stake_final = max(piso, stake_kelly)
+    if stake_final > banca * teto_pct_banca:
+        return 0.0
+    return round(stake_final, 2)
 
-        for idx, j in enumerate(jogos_validos):
-            f_id = j['fixture']['id']
-            dias_atras = (hoje - datetime.datetime.strptime(j['fixture']['date'][:10], '%Y-%m-%d')).days
-            peso_tempo = math.exp(-0.005 * dias_atras)
-            peso_liga = 1.2 if j['league']['id'] == current_league_id else 1.0
-            peso_final = peso_tempo * peso_liga
-            is_home = j['teams']['home']['id'] == team_id
-            gf = j['goals']['home'] if is_home else j['goals']['away']
-            gs = j['goals']['away'] if is_home else j['goals']['home']
-            opp_id = j['teams']['away']['id'] if is_home else j['teams']['home']['id']
-            xg_f = buscar_stats_partida(f_id, team_id, gf) if idx < 6 else gf * 0.9
-            xg_s = buscar_stats_partida(f_id, opp_id, gs) if idx < 6 else gs * 0.9
-            total_gols_f += gf * peso_final
-            total_gols_s += gs * peso_final
-            total_xg_f += xg_f * peso_final
-            total_xg_s += xg_s * peso_final
-            soma_pesos += peso_final
-            if is_home:
-                home_xg_f += xg_f * peso_final; home_xg_s += xg_s * peso_final; home_peso += peso_final
-            else:
-                away_xg_f += xg_f * peso_final; away_xg_s += xg_s * peso_final; away_peso += peso_final
-            if idx < 5:
-                forma.append("🟩" if gf > gs else "⬜" if gf == gs else "🟥")
 
-        if soma_pesos == 0: return None
-        media_xg_f = total_xg_f / soma_pesos
-        media_xg_s = total_xg_s / soma_pesos
-        return {
-            "media_feita": total_gols_f / soma_pesos,
-            "media_sofrida": total_gols_s / soma_pesos,
-            "media_xg_f": media_xg_f,
-            "media_xg_s": media_xg_s,
-            "home_xg_f": (home_xg_f / home_peso) if home_peso > 0 else media_xg_f,
-            "home_xg_s": (home_xg_s / home_peso) if home_peso > 0 else media_xg_s,
-            "away_xg_f": (away_xg_f / away_peso) if away_peso > 0 else media_xg_f,
-            "away_xg_s": (away_xg_s / away_peso) if away_peso > 0 else media_xg_s,
-            "forma": "".join(forma[::-1])
-        }
-    except: return None
-
-def buscar_h2h(home_id, away_id, last_n=5):
+def calcular_estado_banca(picks: list, banca_inicial: float,
+                           depositos: list) -> tuple[float, float, float, float]:
     """
-    V6.3 — Confronto direto. Custo: 1 crédito.
-    Contexto para a IA, não altera o Poisson.
+    Retorna (lucro_picks, total_depositos, banca_atual, roi_pct).
+
+    SEPARAÇÃO CORRETA:
+    - lucro_picks  = P/L puro das apostas (sem depósitos)
+    - ROI          = lucro_picks / banca_inicial   ← denominador NUNCA muda
+    - banca_atual  = banca_inicial + depositos + lucro_picks
     """
-    url = f"{BASE_URL}/fixtures/headtohead"
-    params = {'h2h': f"{home_id}-{away_id}", 'last': last_n, 'status': 'FT'}
-    try:
-        res = requests.get(url, headers=HEADERS, params=params).json()
-        if not res.get('response'): return None
-        jogos = res['response']
-        if not jogos: return None
-        wins_home, wins_away, draws, total_gols = 0, 0, 0, 0
-        for j in jogos:
-            gh = j['goals']['home'] or 0
-            ga = j['goals']['away'] or 0
-            total_gols += gh + ga
-            jogo_home_id = j['teams']['home']['id']
-            if gh > ga:
-                if jogo_home_id == home_id: wins_home += 1
-                else: wins_away += 1
-            elif ga > gh:
-                if jogo_home_id == away_id: wins_home += 1
-                else: wins_away += 1
-            else:
-                draws += 1
-        n = len(jogos)
-        return {"wins_home": wins_home, "wins_away": wins_away, "draws": draws,
-                "avg_goals": round(total_gols / n, 2), "n": n}
-    except: return None
-
-def buscar_odds_vips(fixture_id):
-    url = f"{BASE_URL}/odds"
-    params = {'fixture': fixture_id}
-    odds = {"BTTS": 0, "OVER_15": 0, "UNDER_15": 0, "OVER_25": 0, "UNDER_25": 0,
-            "OVER_35": 0, "UNDER_35": 0, "HOME": 0, "DRAW": 0, "AWAY": 0, "1X": 0, "X2": 0}
-    try:
-        res = requests.get(url, headers=HEADERS, params=params).json()
-        if res.get('response') and len(res['response']) > 0:
-            bookmakers = res['response'][0].get('bookmakers', [])
-            bkm_to_use = None
-            for target_id in [8, 4, 1]:
-                bkm_to_use = next((b for b in bookmakers if b['id'] == target_id), None)
-                if bkm_to_use: break
-            if bkm_to_use:
-                for bet in bkm_to_use['bets']:
-                    if bet['name'] == 'Both Teams Score':
-                        odds['BTTS'] = float(bet['values'][0]['odd'])
-                    elif bet['name'] == 'Goals Over/Under':
-                        for v in bet['values']:
-                            if v['value'] == 'Over 1.5': odds['OVER_15'] = float(v['odd'])
-                            if v['value'] == 'Under 1.5': odds['UNDER_15'] = float(v['odd'])
-                            if v['value'] == 'Over 2.5': odds['OVER_25'] = float(v['odd'])
-                            if v['value'] == 'Under 2.5': odds['UNDER_25'] = float(v['odd'])
-                            if v['value'] == 'Over 3.5': odds['OVER_35'] = float(v['odd'])
-                            if v['value'] == 'Under 3.5': odds['UNDER_35'] = float(v['odd'])
-                    elif bet['name'] == 'Match Winner':
-                        for v in bet['values']:
-                            if v['value'] == 'Home': odds['HOME'] = float(v['odd'])
-                            elif v['value'] == 'Draw': odds['DRAW'] = float(v['odd'])
-                            elif v['value'] == 'Away': odds['AWAY'] = float(v['odd'])
-                    elif bet['name'] == 'Double Chance':
-                        for v in bet['values']:
-                            if v['value'] == 'Home/Draw': odds['1X'] = float(v['odd'])
-                            if v['value'] == 'Draw/Away': odds['X2'] = float(v['odd'])
-            return odds
-    except: pass
-    return odds
-
-# ==========================================
-# 4. MOTOR DE ANÁLISE
-# ==========================================
-# Custo real auditado por jogo:
-# /odds(1) + /fixtures casa(1) + /statistics x6x2(12)
-# + /fixtures fora(1) + /statistics x6x2(12) + /h2h(1) = 28
-CUSTO_POR_JOGO = 28
-
-def acao_analisar(jogos_alvo, data_str, force=False):
-    if "stats" not in banco_local["datas"][data_str]:
-        banco_local["datas"][data_str]["stats"] = {}
-    p_bar = st.progress(0)
-    saldo_atual = atualizar_saldo_realtime()
-    for idx, jogo in enumerate(jogos_alvo):
-        if saldo_atual is not None and saldo_atual < CUSTO_POR_JOGO * 2:
-            st.error("⚠️ FREIO DE EMERGÊNCIA! Créditos insuficientes.")
-            time.sleep(3)
-            break
-        f_id = str(jogo['fixture']['id'])
-        if force or f_id not in banco_local["datas"][data_str]["stats"]:
-            h_id = jogo['teams']['home']['id']
-            a_id = jogo['teams']['away']['id']
-            l_id = jogo['league']['id']
-            odds = buscar_odds_vips(f_id)
-            s_h = buscar_historico_global(h_id, l_id)
-            s_a = buscar_historico_global(a_id, l_id)
-            h2h = buscar_h2h(h_id, a_id)
-            if s_h and s_a:
-                banco_local["datas"][data_str]["stats"][f_id] = {
-                    "odds": odds, "h": s_h, "a": s_a, "l_id": l_id, "h2h": h2h
-                }
-                salvar_banco(banco_local)
-            else:
-                banco_local["datas"][data_str]["stats"][f_id] = {"erro": "Sem histórico suficiente"}
-            if saldo_atual is not None: saldo_atual -= CUSTO_POR_JOGO
-            time.sleep(0.2)
-        p_bar.progress((idx + 1) / len(jogos_alvo))
-    p_bar.empty()
-    st.rerun()
-
-def calcular_matematica_quant(d):
-    """V6.2 — split home/away. H2H é contexto para IA, não altera Poisson."""
-    coef_liga = PESOS_LIGAS.get(d.get('l_id', 0), 0.95)
-    h_atk = d['h'].get('home_xg_f', d['h']['media_xg_f'])
-    h_def = d['h'].get('home_xg_s', d['h']['media_xg_s'])
-    a_atk = d['a'].get('away_xg_f', d['a']['media_xg_f'])
-    a_def = d['a'].get('away_xg_s', d['a']['media_xg_s'])
-    m_h = ((h_atk + a_def) / 2) * coef_liga * 1.05
-    m_a = ((a_atk + h_def) / 2) * coef_liga * 0.95
-    return m_h, m_a
-
-def normalizar_prob_mercado(dados, key):
-    odds = dados['odds']
-    odd_alvo = odds.get(key, 0)
-    if odd_alvo <= 1.0: return 0
-    margem = 0
-    if key in ["HOME", "DRAW", "AWAY"]:
-        if odds.get("HOME") and odds.get("DRAW") and odds.get("AWAY"):
-            margem = (1/odds["HOME"]) + (1/odds["DRAW"]) + (1/odds["AWAY"])
-    elif key in ["OVER_15", "UNDER_15"]:
-        if odds.get("OVER_15") and odds.get("UNDER_15"):
-            margem = (1/odds["OVER_15"]) + (1/odds["UNDER_15"])
-    elif key in ["OVER_25", "UNDER_25"]:
-        if odds.get("OVER_25") and odds.get("UNDER_25"):
-            margem = (1/odds["OVER_25"]) + (1/odds["UNDER_25"])
-    elif key in ["OVER_35", "UNDER_35"]:
-        if odds.get("OVER_35") and odds.get("UNDER_35"):
-            margem = (1/odds["OVER_35"]) + (1/odds["UNDER_35"])
-    elif key == "BTTS":
-        return (1 / odd_alvo) * 100 * 0.95
-    if margem > 0: return ((1 / odd_alvo) / margem) * 100
-    return (1 / odd_alvo) * 100
-
-def get_blended_prob(dados, p_dict, key):
-    prob_nossa = p_dict[key]['prob']
-    odd_casa = dados['odds'].get(key, 0)
-    l_id = dados.get('l_id', 0)
-    if odd_casa > 1.0:
-        prob_mercado = normalizar_prob_mercado(dados, key)
-        if prob_mercado > 0:
-            if l_id in [39, 140, 135]: return (prob_nossa * 0.65) + (prob_mercado * 0.35)
-            elif l_id in [78, 61, 2, 3]: return (prob_nossa * 0.75) + (prob_mercado * 0.25)
-            elif l_id in [71, 72, 73]: return (prob_nossa * 0.80) + (prob_mercado * 0.20)
-            else: return (prob_nossa * 0.90) + (prob_mercado * 0.10)
-    return prob_nossa
-
-def calcular_kelly(prob_blended, odd):
-    if odd <= 1.0 or prob_blended <= 0: return 0
-    p = prob_blended / 100.0
-    b = odd - 1
-    if b <= 0: return 0
-    kelly_puro = (b * p - (1 - p)) / b
-    return min(max(0, kelly_puro * 0.25), 0.05)
-
-def get_ev(dados, p_dict, key):
-    casa = dados['odds'].get(key, 0)
-    prob_modelo = p_dict[key]['prob']
-    if casa <= 1.0 or prob_modelo <= 0: return -100
-    ev = ((prob_modelo / 100.0) * casa - 1) * 100
-    if ev > 60 or (prob_modelo < 35 and key in ["HOME", "AWAY"]): return -999
-    return ev
-
-def avaliar_perfil_jogo(p_dict):
-    if p_dict["UNDER_25"]["prob"] > 60: return "🧱 TRAVADO"
-    elif p_dict["OVER_25"]["prob"] > 55: return "🧨 ABERTO"
-    else: return "⚖️ EQUILIBRADO"
-
-def formatar_h2h(h2h):
-    if not h2h: return "Sem dados"
-    return f"{h2h['n']} jogos | Casa {h2h['wins_home']}V/{h2h['draws']}E/{h2h['wins_away']}V Fora | Média gols: {h2h['avg_goals']:.1f}"
-
-# ==========================================
-# 4.1 SISTEMA DE CORES — 3 NÍVEIS
-# ==========================================
-def get_tier(ev):
-    if ev > 10:
-        return {"bg": "#0d2818", "border": "#28a745", "text": "#28a745", "badge": "🔥 FORTE", "badge_color": "#28a745"}
-    elif ev > 3:
-        return {"bg": "#0d1f31", "border": "#1a6b9a", "text": "#4db8ff", "badge": "✅ VALOR", "badge_color": "#4db8ff"}
-    else:
-        return {"bg": "#111", "border": "#2a2a2a", "text": "#666", "badge": "", "badge_color": "#444"}
-
-def renderizar_mercado(col, titulo, p_dict, key, odds_dict, dados, banca_atual):
-    prob_blended = get_blended_prob(dados, p_dict, key)
-    casa = odds_dict.get(key, 0)
-    ev = get_ev(dados, p_dict, key)
-    justa = 100 / prob_blended if prob_blended > 0 else 0
-    frac_kelly = calcular_kelly(prob_blended, casa)
-    stake_raw = frac_kelly * banca_atual
-    stake_sugerida = max(2.0, stake_raw) if (frac_kelly > 0 and ev > 3) else 0
-    tier = get_tier(ev)
-    badge_html = f'<div style="color:{tier["badge_color"]}; font-size:10px; font-weight:bold; margin-top:3px;">{tier["badge"]}</div>' if tier["badge"] else ''
-    kelly_html = f'<div style="color:#17a2b8; font-size:10px; margin-top:4px;">🎯 R$ {stake_sugerida:.2f} ({frac_kelly*100:.1f}%)</div>' if stake_sugerida > 0 else ''
-    with col:
-        st.markdown(f'''
-        <div style="border:1px solid {tier["border"]}; background:{tier["bg"]}; padding:8px; border-radius:6px; text-align:center; margin-bottom:8px;">
-            <div style="font-size:10px; color:#777; margin-bottom:2px; font-weight:bold;">{titulo}</div>
-            <div style="font-size:16px; font-weight:bold; color:{tier["text"]};">{prob_blended:.0f}%</div>
-            <div style="font-size:11px; color:#aaa; margin-top:4px;">J:{justa:.2f} | O:{casa if casa > 0 else "—"}</div>
-            {badge_html}{kelly_html}
-        </div>
-        ''', unsafe_allow_html=True)
-
-# ==========================================
-# 4.2 MÓDULO DE IA — PROMPTS ADAPTATIVOS V6.3
-# ==========================================
-REGRA_ADAPTATIVA = """
-## 🚨 REGRA ABSOLUTA — QUANTIDADE ADAPTATIVA (NÃO NEGOCIÁVEL)
-Você NÃO tem meta de picks. Siga os dados, não uma expectativa de relatório.
-- Se NENHUM jogo qualifica: responda exatamente "🔇 Nenhum pick aprovado. Os dados não sustentam entradas hoje."
-- Se 1 qualifica: retorne 1. Se 8 qualificam: retorne 8.
-- NUNCA force pick para preencher relatório. Um pick fraco destrói a banca.
-- Dias com poucos jogos (ex: segunda-feira) naturalmente terão menos picks. Isso é correto e esperado.
-- Um dia com 2 picks de qualidade vale mais do que 12 picks mediocres.
-"""
-
-def chamar_ia_fabrica(textos_jogos, modo="GOLS"):
-    if modo == "GOLS":
-        prompt_sistema = f"""Você é um Auditor Quantitativo Profissional especializado em apostas esportivas no mercado de gols.
-Seu objetivo é identificar APENAS oportunidades com vantagem estatística real. Qualidade absoluta sobre quantidade.
-
-{REGRA_ADAPTATIVA}
-
----
-## 🎯 ORDENAÇÃO
-Retorne ranqueado do MELHOR (maior Score) para o PIOR.
-
----
-## ⚙️ RÉGUA ASSIMÉTRICA DE EV
-1. UNDER: Exija EV > 10% E xG Total baixíssimo. Seja rígido.
-2. OVER / BTTS: Aceite EV > 3% se o xG confirmar tendência ofensiva.
-3. NÃO force mercados. Use o H2H para validar: se o H2H mostra jogos historicamente com poucos gols, isso reforça Under.
-
----
-## 💰 FILTRO DE ODDS
-- Odds < 1.70 → DESCARTE IMEDIATO
-- Odds 1.70–1.79 → Só se EV e xG forem perfeitos
-- Odds ≥ 1.80 → Padrão mínimo | Odds ≥ 2.00 → Alto valor (se coerente)
-
----
-## 📊 CRITÉRIOS
-1. EV positivo real | 2. Coerência xG home/away | 3. Kelly > 20% = anomalia, penalize | 4. H2H valida tendência
-
----
-## 🧮 SCORE (0–100) — Mínimo para aprovação: 75
-
----
-## 📤 FORMATO (do maior Score para o menor)
-[ID: XXXX]
-Jogo: Time A vs Time B
-Mercado: X | Odd: X.XX | Perfil: Conservador/Equilibrado/Agressivo
-
-📊 Prob: XX% | EV: +X% | xG Total: X.XX | Kelly: XX% | Score: XX/100
-
-🧠 Justificativa: [baseado em xG + EV + H2H se relevante]
-⚠️ Risco: [fator principal]
-"""
-    else:
-        prompt_sistema = f"""Você é um Analista Quantitativo Sênior especializado em mercados de resultado (1X2 e Dupla Chance).
-Este é o mercado mais eficiente do futebol. As casas têm menor margem de erro aqui. Seja mais rigoroso do que no mercado de gols.
-
-{REGRA_ADAPTATIVA}
-
----
-## 🎯 ORDENAÇÃO
-Retorne ranqueado da aposta de MAIOR confiança para a MENOR.
-
----
-## ⚙️ THRESHOLDS OBRIGATÓRIOS — RESULTADO
-Estes valores são intencionalmente mais altos do que no mercado de gols:
-- Resultado Simples (HOME / AWAY): EV MÍNIMO de 8% + Odd ≥ 2.00
-- Dupla Chance (1X / X2): EV MÍNIMO de 5% + Odd ≥ 1.50
-- Empate (DRAW): APENAS com EV ≥ 12% — variância destrutiva, evitar
-- Qualquer odd < 1.40: DESCARTE automático
-
----
-## 📊 CRITÉRIOS ESPECÍFICOS
-1. EV acima do threshold correspondente
-2. H2H: valida domínio histórico entre os times — contradição com modelo = alerta
-3. xG: diferença significativa Casa vs Fora reforça resultado simples
-4. Forma recente: time em má fase anula vantagem matemática
-5. PREFERÊNCIA: Dupla Chance > Resultado Simples (menor variância)
-
----
-## 🚫 PROIBIDO
-- Empate sem EV ≥ 12% | Resultado simples sem EV ≥ 8% | Ignorar H2H quando contradiz o modelo
-
----
-## 📤 FORMATO
-💎 APROVADOS:
-[ID: XXXXXX] [JOGO] 🎯 **[MERCADO]**
-* 📊 Prob: XX% | EV: +X% | Odd: X.XX | H2H: [resumo]
-* 🧠 Lógica: [justificativa quantitativa com números]
-* ⚠️ Risco: [fator de risco real]
-"""
-    try:
-        configuracao = genai.types.GenerationConfig(temperature=0.0)
-        return model_ia.generate_content(
-            prompt_sistema + "\n\n📋 DADOS PARA ANÁLISE:\n\n" + textos_jogos,
-            generation_config=configuracao
-        ).text
-    except Exception as e:
-        return f"🚨 Erro na IA: {e}"
-
-# ==========================================
-# 5. TRACKER — MODAL
-# ==========================================
-@st.dialog("📋 Diário de Bordo", width="large")
-def mostrar_tracker():
-    lucro_total = 0.0
-    greens, reds, pendentes = 0, 0, 0
-    for p in banco_local["picks"]:
-        s = p.get("status", "Pendente")
-        stake = p.get("stake", 1.0)
-        if s == "Green":
-            lucro_total += stake * (p.get("odd", 1.0) - 1.0); greens += 1
-        elif s == "Red":
-            lucro_total -= stake; reds += 1
-        elif s == "Pendente":
-            pendentes += 1
-    total_resolvido = greens + reds
-    taxa = (greens / total_resolvido * 100) if total_resolvido > 0 else 0
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("P/L Total", f"R$ {lucro_total:.2f}")
-    c2.metric("✅ Greens", greens)
-    c3.metric("❌ Reds", reds)
-    c4.metric("Taxa de Acerto", f"{taxa:.0f}%")
-    st.divider()
-    if not banco_local["picks"]:
-        st.info("Nenhum pick registrado ainda.")
-        return
-    for i, p in enumerate(reversed(banco_local["picks"])):
-        real_idx = len(banco_local["picks"]) - 1 - i
-        st_atual = p.get("status", "Pendente")
-        icon = "⏳" if st_atual == "Pendente" else "✅" if st_atual == "Green" else "❌" if st_atual == "Red" else "➖"
-        cor = "#0d2818" if st_atual == "Green" else "#2b1a1a" if st_atual == "Red" else "#111"
-        st.markdown(f"""
-        <div style="background:{cor}; border-radius:8px; padding:10px; margin-bottom:6px; border:1px solid #222;">
-            <b>{icon} {p['data']} — {p['jogo']}</b><br>
-            <span style="color:#aaa; font-size:12px;">🎯 {p['mercado']} | Odd: {p.get('odd','-')} | R$ {p.get('stake',1.0):.2f} | Prob: {p.get('prob','-')}% | EV: {p.get('ev','-')}%</span>
-        </div>
-        """, unsafe_allow_html=True)
-        if st_atual == "Pendente":
-            cb1, cb2, cb3 = st.columns(3)
-            if cb1.button("✅ Green", key=f"dg_{real_idx}", type="primary"):
-                banco_local["picks"][real_idx]["status"] = "Green"; salvar_banco(banco_local); st.rerun()
-            if cb2.button("❌ Red", key=f"dr_{real_idx}"):
-                banco_local["picks"][real_idx]["status"] = "Red"; salvar_banco(banco_local); st.rerun()
-            if cb3.button("➖ Anular", key=f"dv_{real_idx}"):
-                banco_local["picks"][real_idx]["status"] = "Devolvida"; salvar_banco(banco_local); st.rerun()
-        else:
-            if st.button("↩️ Desfazer", key=f"du_{real_idx}"):
-                banco_local["picks"][real_idx]["status"] = "Pendente"; salvar_banco(banco_local); st.rerun()
-
-# ==========================================
-# 6. SIDEBAR
-# ==========================================
-with st.sidebar:
-    st.markdown("""
-    <div style="text-align:center; padding:14px 0 10px 0;">
-        <div style="font-size:20px; font-weight:900; color:#fff; letter-spacing:1px;">⚽ QG BARRIOS PRO</div>
-        <div style="font-size:10px; color:#444; margin-top:2px; letter-spacing:2px;">MOTOR QUANTITATIVO V6.3</div>
-    </div>
-    """, unsafe_allow_html=True)
-    st.divider()
-
-    saldo = atualizar_saldo_realtime()
-    saldo_val = saldo if saldo else 0
-    pct = saldo_val / 7500
-    jogos_possiveis = int(saldo_val / CUSTO_POR_JOGO)
-    cor_saldo = "#28a745" if pct > 0.5 else "#ffc107" if pct > 0.2 else "#dc3545"
-    st.markdown(f"""
-    <div style="background:#111; border-radius:8px; padding:12px; margin-bottom:8px; border:1px solid #1e1e1e;">
-        <div style="font-size:10px; color:#555; margin-bottom:4px; letter-spacing:1px;">CRÉDITOS API HOJE</div>
-        <div style="font-size:22px; font-weight:bold; color:{cor_saldo};">{saldo_val} <span style="font-size:11px; color:#444;">/ 7500</span></div>
-        <div style="font-size:10px; color:#555; margin-top:4px;">≈ {jogos_possiveis} jogos possíveis ({CUSTO_POR_JOGO} créd/jogo)</div>
-        <div style="background:#1a1a1a; border-radius:4px; height:4px; margin-top:8px;">
-            <div style="background:{cor_saldo}; width:{pct*100:.0f}%; height:4px; border-radius:4px;"></div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-    st.divider()
-
-    st.markdown("**📈 Gestão de Risco**")
-    banca_input = st.number_input("Banca Total (R$)", value=float(banco_local.get("banca_inicial", 30.0)), step=5.0, label_visibility="collapsed")
-    if banca_input != banco_local.get("banca_inicial"):
-        banco_local["banca_inicial"] = banca_input
-        salvar_banco(banco_local)
-
-    lucro_total_sb = 0.0
-    for p in banco_local["picks"]:
+    lucro_picks = 0.0
+    for p in picks:
         status = p.get("status", "Pendente")
-        stake_usada = p.get("stake", 1.0)
-        if status == "Green": lucro_total_sb += stake_usada * (p.get("odd", 1.0) - 1.0)
-        elif status == "Red": lucro_total_sb -= stake_usada
+        stake  = float(p.get("stake", 0))
+        odd    = float(p.get("odd", 1.0))
+        if status == "Green":
+            lucro_picks += stake * (odd - 1.0)
+        elif status == "Red":
+            lucro_picks -= stake
 
-    banca_atual = banco_local["banca_inicial"] + lucro_total_sb
-    cor_pl = "#28a745" if lucro_total_sb >= 0 else "#dc3545"
-    st.markdown(f"""
-    <div style="background:#111; border-radius:8px; padding:12px; border:1px solid #1e1e1e;">
-        <div style="display:flex; justify-content:space-between; align-items:center;">
-            <div>
-                <div style="font-size:10px; color:#555; letter-spacing:1px;">BANCA ATUAL</div>
-                <div style="font-size:20px; font-weight:bold; color:#fff;">R$ {banca_atual:.2f}</div>
-            </div>
-            <div style="text-align:right;">
-                <div style="font-size:10px; color:#555; letter-spacing:1px;">P/L</div>
-                <div style="font-size:16px; font-weight:bold; color:{cor_pl};">{"+" if lucro_total_sb >= 0 else ""}R$ {lucro_total_sb:.2f}</div>
-            </div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    total_dep = sum(float(d.get("valor", 0)) for d in depositos)
+    banca_atual = banca_inicial + total_dep + lucro_picks
+    roi = (lucro_picks / banca_inicial * 100) if banca_inicial > 0 else 0.0
+    return lucro_picks, total_dep, banca_atual, roi
+
+
+def detectar_temporada_atual() -> int:
+    hoje = dt.date.today()
+    return hoje.year if hoje.month >= 7 else hoje.year - 1
+
+
+def filtrar_jogos_calibrados(agenda: list[dict],
+                              params_ligas: dict) -> tuple[list, list]:
+    calibrados, sem_cal = [], []
+    for j in agenda:
+        l_id = j.get("league", {}).get("id")
+        if str(l_id) in params_ligas:
+            calibrados.append(j)
+        else:
+            sem_cal.append(j)
+    return calibrados, sem_cal
+
+
+def calcular_score_qualidade(
+    ev_pct: float,
+    divergencia_pp: float,
+    prob_modelo: float,
+    kelly_fracao: float,
+    odd: float,
+    cobertura_ok: bool,
+) -> float:
+    """
+    Score composto de qualidade 0–100 para rankeamento de picks.
+
+    Componentes (normalizados a 0–1, depois ponderados):
+      EV          (35%) — cap em 20% EV = max, logarítmico acima de 10%
+      Divergência (30%) — cap em 12pp = max
+      Prob modelo (20%) — cap em 55% = max (acima é "plenamente confiante")
+      Kelly frac  (15%) — cap em 6% Kelly = max
+
+    Penalidades multiplicativas:
+      cobertura_ok=False : ×0.80  (dados insuficientes do time)
+      odd > 5.0          : ×0.85  (alta variância = resultado de placares exóticos)
+      odd < 1.55         : ×0.90  (juice alto consome a edge em odds baixas)
+    """
+    # Normalização cap linear com suavização logarítmica na cauda de EV
+    if ev_pct >= 10:
+        s_ev = min(0.75 + 0.25 * (ev_pct - 10) / 10, 1.0)
+    else:
+        s_ev = min(ev_pct / 10 * 0.75, 0.75)
+
+    s_div  = min(divergencia_pp / 12.0, 1.0)
+    s_prob = min(prob_modelo    / 55.0, 1.0)
+    s_kel  = min(kelly_fracao   / 0.06, 1.0)
+
+    score = (
+        PESO_EV          * s_ev  +
+        PESO_DIVERGENCIA * s_div +
+        PESO_PROB        * s_prob +
+        PESO_KELLY       * s_kel
+    ) * 100.0
+
+    # Penalidades
+    if not cobertura_ok:
+        score *= 0.80
+    if odd > 5.0:
+        score *= 0.85
+    elif odd < 1.55:
+        score *= 0.90
+
+    return round(score, 1)
+
+
+def consultar_gemini(picks_aprovados: list[dict]) -> str:
+    """Chama Gemini Flash para análise tática dos picks aprovados."""
+    try:
+        import google.generativeai as genai
+        api_key = st.secrets.get("GEMINI_API_KEY", "")
+        if not api_key:
+            return "⚠️ GEMINI_API_KEY não configurada em secrets."
+        genai.configure(api_key=api_key)
+        model = None
+        for m in genai.list_models():
+            if "generateContent" in m.supported_generation_methods:
+                if "flash" in m.name.lower():
+                    model = genai.GenerativeModel(m.name)
+                    break
+        if model is None:
+            model = genai.GenerativeModel("gemini-pro")
+    except ImportError:
+        return "⚠️ Biblioteca google-generativeai não instalada. Execute: pip install google-generativeai"
+
+    linhas = []
+    for i, p in enumerate(picks_aprovados[:12], 1):
+        linhas.append(
+            f"{i}. [{p.get('score', 0):.0f}/100] {p['jogo']} | {p['mercado']} | "
+            f"Odd {p['odd']:.2f} | Modelo {p['prob_modelo']:.1f}% vs Mercado {p.get('prob_mercado', 0):.1f}% | "
+            f"Δ {p.get('divergencia', 0):+.1f}pp | EV {p['ev']:+.1f}% | Stake R$ {p['stake']:.2f}"
+        )
+
+    prompt = f"""Você é um analista quantitativo de apostas esportivas especializado em Dixon-Coles.
+Os picks abaixo foram rankeados por um score composto (0-100) que pondera EV, divergência modelo×mercado, probabilidade absoluta e critério de Kelly.
+
+Analise o ranking e entregue:
+1. **Focos do Dia** — destaque os picks com score mais alto e explique em 1 frase o que torna cada um interessante (use os números)
+2. **Alertas** — aponte qualquer pick com odd > 4.0 ou prob_modelo < 20% que mereça cautela extra
+3. **Resumo Tático** — em 2 linhas: qual o perfil de risco do dia e como distribuir a banca
+
+Ranking do dia:
+{chr(10).join(linhas)}
+
+Seja direto. Use os números. Não repita o que já está listado acima — adicione interpretação."""
+
+    try:
+        resp = model.generate_content(prompt)
+        return resp.text
+    except Exception as e:
+        return f"Erro ao consultar Gemini: {e}"
+
+
+# =========================================================================
+# 4. SIDEBAR — BANCA (FIX DO BUG DE ROI)
+# =========================================================================
+
+with st.sidebar:
+    st.markdown("## 👑 QG Barrios PRO V3")
+    st.caption("Motor: Dixon-Coles (MLE) · Sem incremental")
+
+    # ── Créditos API ─────────────────────────────────────────────────
+    try:
+        saldo = dm.saldo_creditos()
+    except Exception:
+        saldo = 0
+    cor = "🟢" if saldo > 1000 else ("🟡" if saldo > SALDO_MINIMO_EMERGENCIA else "🔴")
+    st.metric(f"{cor} Créditos API", f"{saldo}/7500")
+    st.progress(min(saldo / 7500, 1.0))
+    if saldo < SALDO_MINIMO_EMERGENCIA:
+        st.error(f"⚠️ Saldo abaixo de {SALDO_MINIMO_EMERGENCIA}. Trava ativa.")
+
     st.divider()
 
-    if st.button("📋 Diário de Bordo", use_container_width=True):
-        mostrar_tracker()
-    st.divider()
+    # ── BANCA — separação banca_inicial / depósitos / P/L ────────────
+    st.markdown("### 💰 Banca")
 
-    st.markdown("**🔍 Scanner**")
-    data_consulta = st.date_input("Data", datetime.date.today(), label_visibility="collapsed")
-    data_str = data_consulta.strftime("%Y-%m-%d")
-    LIGAS_PRO = [39, 140, 135, 78, 61, 71, 72, 73, 2, 3, 848, 13, 11, 40, 88, 307, 253, 94, 128, 203]
-    tipo_filtro = st.radio("Ligas:", ["🏆 Só PRO", "🌍 PRO + Confiáveis", "🗑️ Tudo"], index=1)
+    lucro_picks, total_dep, banca_atual, roi_pct = calcular_estado_banca(
+        banco.picks, banco.banca_inicial, banco.depositos
+    )
 
-    if st.button("🗑️ Limpar Cache do Dia", use_container_width=True):
-        if data_str in banco_local["datas"]:
-            del banco_local["datas"][data_str]
-            salvar_banco(banco_local)
+    # Banca inicial: editável apenas se não há picks ainda (ou via reset explícito)
+    with st.expander("⚙️ Redefinir banca inicial", expanded=False):
+        st.caption("⚠️ Use somente ao começar uma nova banca do zero. Não afeta o histórico de picks.")
+        nova_banca = st.number_input(
+            "Nova banca inicial (R$)", value=float(banco.banca_inicial),
+            step=1.0, min_value=1.0, key="nova_banca_inicial"
+        )
+        if st.button("💾 Confirmar nova banca inicial", use_container_width=True):
+            banco.banca_inicial = nova_banca
+            dm.salvar_banco(banco)
+            st.success(f"Banca inicial redefinida para R$ {nova_banca:.2f}")
             st.rerun()
 
-# ==========================================
-# 7. ÁREA PRINCIPAL
-# ==========================================
-if data_str not in banco_local["datas"]:
-    banco_local["datas"][data_str] = {"agenda": [], "stats": {}}
-agenda = banco_local["datas"][data_str]["agenda"]
+    # Métricas da banca
+    c1, c2 = st.columns(2)
+    c1.metric("Capital inicial", f"R$ {banco.banca_inicial:.2f}")
+    c2.metric("Depósitos/Retiradas", f"R$ {total_dep:+.2f}")
+    st.metric(
+        "Banca atual",
+        f"R$ {banca_atual:.2f}",
+        delta=f"P/L apostas: R$ {lucro_picks:+.2f} | ROI: {roi_pct:+.1f}%"
+    )
 
-st.markdown(f"""
-<div style="margin-bottom:16px; padding-bottom:12px; border-bottom:1px solid #1e1e1e;">
-    <div style="font-size:12px; color:#444; margin-bottom:2px; letter-spacing:1px;">{data_consulta.strftime("%A, %d de %B de %Y").upper()}</div>
-    <div style="font-size:26px; font-weight:900; color:#fff;">Scanner de Jogos</div>
-</div>
-""", unsafe_allow_html=True)
+    # Registrar depósito ou retirada
+    with st.expander("➕ Depositar / ➖ Retirar dinheiro"):
+        st.caption("Registra entrada/saída de dinheiro sem alterar o ROI das apostas.")
+        tipo = st.radio("Tipo", ["Depósito", "Retirada"], horizontal=True)
+        valor_dep = st.number_input("Valor (R$)", min_value=0.01, step=1.0, value=10.0)
+        nota_dep  = st.text_input("Nota (opcional)", placeholder="Ex: recarga mensal")
+        if st.button("✅ Registrar", use_container_width=True, type="primary"):
+            valor_final = valor_dep if tipo == "Depósito" else -valor_dep
+            banco.depositos.append({
+                "data": dt.date.today().isoformat(),
+                "valor": valor_final,
+                "nota": nota_dep,
+                "registrado_em": dt.datetime.now().isoformat(),
+            })
+            dm.salvar_banco(banco)
+            st.success(f"{'Depósito' if valor_final > 0 else 'Retirada'} de R$ {abs(valor_final):.2f} registrado!")
+            st.rerun()
 
-if st.button("🔄 Carregar Agenda do Dia", use_container_width=True):
-    res = requests.get(f"{BASE_URL}/fixtures?date={data_str}&timezone=America/Sao_Paulo", headers=HEADERS).json()
-    if res.get('response'):
-        banco_local["datas"][data_str]["agenda"] = res['response']
-        salvar_banco(banco_local)
+    if banco.depositos:
+        with st.expander(f"📋 Histórico de depósitos ({len(banco.depositos)})"):
+            for d in reversed(banco.depositos[-10:]):
+                sinal = "➕" if d["valor"] > 0 else "➖"
+                st.caption(f"{sinal} R$ {abs(d['valor']):.2f} em {d['data']} — {d.get('nota', '—')}")
+
+    st.divider()
+
+    # ── Configurações Kelly ───────────────────────────────────────────
+    with st.expander("⚙️ Gestão de Risco"):
+        piso_kelly   = st.number_input("Piso de stake (R$)", value=PISO_KELLY_PADRAO, step=0.5, min_value=0.5)
+        teto_pct     = st.slider("Teto % da banca", 5, 25, int(TETO_PCT_BANCA_PADRAO * 100)) / 100
+        odd_min_save = st.number_input("Odd mínima p/ salvar", value=ODD_MIN_SAVE, step=0.05, min_value=1.01)
+        limite_div   = st.slider("Anomalia se divergência >", 10, 40, int(LIMITE_DIVERGENCIA_PP))
+
+    st.divider()
+
+    # ── Data e temporada ─────────────────────────────────────────────
+    data_consulta = st.date_input("Data do Scanner", dt.date.today())
+    data_str      = data_consulta.strftime("%Y-%m-%d")
+    season        = st.number_input("Temporada (ano)", value=detectar_temporada_atual(), step=1)
+
+
+# =========================================================================
+# 5. CABEÇALHO
+# =========================================================================
+
+st.title("QG Barrios PRO V3")
+
+n_calibradas       = len(banco.params_ligas)
+n_picks_pendentes  = sum(1 for p in banco.picks if p.get("status") == "Pendente")
+n_picks_total      = len(banco.picks)
+
+col_h1, col_h2, col_h3, col_h4 = st.columns(4)
+col_h1.metric("Ligas calibradas", f"{n_calibradas}/{len(LIGAS_SUPORTADAS)}")
+col_h2.metric("Picks salvos", n_picks_total)
+col_h3.metric("Picks pendentes", n_picks_pendentes)
+col_h4.metric("Banca atual", f"R$ {banca_atual:.2f}")
+
+st.divider()
+
+
+# =========================================================================
+# 6. ABAS PRINCIPAIS
+# =========================================================================
+
+tab_analise, tab_calibracao, tab_tracker, tab_auditoria = st.tabs([
+    "🎯 Análise Diária",
+    "⚙️ Calibração de Ligas",
+    "📋 Tracker (Diário de Bordo)",
+    "🔬 Auditoria do Motor",
+])
+
+
+# =========================================================================
+# 6.1 ABA CALIBRAÇÃO — botão único, sem incremental
+# =========================================================================
+
+with tab_calibracao:
+    st.markdown("### Status das ligas")
+    st.caption(
+        f"Calibração manual: clique 'Calibrar TODAS' segunda e quinta. "
+        f"Custo estimado por liga: ~{CUSTO_ESTIMADO_HISTORICO_LIGA} créditos."
+    )
+
+    # Tabela de status
+    rows_status = []
+    for league_id, nome in LIGAS_SUPORTADAS.items():
+        params_d = banco.params_ligas.get(str(league_id), {})
+        if not params_d:
+            status, n_times, n_jogos = "❌ Nunca calibrada", 0, 0
+        else:
+            try:
+                data_cal = dt.datetime.fromisoformat(params_d.get("calibrado_em", ""))
+                dias = (dt.datetime.now() - data_cal).days
+                status = f"🟡 Velha ({dias}d)" if dias >= INTERVALO_RECALIBRACAO_DIAS else f"🟢 Fresca ({dias}d)"
+            except Exception:
+                status = "⚠️ Cache inválido"
+            n_times = len(params_d.get("times", {}))
+            n_jogos = params_d.get("n_jogos_calibracao", 0)
+        rows_status.append({"Liga": f"{nome} (ID {league_id})", "Status": status,
+                             "Times": n_times, "Jogos usados": n_jogos})
+
+    st.dataframe(rows_status, use_container_width=True, hide_index=True)
+
+    custo_total = len(LIGAS_SUPORTADAS) * CUSTO_ESTIMADO_HISTORICO_LIGA
+    st.info(f"Custo estimado para calibrar todas as {len(LIGAS_SUPORTADAS)} ligas: ~{custo_total} créditos.")
+
+    # ── Botão principal: CALIBRAR TODAS ──────────────────────────────
+    st.markdown("#### 🔄 Calibração completa")
+    st.caption("Recalcula MLE do zero para todas as ligas. Use 2x por semana.")
+
+    if st.button(
+        f"🚀 Calibrar TODAS as {len(LIGAS_SUPORTADAS)} ligas",
+        type="primary", use_container_width=True
+    ):
+        progress    = st.progress(0)
+        status_box  = st.empty()
+        erros       = []
+        timeouts    = []
+        total       = len(LIGAS_SUPORTADAS)
+
+        for i, (lid, nome) in enumerate(LIGAS_SUPORTADAS.items()):
+            status_box.info(f"[{i+1}/{total}] Calibrando **{nome}**…")
+            try:
+                dm.obter_params_liga(lid, season, forcar_recalibracao=True)
+            except CreditosInsuficientesError as e:
+                # Saldo esgotado: para tudo — não adianta continuar
+                status_box.error(f"🔴 Saldo insuficiente. Parando na liga {nome}: {e}")
+                break
+            except TimeoutError as e:
+                # Timeout: pula esta liga mas continua as próximas
+                timeouts.append(nome)
+            except Exception as e:
+                erros.append(f"**{nome}**: {e}")
+            progress.progress((i + 1) / total)
+
+        status_box.empty()
+
+        if timeouts:
+            st.warning(
+                f"⏱️ {len(timeouts)} liga(s) pulada(s) por timeout "
+                f"(MLE > {TIMEOUT_CALIBRACAO_SEGUNDOS}s):\n" +
+                "\n".join(f"• {n}" for n in timeouts) +
+                "\n\nTente calibrá-las individualmente ou com temporada diferente."
+            )
+        if erros:
+            st.warning("⚠️ Ligas com falha (dados insuficientes):\n" + "\n".join(f"• {e}" for e in erros))
+        if not timeouts and not erros:
+            st.success("✅ Todas as ligas calibradas com sucesso!")
+
+        st.session_state["banco"] = dm.carregar_banco(força_recarregar=True)
         st.rerun()
-    else:
-        st.error(f"🚨 Nenhum jogo encontrado. Erro: {res.get('errors', 'Grade vazia.')}")
 
-if agenda:
-    jogos_visiveis = []
-    palavras_proibidas = ['u19', 'u20', 'u21', 'u23', 'youth', 'women', 'feminino', 'reserve', 'amateur', 'regional', 'state']
-    paises_confiaveis = ['Brazil', 'Argentina', 'USA', 'Mexico', 'Netherlands', 'Portugal', 'Turkey', 'Saudi-Arabia',
-                         'Switzerland', 'Japan', 'Colombia', 'Chile', 'South-Korea', 'Scotland', 'Greece', 'Belgium',
-                         'Uruguay', 'Ecuador', 'Paraguay', 'Bolivia', 'Peru', 'Venezuela']
-    for j in agenda:
-        l_id = j['league']['id']
-        l_name = str(j['league']['name']).lower()
-        l_country = str(j['league']['country'])
-        if (tipo_filtro == "🏆 Só PRO" and l_id in LIGAS_PRO) or \
-           (tipo_filtro == "🌍 PRO + Confiáveis" and (l_id in LIGAS_PRO or
-            (l_country in paises_confiaveis and not any(p in l_name for p in palavras_proibidas)))) or \
-           tipo_filtro == "🗑️ Tudo":
-            if j not in jogos_visiveis:
-                jogos_visiveis.append(j)
-
-    col_btn1, col_cnt = st.columns([4, 1])
-    with col_btn1:
-        if st.button(f"🚀 Analisar TODOS os Visíveis ({len(jogos_visiveis)} jogos)", type="primary", use_container_width=True):
-            acao_analisar(jogos_visiveis, data_str)
-    with col_cnt:
-        jogos_analisados = sum(
-            1 for j in jogos_visiveis
-            if str(j['fixture']['id']) in banco_local["datas"][data_str].get("stats", {})
-            and "erro" not in banco_local["datas"][data_str]["stats"].get(str(j['fixture']['id']), {})
+    # ── Calibrar liga individual (power user) ────────────────────────
+    with st.expander("⚙️ Calibrar liga específica"):
+        liga_sel = st.selectbox(
+            "Liga", options=list(LIGAS_SUPORTADAS.keys()),
+            format_func=lambda x: f"{LIGAS_SUPORTADAS[x]} (ID {x})",
+            key="cal_individual",
         )
-        st.markdown(f"""
-        <div style="background:#111; border-radius:8px; padding:10px; text-align:center; border:1px solid #1e1e1e;">
-            <div style="font-size:10px; color:#555; letter-spacing:1px;">PRONTOS</div>
-            <div style="font-size:18px; font-weight:bold; color:#4db8ff;">{jogos_analisados}<span style="font-size:12px; color:#444;">/{len(jogos_visiveis)}</span></div>
-        </div>
-        """, unsafe_allow_html=True)
+        if st.button(f"Calibrar {LIGAS_SUPORTADAS[liga_sel]}", use_container_width=True):
+            try:
+                with st.spinner(f"Calibrando {LIGAS_SUPORTADAS[liga_sel]}... (pode levar até {TIMEOUT_CALIBRACAO_SEGUNDOS}s)"):
+                    dm.obter_params_liga(liga_sel, season, forcar_recalibracao=True)
+                st.success("OK!")
+                st.session_state["banco"] = dm.carregar_banco(força_recarregar=True)
+                st.rerun()
+            except TimeoutError as e:
+                st.error(f"⏱️ Timeout: {e}")
+            except Exception as e:
+                st.error(f"Falhou: {e}")
+
+
+# =========================================================================
+# 6.2 ABA ANÁLISE DIÁRIA
+# =========================================================================
+
+with tab_analise:
+
+    col_a1, col_a2 = st.columns(2)
+    with col_a1:
+        if st.button(f"📅 1. Carregar Agenda ({data_str})",
+                     use_container_width=True,
+                     help=f"Custo: {CUSTO_ESTIMADO_FIXTURES_DIA} crédito"):
+            try:
+                with st.spinner("Buscando agenda..."):
+                    agenda = dm.buscar_agenda_dia(data_str)
+                banco.datas.setdefault(data_str, {})
+                banco.datas[data_str]["agenda"]    = agenda
+                banco.datas[data_str].setdefault("odds", {})
+                banco.datas[data_str].setdefault("previsoes", {})
+                dm.salvar_banco(banco)
+                st.success(f"Agenda carregada: {len(agenda)} jogos.")
+                st.rerun()
+            except CreditosInsuficientesError as e:
+                st.error(str(e))
+            except Exception as e:
+                st.error(f"Erro: {e}")
+
+    cache_dia = banco.datas.get(data_str, {})
+    agenda    = cache_dia.get("agenda", [])
+
+    if not agenda:
+        st.info("Clique em 'Carregar Agenda' para começar.")
+        st.stop()
+
+    # ── Separar calibrados / descartados ────────────────────────────
+    calibrados, sem_cal = filtrar_jogos_calibrados(agenda, banco.params_ligas)
+
+    st.markdown(f"### {len(calibrados)} jogos analisáveis (de {len(agenda)} na agenda)")
+
+    if sem_cal:
+        # Agrupa por liga
+        ligas_desc: dict[tuple, list] = {}
+        for j in sem_cal:
+            l = j.get("league", {})
+            key = (l.get("id", 0), l.get("name", "?"), l.get("country", "?"))
+            ligas_desc.setdefault(key, []).append(j)
+
+        with st.expander(f"⚠️ {len(sem_cal)} jogos descartados (ligas não calibradas) — clique para ver"):
+            for (l_id, l_nome, l_pais), jogos in sorted(ligas_desc.items(), key=lambda x: -len(x[1])):
+                col_desc1, col_desc2 = st.columns([3, 1])
+                col_desc1.write(f"**{l_nome}** ({l_pais}, ID {l_id}) — {len(jogos)} jogo(s)")
+                # Botão de fallback: calibrar essa liga avulsa na hora
+                if col_desc2.button(
+                    "⚡ Calibrar agora",
+                    key=f"fallback_{l_id}",
+                    help=f"Busca o histórico dessa liga na API e calibra (máx {TIMEOUT_CALIBRACAO_SEGUNDOS}s)."
+                ):
+                    try:
+                        with st.spinner(f"Calibrando {l_nome} (ID {l_id})..."):
+                            dm.calibrar_liga_avulsa(l_id, season)
+                        st.success(f"{l_nome} calibrada! Recarregando...")
+                        st.session_state["banco"] = dm.carregar_banco(força_recarregar=True)
+                        st.rerun()
+                    except TimeoutError as e:
+                        st.error(f"⏱️ Timeout: {e}")
+                    except Exception as e:
+                        st.error(f"Não foi possível calibrar {l_nome}: {e}")
+
+    if not calibrados:
+        st.warning("Nenhuma liga calibrada cobre os jogos do dia. Vá para 'Calibração'.")
+        st.stop()
+
+    # ── Buscar odds ──────────────────────────────────────────────────
+    odds_cache    = cache_dia.get("odds", {})
+    sem_odds      = [j for j in calibrados if str(j["fixture"]["id"]) not in odds_cache]
+
+    col_b1, col_b2 = st.columns(2)
+    with col_b1:
+        custo_odds = len(sem_odds) * CUSTO_ESTIMADO_ODDS_JOGO
+        if st.button(
+            f"💰 2. Buscar odds dos {len(sem_odds)} pendentes",
+            type="primary", use_container_width=True,
+            disabled=len(sem_odds) == 0,
+            help=f"Custo: ~{custo_odds} créditos"
+        ):
+            progress = st.progress(0)
+            for i, j in enumerate(sem_odds):
+                f_id = str(j["fixture"]["id"])
+                try:
+                    odds_cache[f_id] = dm.buscar_odds_jogo(int(f_id))
+                except CreditosInsuficientesError as e:
+                    st.error(f"Parando: {e}")
+                    break
+                except Exception as e:
+                    st.warning(f"Falha em {f_id}: {e}")
+                progress.progress((i + 1) / max(1, len(sem_odds)))
+            banco.datas[data_str]["odds"] = odds_cache
+            dm.salvar_banco(banco)
+            st.rerun()
+    with col_b2:
+        if st.button("🧹 Limpar odds do dia", use_container_width=True):
+            banco.datas[data_str]["odds"]     = {}
+            banco.datas[data_str]["previsoes"] = {}
+            dm.salvar_banco(banco)
+            st.rerun()
 
     st.divider()
-    st.markdown("### 🤖 Auditoria por Inteligência Artificial")
-    col_ia1, col_ia2 = st.columns(2)
 
-    with col_ia1:
-        if st.button("🧠 Ranking IA — GOLS", use_container_width=True):
-            textos = ""
-            for j in jogos_visiveis:
-                f_id = str(j['fixture']['id'])
-                d = banco_local["datas"][data_str]["stats"].get(f_id)
-                if d and "erro" not in d:
-                    m_h, m_a = calcular_matematica_quant(d)
-                    p = calcular_poisson(m_h, m_a)
-                    if p:
-                        h2h_txt = formatar_h2h(d.get('h2h'))
-                        textos += f"""
-ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
-- H2H: {h2h_txt}
-- Forma Casa: {d['h']['forma']} | xG Casa: {m_h:.2f} | Atq: {d['h'].get('home_xg_f', d['h']['media_xg_f']):.2f} | Def: {d['h'].get('home_xg_s', d['h']['media_xg_s']):.2f}
-- Forma Fora: {d['a']['forma']} | xG Fora: {m_a:.2f} | Atq: {d['a'].get('away_xg_f', d['a']['media_xg_f']):.2f} | Def: {d['a'].get('away_xg_s', d['a']['media_xg_s']):.2f}
-- xG Total: {m_h + m_a:.2f}
-- Over 1.5 -> Odd: {d['odds'].get('OVER_15',0)} | Prob: {p['OVER_15']['prob']:.1f}% | EV: {get_ev(d,p,'OVER_15'):.1f}% | Kelly: {calcular_kelly(get_blended_prob(d,p,'OVER_15'),d['odds'].get('OVER_15',0))*100:.1f}%
-- Under 2.5 -> Odd: {d['odds'].get('UNDER_25',0)} | Prob: {p['UNDER_25']['prob']:.1f}% | EV: {get_ev(d,p,'UNDER_25'):.1f}% | Kelly: {calcular_kelly(get_blended_prob(d,p,'UNDER_25'),d['odds'].get('UNDER_25',0))*100:.1f}%
-- Over 2.5 -> Odd: {d['odds'].get('OVER_25',0)} | Prob: {p['OVER_25']['prob']:.1f}% | EV: {get_ev(d,p,'OVER_25'):.1f}% | Kelly: {calcular_kelly(get_blended_prob(d,p,'OVER_25'),d['odds'].get('OVER_25',0))*100:.1f}%
-- Under 3.5 -> Odd: {d['odds'].get('UNDER_35',0)} | Prob: {p['UNDER_35']['prob']:.1f}% | EV: {get_ev(d,p,'UNDER_35'):.1f}% | Kelly: {calcular_kelly(get_blended_prob(d,p,'UNDER_35'),d['odds'].get('UNDER_35',0))*100:.1f}%
-- BTTS -> Odd: {d['odds'].get('BTTS',0)} | Prob: {p['BTTS']['prob']:.1f}% | EV: {get_ev(d,p,'BTTS'):.1f}% | Kelly: {calcular_kelly(get_blended_prob(d,p,'BTTS'),d['odds'].get('BTTS',0))*100:.1f}%
-"""
-            with st.spinner("IA analisando mercado de gols..."):
-                resposta = chamar_ia_fabrica(textos, modo="GOLS")
-                st.session_state["ia_gols"] = resposta
-                st.session_state["ids_gols"] = re.findall(r'\[ID:\s*(\d+)\]', resposta)
+    # ── Pré-calcular previsões (0 créditos) ─────────────────────────
+    jogos_com_odds = [j for j in calibrados if str(j["fixture"]["id"]) in odds_cache]
+    previsoes      = cache_dia.get("previsoes", {})
 
-    with col_ia2:
-        if st.button("⚔️ Ranking IA — RESULTADO", use_container_width=True):
-            textos = ""
-            for j in jogos_visiveis:
-                f_id = str(j['fixture']['id'])
-                d = banco_local["datas"][data_str]["stats"].get(f_id)
-                if d and "erro" not in d:
-                    m_h, m_a = calcular_matematica_quant(d)
-                    p = calcular_poisson(m_h, m_a)
-                    if p:
-                        h2h_txt = formatar_h2h(d.get('h2h'))
-                        textos += f"""
-ID: {f_id} | {j['teams']['home']['name']} vs {j['teams']['away']['name']}
-- H2H: {h2h_txt}
-- Forma Casa: {d['h']['forma']} | xG Casa: {m_h:.2f} | Atq: {d['h'].get('home_xg_f', d['h']['media_xg_f']):.2f} | Def: {d['h'].get('home_xg_s', d['h']['media_xg_s']):.2f}
-- Forma Fora: {d['a']['forma']} | xG Fora: {m_a:.2f} | Atq: {d['a'].get('away_xg_f', d['a']['media_xg_f']):.2f} | Def: {d['a'].get('away_xg_s', d['a']['media_xg_s']):.2f}
-- Casa -> Odd: {d['odds'].get('HOME',0)} | Prob: {p['HOME']['prob']:.1f}% | EV: {get_ev(d,p,'HOME'):.1f}%
-- Empate -> Odd: {d['odds'].get('DRAW',0)} | Prob: {p['DRAW']['prob']:.1f}% | EV: {get_ev(d,p,'DRAW'):.1f}%
-- Fora -> Odd: {d['odds'].get('AWAY',0)} | Prob: {p['AWAY']['prob']:.1f}% | EV: {get_ev(d,p,'AWAY'):.1f}%
-- Dupla Casa (1X) -> Odd: {d['odds'].get('1X',0)} | Prob: {p['1X']['prob']:.1f}% | EV: {get_ev(d,p,'1X'):.1f}%
-- Dupla Fora (X2) -> Odd: {d['odds'].get('X2',0)} | Prob: {p['X2']['prob']:.1f}% | EV: {get_ev(d,p,'X2'):.1f}%
-"""
-            with st.spinner("IA analisando mercado de resultados..."):
-                resposta = chamar_ia_fabrica(textos, modo="RESULTADO")
-                st.session_state["ia_resultado"] = resposta
-                st.session_state["ids_res"] = re.findall(r'\[ID:\s*(\d+)\]', resposta)
+    for j in jogos_com_odds:
+        f_id   = str(j["fixture"]["id"])
+        l_id   = j["league"]["id"]
+        params = ParametrosLiga.from_dict(banco.params_ligas[str(l_id)])
+        h_id   = j["teams"]["home"]["id"]
+        a_id   = j["teams"]["away"]["id"]
+        if f_id not in previsoes:
+            prev = prever_jogo(params, h_id, a_id, aplicar_shrink=True, cobertura_minima=10)
+            previsoes[f_id] = {k: prev.get(k) for k in
+                               ("lambda", "mu", "xg_total", "mercados", "flags",
+                                "cobertura_ok", "erro")}
+    banco.datas[data_str]["previsoes"] = previsoes
+    dm.salvar_banco(banco)
 
-    if "ia_gols" in st.session_state:
-        with st.expander("🔥 Ver Ranking IA — GOLS", expanded=True):
-            st.info(st.session_state["ia_gols"])
-    if "ia_resultado" in st.session_state:
-        with st.expander("⚔️ Ver Ranking IA — RESULTADO", expanded=True):
-            st.info(st.session_state["ia_resultado"])
+    # =========================================================================
+    # RANKING DE QUALIDADE (sem número fixo)
+    # =========================================================================
+
+    # 1. Coleta TODOS os mercados aprovados de TODOS os jogos
+    candidatos = []
+    MERCADOS_VARREDURA = [
+        "HOME", "DRAW", "AWAY",
+        "1X", "X2", "12",
+        "OVER_05", "OVER_15", "OVER_25", "OVER_35", "OVER_45",
+        "UNDER_05", "UNDER_15", "UNDER_25", "UNDER_35", "UNDER_45",
+        "BTTS_YES", "BTTS_NO",
+    ]
+    for j in jogos_com_odds:
+        f_id   = str(j["fixture"]["id"])
+        prev   = previsoes[f_id]
+        if prev.get("erro"):
+            continue
+        odds_j       = odds_cache[f_id]
+        cobertura_ok = prev.get("cobertura_ok", False)
+        jogo_nome    = f"{j['teams']['home']['name']} v {j['teams']['away']['name']}"
+        liga_nome_j  = j["league"]["name"]
+
+        for mercado in MERCADOS_VARREDURA:
+            prob_modelo = prev["mercados"].get(mercado, 0)
+            odd_val     = odds_j.get(mercado, 0)
+            if odd_val <= 1.0 or odd_val < odd_min_save:
+                continue
+            comp  = comparar_com_mercado(prob_modelo, odd_val,
+                                         MARGEM_BOOKMAKER_DEFAULT, limite_div)
+            stake = calcular_stake_final(comp["kelly_fracao"], banca_atual,
+                                         piso_kelly, teto_pct)
+            # Só entra se passou em todos os guard-rails
+            if not (comp["flag_aprovado"] and stake > 0 and not comp["anomalia"]):
+                continue
+
+            score = calcular_score_qualidade(
+                ev_pct        = comp["ev_pct"],
+                divergencia_pp= comp["divergencia_pp"],
+                prob_modelo   = prob_modelo,
+                kelly_fracao  = comp["kelly_fracao"],
+                odd           = odd_val,
+                cobertura_ok  = cobertura_ok,
+            )
+            if score < SCORE_MINIMO_RANKING:
+                continue
+
+            candidatos.append({
+                "fixture_id":  f_id,
+                "jogo":        jogo_nome,
+                "liga":        liga_nome_j,
+                "mercado":     mercado,
+                "odd":         odd_val,
+                "prob_modelo": prob_modelo,
+                "prob_mercado":comp["prob_mercado_pct"],
+                "ev":          comp["ev_pct"],
+                "divergencia": comp["divergencia_pp"],
+                "kelly":       comp["kelly_fracao"],
+                "stake":       stake,
+                "score":       score,
+                "cobertura_ok":cobertura_ok,
+            })
+
+    # 2. Deduplicação por jogo: mantém apenas o mercado de maior score por fixture
+    #    → elimina clustering (Under 0.5 / 1.5 / 2.5 do mesmo jogo competem entre si)
+    melhor_por_jogo: dict[str, dict] = {}
+    for c in candidatos:
+        fid = c["fixture_id"]
+        if fid not in melhor_por_jogo or c["score"] > melhor_por_jogo[fid]["score"]:
+            melhor_por_jogo[fid] = c
+
+    # 3. Ranking final: score desc
+    ranking = sorted(melhor_por_jogo.values(), key=lambda x: x["score"], reverse=True)
+
+    # ── Exibe ranking ────────────────────────────────────────────────
+    n_total_aprovados = len(candidatos)  # antes da dedup, para info
+
+    if ranking:
+        st.markdown(f"### 🏆 Ranking de Qualidade do Dia ({len(ranking)} entrada{'s' if len(ranking) > 1 else ''})")
+        st.caption(
+            f"Score ≥ {SCORE_MINIMO_RANKING} · 1 mercado por jogo (melhor score) · "
+            f"{n_total_aprovados} candidatos antes da filtragem"
+        )
+
+        for i, p in enumerate(ranking, 1):
+            score     = p["score"]
+            # Cor por nível de score
+            if score >= 70:
+                cor, badge = "#28a745", "🟢 Alta"
+            elif score >= 50:
+                cor, badge = "#17a2b8", "🔵 Média"
+            else:
+                cor, badge = "#ffc107", "🟡 Marginal"
+
+            # Barra de score visual (█ preenchidos proporcionalmente)
+            barras  = int(score / 10)
+            bar_str = "█" * barras + "░" * (10 - barras)
+
+            cob_icon = "✅" if p["cobertura_ok"] else "⚠️ dados parciais"
+
+            st.markdown(
+                f"""<div style='border-left:4px solid {cor};padding:10px 14px;
+                              margin-bottom:10px;background:#0e1117;border-radius:4px;'>
+                  <div style='display:flex;justify-content:space-between;
+                              font-size:11px;color:#888;'>
+                    <span>#{i} · {p['liga']} · {cob_icon}</span>
+                    <span style='color:{cor};font-weight:bold;'>{badge} &nbsp;
+                      <span style='font-family:monospace;letter-spacing:1px;'>{bar_str}</span>
+                      &nbsp;{score:.0f}/100
+                    </span>
+                  </div>
+                  <div style='font-size:17px;font-weight:bold;color:white;margin:5px 0 3px;'>
+                    {p['jogo']}
+                  </div>
+                  <div style='font-size:13px;color:#ccc;'>
+                    <b>{p['mercado']}</b> &nbsp;·&nbsp;
+                    Odd <b>{p['odd']:.2f}</b> &nbsp;·&nbsp;
+                    Modelo <b>{p['prob_modelo']:.1f}%</b> vs Mercado {p['prob_mercado']:.1f}%
+                    &nbsp;·&nbsp; Δ <b>{p['divergencia']:+.1f}pp</b>
+                  </div>
+                  <div style='font-size:12px;color:#aaa;margin-top:2px;'>
+                    EV <span style='color:{cor};font-weight:bold;'>{p['ev']:+.1f}%</span>
+                    &nbsp;·&nbsp; Kelly {p['kelly']*100:.1f}%
+                    &nbsp;·&nbsp; 💵 Stake: <b>R$ {p['stake']:.2f}</b>
+                  </div>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+
+        # ── Consultora Gemini ────────────────────────────────────────
+        st.markdown("#### 🤖 Consultora IA (Gemini)")
+        st.caption("Lê o ranking completo e entrega análise tática baseada no score, divergência e contexto.")
+        usar_gemini = st.toggle("Ativar Consultora Gemini", value=False)
+        if usar_gemini:
+            if st.button("📡 Analisar com Gemini", type="primary"):
+                with st.spinner("Consultando Gemini..."):
+                    resposta = consultar_gemini(ranking)
+                st.markdown("---")
+                st.markdown(resposta)
+
+        st.divider()
+
+    elif jogos_com_odds:
+        st.info(
+            f"📭 Nenhum pick atingiu o score mínimo de {SCORE_MINIMO_RANKING} hoje. "
+            f"O motor encontrou {n_total_aprovados} candidatos com EV positivo mas nenhum com qualidade suficiente."
+        )
+        st.divider()
+
+    # =========================================================================
+    # CARDS INDIVIDUAIS
+    # =========================================================================
+
+    st.markdown(f"#### {len(jogos_com_odds)} jogos prontos para análise")
+
+    def render_mercado(col, label, prob_modelo_pct, odd_mercado,
+                       banca, piso, teto_pct, lim_div):
+        if odd_mercado <= 1.0:
+            col.markdown(f"**{label}**\n\n_(sem odd)_")
+            return None
+        comp  = comparar_com_mercado(prob_modelo_pct, odd_mercado,
+                                     MARGEM_BOOKMAKER_DEFAULT, lim_div)
+        stake = calcular_stake_final(comp["kelly_fracao"], banca, piso, teto_pct)
+
+        if comp["anomalia"]:
+            badge, cor = "🚨 ANOMALIA", "#dc3545"
+        elif comp["flag_aprovado"] and stake > 0:
+            badge, cor = "✅ APROVADO", "#28a745"
+        elif comp["ev_pct"] > 0:
+            badge, cor = "🟡 marginal", "#ffc107"
+        else:
+            badge, cor = "—", "#6c757d"
+
+        col.markdown(
+            f"""<div style='border-left:4px solid {cor};padding:6px 10px;
+                           margin-bottom:6px;background:#0e1117;'>
+              <div style='font-size:11px;color:#aaa;font-weight:bold;'>
+                {label}<span style='float:right;color:{cor};'>{badge}</span>
+              </div>
+              <div style='font-size:14px;color:#fff;margin-top:2px;'>
+                Modelo:<b>{prob_modelo_pct:.1f}%</b> | Mercado:{comp['prob_mercado_pct']:.1f}% |
+                Δ:{comp['divergencia_pp']:+.1f}pp
+              </div>
+              <div style='font-size:13px;color:#ccc;'>
+                Odd:<b>{odd_mercado:.2f}</b> | EV:{comp['ev_pct']:+.1f}% |
+                Kelly:{comp['kelly_fracao']*100:.1f}%
+              </div>
+              <div style='font-size:12px;color:#17a2b8;margin-top:2px;'>
+                💵 {'R$ ' + str(stake) if stake > 0 else 'DESCARTAR'}
+              </div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+        return comp
+
+    for j in jogos_com_odds:
+        f_id   = str(j["fixture"]["id"])
+        prev   = previsoes[f_id]
+        odds_j = odds_cache[f_id]
+
+        if prev.get("erro"):
+            st.error(
+                f"{j['teams']['home']['name']} vs {j['teams']['away']['name']}: {prev['erro']}"
+            )
+            continue
+
+        hora      = j["fixture"]["date"][11:16]
+        liga_nome = j["league"]["name"]
+        flags_str = " | ".join(prev["flags"]) if prev.get("flags") else "—"
+        cobertura = "✅" if prev.get("cobertura_ok") else "⚠️ dados insuficientes (usando média)"
+
+        with st.container():
+            st.markdown(
+                f"""<div style='background:#0e1117;padding:10px;border-radius:6px;border:1px solid #333;'>
+                  <div style='display:flex;justify-content:space-between;color:#888;font-size:11px;'>
+                    <span>🕒 {hora} · {liga_nome}</span>
+                    <span>xG total: <b>{prev['xg_total']:.2f}</b> · {cobertura} · Flags: {flags_str}</span>
+                  </div>
+                  <div style='font-size:18px;font-weight:bold;color:white;margin:6px 0;'>
+                    {j['teams']['home']['name']} <span style='color:#666;font-size:13px;'>vs</span>
+                    {j['teams']['away']['name']}
+                  </div>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+
+            sub = st.tabs(["⚽ Resultado", "🔢 Gols", "🤝 BTTS",
+                           "📈 Handicap Asiático", "🎯 Placar Exato", "💾 Salvar Pick"])
+
+            with sub[0]:
+                cols = st.columns(3)
+                for col, key, label in zip(cols, ["HOME", "DRAW", "AWAY"], ["Casa", "Empate", "Fora"]):
+                    render_mercado(col, label, prev["mercados"][key], odds_j.get(key, 0),
+                                   banca_atual, piso_kelly, teto_pct, limite_div)
+                cols2 = st.columns(3)
+                for col, key, label in zip(cols2, ["1X", "X2", "12"],
+                                           ["1X (Casa/Emp)", "X2 (Emp/Fora)", "12 (Casa/Fora)"]):
+                    render_mercado(col, label, prev["mercados"][key], odds_j.get(key, 0),
+                                   banca_atual, piso_kelly, teto_pct, limite_div)
+
+            with sub[1]:
+                cols_o = st.columns(5)
+                cols_u = st.columns(5)
+                for col, l in zip(cols_o, ["05", "15", "25", "35", "45"]):
+                    render_mercado(col, f"Over {l[0]}.{l[1]}", prev["mercados"][f"OVER_{l}"],
+                                   odds_j.get(f"OVER_{l}", 0), banca_atual, piso_kelly, teto_pct, limite_div)
+                for col, l in zip(cols_u, ["05", "15", "25", "35", "45"]):
+                    render_mercado(col, f"Under {l[0]}.{l[1]}", prev["mercados"][f"UNDER_{l}"],
+                                   odds_j.get(f"UNDER_{l}", 0), banca_atual, piso_kelly, teto_pct, limite_div)
+
+            with sub[2]:
+                cols = st.columns(2)
+                for col, key, label in zip(cols, ["BTTS_YES", "BTTS_NO"], ["Ambas marcam", "Não ambas"]):
+                    render_mercado(col, label, prev["mercados"][key], odds_j.get(key, 0),
+                                   banca_atual, piso_kelly, teto_pct, limite_div)
+
+            with sub[3]:
+                st.caption("Probabilidades teóricas. Cole as odds AH manualmente.")
+                ah_keys = ["AH_CASA_-05", "AH_CASA_-10", "AH_CASA_-15",
+                           "AH_CASA_+10", "AH_CASA_+15", "AH_FORA_+05",
+                           "AH_FORA_+10", "AH_FORA_+15"]
+                cols = st.columns(4)
+                for i, key in enumerate(ah_keys):
+                    cols[i % 4].metric(key.replace("AH_", "").replace("_", " "),
+                                       f"{prev['mercados'].get(key, 0):.1f}%")
+
+            with sub[4]:
+                pe = sorted(
+                    [(k, v) for k, v in prev["mercados"].items() if k.startswith("PE_")],
+                    key=lambda x: x[1], reverse=True
+                )[:8]
+                cols = st.columns(4)
+                for i, (k, v) in enumerate(pe):
+                    cols[i % 4].metric(k.replace("PE_", ""), f"{v:.1f}%")
+
+            with sub[5]:
+                todos_mk = ["HOME", "DRAW", "AWAY", "1X", "X2", "12",
+                            "OVER_05", "OVER_15", "OVER_25", "OVER_35", "OVER_45",
+                            "UNDER_05", "UNDER_15", "UNDER_25", "UNDER_35", "UNDER_45",
+                            "BTTS_YES", "BTTS_NO"]
+                mk_sel    = st.selectbox("Mercado", todos_mk, key=f"sel_{f_id}")
+                odd_atual = odds_j.get(mk_sel, 0)
+                prob_mod  = prev["mercados"][mk_sel]
+                comp      = comparar_com_mercado(prob_mod, odd_atual, MARGEM_BOOKMAKER_DEFAULT, limite_div)
+                stake_sug = calcular_stake_final(comp["kelly_fracao"], banca_atual, piso_kelly, teto_pct)
+
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Odd", f"{odd_atual:.2f}")
+                c2.metric("EV", f"{comp['ev_pct']:+.1f}%")
+                c3.metric("Stake sugerida", f"R$ {stake_sug:.2f}" if stake_sug > 0 else "DESCARTAR")
+
+                stake_input = st.number_input("Stake final (R$)", value=stake_sug,
+                                              step=0.5, min_value=0.0, key=f"stk_{f_id}")
+                bloqueado   = odd_atual < odd_min_save or comp["anomalia"] or stake_input <= 0
+
+                if bloqueado:
+                    motivos = []
+                    if odd_atual < odd_min_save:   motivos.append(f"odd {odd_atual:.2f} < {odd_min_save}")
+                    if comp["anomalia"]:            motivos.append(f"anomalia (Δ {comp['divergencia_pp']:+.1f}pp)")
+                    if stake_input <= 0:            motivos.append("stake zero")
+                    st.warning("⚠️ Save bloqueado: " + " | ".join(motivos))
+
+                if st.button("💾 Salvar pick", disabled=bloqueado,
+                             key=f"save_{f_id}", type="primary"):
+                    banco.picks.append({
+                        "data":         data_str,
+                        "jogo":         f"{j['teams']['home']['name']} v {j['teams']['away']['name']}",
+                        "liga_id":      j["league"]["id"],
+                        "fixture_id":   f_id,
+                        "mercado":      mk_sel,
+                        "odd":          odd_atual,
+                        "prob_modelo":  round(prob_mod, 2),
+                        "prob_mercado": round(comp["prob_mercado_pct"], 2),
+                        "divergencia_pp": round(comp["divergencia_pp"], 2),
+                        "ev":           round(comp["ev_pct"], 2),
+                        "kelly_frac":   round(comp["kelly_fracao"], 4),
+                        "stake":        stake_input,
+                        "status":       "Pendente",
+                        "salvo_em":     dt.datetime.now().isoformat(),
+                    })
+                    dm.salvar_banco(banco)
+                    st.success("Pick salva! ✅")
+                    st.rerun()
+
+
+# =========================================================================
+# 6.3 ABA TRACKER
+# =========================================================================
+
+with tab_tracker:
+    st.markdown("### 📋 Diário de Bordo")
+
+    if not banco.picks:
+        st.info("Nenhuma pick salva ainda.")
+    else:
+        n_green    = sum(1 for p in banco.picks if p.get("status") == "Green")
+        n_red      = sum(1 for p in banco.picks if p.get("status") == "Red")
+        n_pend     = sum(1 for p in banco.picks if p.get("status") == "Pendente")
+        n_resolv   = n_green + n_red
+        taxa       = (n_green / n_resolv * 100) if n_resolv else 0
+
+        cs = st.columns(6)
+        cs[0].metric("Total", len(banco.picks))
+        cs[1].metric("✅ Green", n_green)
+        cs[2].metric("❌ Red", n_red)
+        cs[3].metric("⏳ Pendente", n_pend)
+        cs[4].metric("Taxa acerto", f"{taxa:.1f}%")
+        cs[5].metric("ROI apostas", f"{roi_pct:+.1f}%")
+
+        st.caption(f"Banca inicial: R$ {banco.banca_inicial:.2f} | "
+                   f"P/L apostas: R$ {lucro_picks:+.2f} | "
+                   f"Depósitos/Retiradas: R$ {total_dep:+.2f} | "
+                   f"Banca atual: R$ {banca_atual:.2f}")
+
+        st.divider()
+
+        for i, p in enumerate(reversed(banco.picks)):
+            real_idx = len(banco.picks) - 1 - i
+            status   = p.get("status", "Pendente")
+            icone    = {"Pendente": "⏳", "Green": "✅", "Red": "❌",
+                        "Devolvida": "➖", "Anulada": "➖"}.get(status, "❓")
+
+            with st.expander(
+                f"{icone} {p.get('data','?')} | {p.get('jogo','?')} | "
+                f"{p.get('mercado','?')} | Odd {p.get('odd','-')}"
+            ):
+                c1, c2, c3, c4 = st.columns(4)
+                c1.write(f"**Stake:** R$ {p.get('stake', 0):.2f}")
+                c2.write(f"**Odd:** {p.get('odd', '-')}")
+                c3.write(f"**Prob modelo:** {p.get('prob_modelo', '-')}%")
+                c4.write(f"**EV:** {p.get('ev', '-')}%")
+                if "divergencia_pp" in p:
+                    st.caption(f"Δ vs mercado: {p['divergencia_pp']:+.1f}pp | "
+                               f"Kelly: {p.get('kelly_frac', 0)*100:.1f}%")
+
+                if status == "Pendente":
+                    ca, cb, cc = st.columns(3)
+                    if ca.button("✅ Green",    key=f"green_{real_idx}", type="primary"):
+                        banco.picks[real_idx]["status"] = "Green"
+                        dm.salvar_banco(banco); st.rerun()
+                    if cb.button("❌ Red",      key=f"red_{real_idx}"):
+                        banco.picks[real_idx]["status"] = "Red"
+                        dm.salvar_banco(banco); st.rerun()
+                    if cc.button("➖ Devolvida", key=f"void_{real_idx}"):
+                        banco.picks[real_idx]["status"] = "Devolvida"
+                        dm.salvar_banco(banco); st.rerun()
+                else:
+                    if st.button("↩️ Desfazer", key=f"undo_{real_idx}"):
+                        banco.picks[real_idx]["status"] = "Pendente"
+                        dm.salvar_banco(banco); st.rerun()
+
+
+# =========================================================================
+# 6.4 ABA AUDITORIA
+# =========================================================================
+
+with tab_auditoria:
+    st.markdown("### 🔬 Auditoria do Motor")
+
+    if not banco.params_ligas:
+        st.info("Nenhuma liga calibrada ainda.")
+    else:
+        liga_aud = st.selectbox(
+            "Liga", options=list(banco.params_ligas.keys()),
+            format_func=lambda x: f"{LIGAS_SUPORTADAS.get(int(x), f'Liga {x}')} (ID {x})",
+        )
+        params_d = banco.params_ligas[liga_aud]
+        params   = ParametrosLiga.from_dict(params_d)
+
+        # Helper para resolver nome do time
+        def nome_time(tid: int) -> str:
+            return params.nomes_times.get(int(tid), f"ID {tid}")
+
+        # Métricas do motor
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("γ (vantagem casa)",   f"{params.home_advantage:.3f}")
+        c2.metric("ρ (Dixon-Coles tau)", f"{params.rho:.3f}")
+        c3.metric("Média gols/jogo",     f"{params.media_liga_gols:.2f}")
+        c4.metric("Jogos usados",        params.n_jogos_calibracao)
+
+        seasons_str = " + ".join(str(s) for s in params.seasons_incluidas) if params.seasons_incluidas else str(params.season)
+        tipo_season = "ano-calendário" if int(liga_aud) in LIGAS_TEMPORADA_ANO_ATUAL else "europeia"
+        st.caption(
+            f"Calibrada em: {params.calibrado_em[:16]} | "
+            f"Temporadas: **{seasons_str}** ({tipo_season}) | "
+            f"Log-likelihood: {params.log_likelihood:.2f} | "
+            f"{len(params.nomes_times)} nomes resolvidos"
+        )
+
+        # ── Raio-X da base bruta ─────────────────────────────────────────
+        if params.raio_x_times:
+            season_atual_str  = params.seasons_incluidas[-1] if params.seasons_incluidas else params.season
+            season_hist_str   = params.seasons_incluidas[0]  if len(params.seasons_incluidas) > 1 else "—"
+            tem_multi = len(params.seasons_incluidas) > 1
+
+            n_no_modelo    = sum(1 for v in params.raio_x_times.values() if v.get("no_modelo"))
+            n_filtrados    = sum(1 for v in params.raio_x_times.values() if not v.get("no_modelo"))
+            n_rebaixados   = sum(1 for v in params.raio_x_times.values()
+                                 if not v.get("na_temporada_atual") and tem_multi)
+
+            with st.expander(
+                f"🔬 Raio-X da Base Bruta — {len(params.raio_x_times)} times detectados · "
+                f"{n_no_modelo} no modelo · {n_filtrados} filtrados"
+                + (f" · {n_rebaixados} rebaixados/ausentes de {season_atual_str}" if n_rebaixados else ""),
+                expanded=False,
+            ):
+                st.caption(
+                    "**Verde** = no modelo | **Amarelo** = passou no MLE mas removido por ser só do histórico "
+                    "| **Vermelho** = excluído (poucos jogos ou não está na temporada atual)"
+                )
+
+                linhas_raio_x = []
+                for tid, rx in sorted(
+                    params.raio_x_times.items(),
+                    key=lambda x: (not x[1].get("no_modelo"), -x[1].get("n_total", 0)),
+                ):
+                    nome = params.nomes_times.get(int(tid), f"ID {tid}")
+                    no_mod   = rx.get("no_modelo", False)
+                    na_atual = rx.get("na_temporada_atual", True)
+
+                    if no_mod:
+                        status = "✅ No modelo"
+                    elif na_atual:
+                        status = "🟡 Poucos jogos (filtrado)"
+                    else:
+                        status = f"🔴 Rebaixado / não está em {season_atual_str}"
+
+                    linha = {
+                        "Time":                         nome,
+                        f"Jogos {season_atual_str}":    rx.get("n_atual", 0),
+                        "Jogos histórico":              rx.get("n_historico", 0) if tem_multi else "—",
+                        "Total":                        rx.get("n_total", 0),
+                        "Último jogo":                  rx.get("ultimo_jogo", "?"),
+                        "Status":                       status,
+                    }
+                    if not tem_multi:
+                        del linha["Jogos histórico"]
+                    linhas_raio_x.append(linha)
+
+                st.dataframe(linhas_raio_x, use_container_width=True, hide_index=True)
+
+                # Alerta sobre times rebaixados encontrados
+                rebaixados_lista = [
+                    params.nomes_times.get(int(tid), f"ID {tid}")
+                    for tid, rx in params.raio_x_times.items()
+                    if not rx.get("na_temporada_atual") and tem_multi
+                ]
+                if rebaixados_lista:
+                    st.warning(
+                        f"⚠️ **{len(rebaixados_lista)} time(s) do histórico {season_hist_str} "
+                        f"excluídos do modelo** (não aparecem em {season_atual_str}):\n" +
+                        ", ".join(rebaixados_lista[:15]) +
+                        ("..." if len(rebaixados_lista) > 15 else "")
+                    )
+                else:
+                    st.success(f"✅ Todos os times do modelo aparecem em {season_atual_str}.")
+        else:
+            st.info("💡 Raio-X disponível após recalibrar. Clique em 'Calibrar' para gerar.")
+
+        # Ranking de ataques
+        times_ord = sorted(params.times.items(), key=lambda x: -x[1]["alpha"])
+
+        st.markdown("#### 🔴 Top 5 ataques (α maior = melhor ofensivo)")
+        st.dataframe(
+            [{"Time": nome_time(int(k)), "Ataque (α)": round(v["alpha"], 3),
+              "Defesa (β)": round(v["beta"], 3), "Jogos": v["n_jogos"]}
+             for k, v in times_ord[:5]],
+            use_container_width=True, hide_index=True,
+        )
+
+        st.markdown("#### 📉 Bottom 5 ataques (piores ofensivos)")
+        st.dataframe(
+            [{"Time": nome_time(int(k)), "Ataque (α)": round(v["alpha"], 3),
+              "Defesa (β)": round(v["beta"], 3), "Jogos": v["n_jogos"]}
+             for k, v in times_ord[-5:]],
+            use_container_width=True, hide_index=True,
+        )
+
+        st.markdown("#### 🛡️ Top 5 defesas (β MENOR = melhor defensivo)")
+        times_def = sorted(params.times.items(), key=lambda x: x[1]["beta"])
+        st.dataframe(
+            [{"Time": nome_time(int(k)), "Ataque (α)": round(v["alpha"], 3),
+              "Defesa (β)": round(v["beta"], 3), "Jogos": v["n_jogos"]}
+             for k, v in times_def[:5]],
+            use_container_width=True, hide_index=True,
+        )
+
+        st.markdown("#### 📋 Todos os times calibrados")
+        with st.expander(f"Ver todos os {len(params.times)} times"):
+            todos = [
+                {"Time": nome_time(int(k)), "ID": int(k),
+                 "Ataque (α)": round(v["alpha"], 3),
+                 "Defesa (β)": round(v["beta"], 3),
+                 "Jogos": v["n_jogos"]}
+                for k, v in sorted(params.times.items(), key=lambda x: -x[1]["alpha"])
+            ]
+            st.dataframe(todos, use_container_width=True, hide_index=True)
 
     st.divider()
 
-    ids_gols_rank = st.session_state.get("ids_gols", [])
-    jogos_gols_sorted = sorted(jogos_visiveis, key=lambda j: ids_gols_rank.index(str(j['fixture']['id'])) if str(j['fixture']['id']) in ids_gols_rank else 999999)
-    ids_res_rank = st.session_state.get("ids_res", [])
-    jogos_res_sorted = sorted(jogos_visiveis, key=lambda j: ids_res_rank.index(str(j['fixture']['id'])) if str(j['fixture']['id']) in ids_res_rank else 999999)
+    # =========================================================================
+    # DIAGNÓSTICO COMPLETO
+    # =========================================================================
+    st.markdown("#### 🩺 Diagnóstico do Sistema")
+    if st.button("🔍 Rodar diagnóstico completo", type="primary"):
+        import json as _json
+        from pathlib import Path as _Path
 
-    tab_gols, tab_result = st.tabs(["🔥 MODO GOLS", "⚔️ MODO RESULTADO"])
-    dict_m_gols = {"OVER_15": "Over 1.5", "OVER_25": "Over 2.5", "OVER_35": "Over 3.5", "UNDER_25": "Under 2.5", "UNDER_35": "Under 3.5", "BTTS": "Ambas Marcam"}
-    dict_m_res = {"HOME": "Casa", "DRAW": "Empate", "AWAY": "Fora", "1X": "Dupla Casa", "X2": "Dupla Fora"}
+        linhas = []
 
-    def renderizar_card(j, f_id, d, ids_rank, modo_dict, prefix):
-        m_h, m_a = calcular_matematica_quant(d)
-        p = calcular_poisson(m_h, m_a)
-        if not p: return
-        is_top = f_id in ids_rank
-        borda = "border: 2px solid #ffc107;" if is_top else "border: 1px solid #1e1e1e;"
-        rank_badge = f"<span style='background:#ffc107; color:#000; font-size:10px; font-weight:bold; padding:2px 7px; border-radius:4px; margin-right:6px;'>TOP {ids_rank.index(f_id)+1}</span>" if is_top else ""
-        h2h_txt = formatar_h2h(d.get('h2h'))
-        perfil_html = ""
-        if prefix == "g":
-            perfil = avaliar_perfil_jogo(p)
-            cor_perfil = "#28a745" if "ABERTO" in perfil else "#dc3545" if "TRAVADO" in perfil else "#ffc107"
-            perfil_html = f"<span style='color:{cor_perfil}; font-size:11px; font-weight:bold;'>{perfil}</span>"
+        # ── Seção 1: Arquivo local ─────────────────────────────────────────
+        linhas.append("═" * 55)
+        linhas.append("SEÇÃO 1 — SAÚDE DO ARQUIVO LOCAL")
+        linhas.append("═" * 55)
+        arq = _Path("banco_barrios_pro.json")
+        if arq.exists():
+            size_kb = arq.stat().st_size / 1024
+            try:
+                with open(arq, "r", encoding="utf-8") as f:
+                    _json.load(f)
+                linhas.append(f"✅ {arq.name} existe e é JSON válido ({size_kb:.1f} KB)")
+            except Exception as e:
+                linhas.append(f"❌ {arq.name} existe mas está CORROMPIDO: {e}")
+        else:
+            linhas.append(f"⚠️  {arq.name} não encontrado — sistema rodando só em memória")
 
-        st.markdown(f"""<div style='{borda} border-radius:10px; padding:14px; background:#0e1117; margin-bottom:10px;'>
-            <div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;'>
-                <span style='color:#444; font-size:11px;'>{rank_badge}🕒 {j['fixture']['date'][11:16]} • {j['league']['name']}</span>
-                {perfil_html}
-            </div>
-            <div style='font-size:17px; font-weight:bold; color:#fff; margin-bottom:4px;'>{j['teams']['home']['name']} <span style='color:#333; font-size:12px;'>vs</span> {j['teams']['away']['name']}</div>
-            <div style='font-size:11px; color:#444;'>xG: <span style='color:#aaa;'>{m_h:.2f}</span> — <span style='color:#aaa;'>{m_a:.2f}</span> (Σ {m_h+m_a:.2f}) &nbsp;|&nbsp; H2H: <span style='color:#666;'>{h2h_txt}</span></div>
-        """, unsafe_allow_html=True)
+        try:
+            saldo_api = dm.saldo_creditos()
+            linhas.append(f"✅ Conexão API-Sports OK — saldo: {saldo_api}/7500 créditos")
+        except Exception as e:
+            linhas.append(f"❌ Conexão API-Sports FALHOU: {e}")
 
-        cols = st.columns(3)
-        for idx_col, m_key in enumerate(modo_dict.keys()):
-            renderizar_mercado(cols[idx_col % 3], modo_dict[m_key], p, m_key, d['odds'], d, banca_atual)
+        # ── Seção 2: Completude das ligas calibradas ───────────────────────
+        linhas.append("")
+        linhas.append("═" * 55)
+        linhas.append("SEÇÃO 2 — COMPLETUDE DAS LIGAS")
+        linhas.append("═" * 55)
+        linhas.append(f"Calibradas: {len(banco.params_ligas)} / {len(LIGAS_SUPORTADAS)} suportadas")
+        linhas.append("")
 
-        with st.expander("📊 Detalhes, Salvar & Atualizar"):
-            ci1, ci2 = st.columns(2)
-            with ci1:
-                st.markdown(f"🏠 **{j['teams']['home']['name']}**")
-                st.caption(f"Forma: {d['h']['forma']} | Atq (casa): {d['h'].get('home_xg_f', d['h']['media_xg_f']):.2f} | Def (casa): {d['h'].get('home_xg_s', d['h']['media_xg_s']):.2f}")
-            with ci2:
-                st.markdown(f"✈️ **{j['teams']['away']['name']}**")
-                st.caption(f"Forma: {d['a']['forma']} | Atq (fora): {d['a'].get('away_xg_f', d['a']['media_xg_f']):.2f} | Def (fora): {d['a'].get('away_xg_s', d['a']['media_xg_s']):.2f}")
-            st.divider()
-            c_sel, c_stk, c_btn, c_upd = st.columns([2, 1, 1, 1])
-            mk_sel = c_sel.selectbox("Mercado:", list(modo_dict.keys()), format_func=lambda x: modo_dict[x], key=f"s{prefix}_{f_id}", label_visibility="collapsed")
-            frac = calcular_kelly(get_blended_prob(d, p, mk_sel), d['odds'].get(mk_sel, 0))
-            ev_sel = get_ev(d, p, mk_sel)
-            stake_sug = max(2.0, frac * banca_atual) if (frac > 0 and ev_sel > 3) else 2.0
-            stk_input = c_stk.number_input("R$", value=float(round(stake_sug, 2)), step=0.5, key=f"stk{prefix}_{f_id}", label_visibility="collapsed")
-            if c_btn.button("✅ Salvar", key=f"bs{prefix}_{f_id}"):
-                banco_local["picks"].append({
-                    "data": data_str, "jogo": f"{j['teams']['home']['name']} v {j['teams']['away']['name']}",
-                    "mercado": modo_dict[mk_sel], "odd": d['odds'].get(mk_sel, 0),
-                    "prob": round(get_blended_prob(d, p, mk_sel), 1), "ev": round(get_ev(d, p, mk_sel), 1),
-                    "status": "Pendente", "stake": stk_input
-                })
-                salvar_banco(banco_local)
-                st.toast(f"✅ Pick salvo — R$ {stk_input:.2f}")
-            if c_upd.button("🔄", key=f"upd{prefix}_{f_id}", help="Atualizar análise"):
-                acao_analisar([j], data_str, force=True)
+        hoje_dt = dt.datetime.now()
+        for chave, pd_raw in banco.params_ligas.items():
+            nome_l = LIGAS_SUPORTADAS.get(int(chave), f"Liga {chave}")
+            n_times_l = len(pd_raw.get("times", {}))
+            n_jogos_l = pd_raw.get("n_jogos_calibracao", 0)
+            cal_em_s  = pd_raw.get("calibrado_em", "")[:16]
+            seasons_l = pd_raw.get("seasons_incluidas", [pd_raw.get("season", "?")])
+            tem_nomes = len(pd_raw.get("nomes_times", {}))
 
-        st.markdown("</div>", unsafe_allow_html=True)
+            try:
+                dias_l = (hoje_dt - dt.datetime.fromisoformat(pd_raw.get("calibrado_em",""))).days
+                fresh  = "✅" if dias_l <= 7 else ("🟡" if dias_l <= 14 else "🔴")
+            except Exception:
+                dias_l = -1
+                fresh  = "⚠️"
 
-    def renderizar_mini(j, f_id, prefix):
-        cc, cb = st.columns([5, 1])
-        with cc:
-            st.markdown(f"""<div style='border:1px solid #1e1e1e; border-radius:8px; padding:10px; background:#0e1117; margin-bottom:4px;'>
-                <span style='color:#444; font-size:11px;'>🕒 {j['fixture']['date'][11:16]} • {j['league']['name']}</span><br>
-                <span style='font-size:15px; font-weight:bold; color:#888;'>{j['teams']['home']['name']} vs {j['teams']['away']['name']}</span>
-            </div>""", unsafe_allow_html=True)
-        with cb:
-            if st.button("📊", key=f"mini_{prefix}_{f_id}", help="Analisar este jogo"):
-                acao_analisar([j], data_str, force=True)
+            seasons_info = "+".join(str(s) for s in seasons_l)
+            nomes_info   = f"{tem_nomes} nomes" if tem_nomes else "sem nomes (recalibrar)"
+            linhas.append(
+                f"  {fresh} {nome_l}: {n_times_l} times | {n_jogos_l} jogos | "
+                f"seasons={seasons_info} | {cal_em_s} ({dias_l}d) | {nomes_info}"
+            )
 
-    with tab_gols:
-        for j in jogos_gols_sorted:
-            f_id = str(j['fixture']['id'])
-            d = banco_local["datas"][data_str]["stats"].get(f_id)
-            if not d or "erro" in d: renderizar_mini(j, f_id, "g")
-            else: renderizar_card(j, f_id, d, ids_gols_rank, dict_m_gols, "g")
+        # ── Seção 3: Integridade dos IDs ───────────────────────────────────
+        linhas.append("")
+        linhas.append("═" * 55)
+        linhas.append("SEÇÃO 3 — INTEGRIDADE DOS IDs DE TIMES")
+        linhas.append("═" * 55)
 
-    with tab_result:
-        for j in jogos_res_sorted:
-            f_id = str(j['fixture']['id'])
-            d = banco_local["datas"][data_str]["stats"].get(f_id)
-            if not d or "erro" in d: renderizar_mini(j, f_id, "r")
-            else: renderizar_card(j, f_id, d, ids_res_rank, dict_m_res, "r")
+        total_prob = 0
+        for chave, pd_raw in banco.params_ligas.items():
+            nome_l = LIGAS_SUPORTADAS.get(int(chave), f"Liga {chave}")
+            times_raw = pd_raw.get("times", {})
+            problemas = []
+
+            ids_vistos: set = set()
+            for tid_str, tv in times_raw.items():
+                # ID não-inteiro
+                try:
+                    tid_int = int(tid_str)
+                except (ValueError, TypeError):
+                    problemas.append(f"ID não-inteiro: '{tid_str}'")
+                    continue
+
+                # Duplicata
+                if tid_int in ids_vistos:
+                    problemas.append(f"ID duplicado: {tid_int}")
+                ids_vistos.add(tid_int)
+
+                # α/β fora dos bounds razoáveis
+                alpha = tv.get("alpha")
+                beta  = tv.get("beta")
+                if alpha is None or beta is None:
+                    problemas.append(f"α ou β ausente no time {tid_int}")
+                elif not (0.05 < float(alpha) < 5.0) or not (0.05 < float(beta) < 5.0):
+                    problemas.append(
+                        f"α/β fora dos bounds: time {tid_int} "
+                        f"(α={alpha:.3f}, β={beta:.3f})"
+                    )
+
+            if problemas:
+                total_prob += len(problemas)
+                linhas.append(f"  ❌ {nome_l}: {len(problemas)} problema(s)")
+                for p in problemas[:5]:
+                    linhas.append(f"     • {p}")
+            else:
+                linhas.append(f"  ✅ {nome_l}: {len(times_raw)} times OK")
+
+        if total_prob == 0:
+            linhas.append("")
+            linhas.append("✅ Nenhum ID corrompido ou duplicado encontrado.")
+        else:
+            linhas.append(f"\n❌ Total de problemas encontrados: {total_prob}")
+
+        # ── Resumo de picks ────────────────────────────────────────────────
+        linhas.append("")
+        linhas.append("═" * 55)
+        linhas.append("SEÇÃO 4 — PICKS E BANCA")
+        linhas.append("═" * 55)
+        n_sem_odd  = sum(1 for p in banco.picks if not p.get("odd"))
+        n_sem_stat = sum(1 for p in banco.picks if not p.get("status"))
+        linhas.append(f"Total de picks: {len(banco.picks)}")
+        linhas.append(f"Pendentes: {sum(1 for p in banco.picks if p.get('status')=='Pendente')}")
+        linhas.append(f"Picks sem odd registrada: {n_sem_odd}")
+        linhas.append(f"Picks sem status: {n_sem_stat}")
+        linhas.append(f"Banca inicial: R$ {banco.banca_inicial:.2f}")
+        linhas.append(f"Depósitos registrados: {len(banco.depositos)}")
+        linhas.append(f"P/L apostas: R$ {lucro_picks:+.2f} | ROI: {roi_pct:+.1f}%")
+        linhas.append(f"Banca atual: R$ {banca_atual:.2f}")
+
+        st.code("\n".join(linhas), language=None)
