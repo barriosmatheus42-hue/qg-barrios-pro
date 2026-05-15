@@ -23,6 +23,9 @@ from motor import (
     ParametrosLiga,
     prever_jogo,
     comparar_com_mercado,
+    filtrar_gatilho,
+    MERCADOS_PRODUCAO,
+    EV_MIN_POR_MERCADO,
 )
 from dados import (
     BancoQG,
@@ -31,9 +34,13 @@ from dados import (
     LIGAS_TEMPORADA_ANO_ATUAL,
     INTERVALO_RECALIBRACAO_DIAS,
     SALDO_MINIMO_EMERGENCIA,
+    SALDO_MIN_PARA_CALIBRACAO,
     CUSTO_ESTIMADO_ODDS_JOGO,
     CUSTO_ESTIMADO_FIXTURES_DIA,
     CUSTO_ESTIMADO_HISTORICO_LIGA,
+    CUSTO_ESTIMADO_XG_LIGA,
+    CUSTO_ESTIMADO_XG_FIXTURE,
+    PESO_XG_PRODUCAO,
     TIMEOUT_CALIBRACAO_SEGUNDOS,
     CreditosInsuficientesError,
     APIError,
@@ -182,13 +189,25 @@ def calcular_score_qualidade(
         PESO_KELLY       * s_kel
     ) * 100.0
 
-    # Penalidades
+    # Penalidades multiplicativas (aplicadas em sequência)
     if not cobertura_ok:
-        score *= 0.80
-    if odd > 5.0:
+        score *= 0.80   # dados insuficientes do time
+
+    # Penalidade por probabilidade absoluta baixa
+    # Prob < 15%: altíssima variância, muito ruído — kills UNDER_05 extremos
+    # Prob < 20%: cautela extra mesmo com EV positivo
+    if prob_modelo < 15.0:
+        score *= 0.65
+    elif prob_modelo < 20.0:
         score *= 0.85
+
+    # Penalidade por odd alta (variância aumenta exponencialmente)
+    if odd > 7.0:
+        score *= 0.70   # odds acima de 7: ruído puro, ignore
+    elif odd > 5.0:
+        score *= 0.80   # odd alta: penalidade reforçada (era 0.85)
     elif odd < 1.55:
-        score *= 0.90
+        score *= 0.90   # juice alto consome a edge
 
     return round(score, 1)
 
@@ -212,32 +231,58 @@ def consultar_gemini(picks_aprovados: list[dict]) -> str:
     except ImportError:
         return "⚠️ Biblioteca google-generativeai não instalada. Execute: pip install google-generativeai"
 
+    # Todos os candidatos aprovados, ordenados por score desc, cap em 30 para tokens
+    todos = sorted(picks_aprovados, key=lambda x: x.get("score", 0), reverse=True)[:30]
     linhas = []
-    for i, p in enumerate(picks_aprovados[:12], 1):
+    for i, p in enumerate(todos, 1):
         linhas.append(
             f"{i}. [{p.get('score', 0):.0f}/100] {p['jogo']} | {p['mercado']} | "
+            f"Liga: {p.get('liga', '?')} | "
             f"Odd {p['odd']:.2f} | Modelo {p['prob_modelo']:.1f}% vs Mercado {p.get('prob_mercado', 0):.1f}% | "
             f"Δ {p.get('divergencia', 0):+.1f}pp | EV {p['ev']:+.1f}% | Stake R$ {p['stake']:.2f}"
         )
 
     prompt = f"""Você é um analista quantitativo de apostas esportivas especializado em Dixon-Coles.
-Os picks abaixo foram rankeados por um score composto (0-100) que pondera EV, divergência modelo×mercado, probabilidade absoluta e critério de Kelly.
+Os {len(todos)} candidatos abaixo passaram pelo filtro de EV e score mínimo do modelo. \
+Cada linha é um mercado independente (pode haver múltiplos mercados do mesmo jogo). \
+Score 0-100 pondera EV, divergência modelo×mercado, probabilidade absoluta e critério de Kelly.
 
-Analise o ranking e entregue:
-1. **Focos do Dia** — destaque os picks com score mais alto e explique em 1 frase o que torna cada um interessante (use os números)
-2. **Alertas** — aponte qualquer pick com odd > 4.0 ou prob_modelo < 20% que mereça cautela extra
-3. **Resumo Tático** — em 2 linhas: qual o perfil de risco do dia e como distribuir a banca
+Analise e entregue:
+1. **Focos do Dia** — destaque os 3 candidatos com maior score e explique em 1 frase o que os torna interessantes (use os números)
+2. **Alertas** — aponte candidatos com odd > 4.0 ou prob_modelo < 20% que mereçam cautela extra
+3. **Correlações** — identifique se há múltiplos mercados do mesmo jogo e avalie se faz sentido apostar em ambos
+4. **Resumo Tático** — em 2 linhas: perfil de risco do dia e sugestão de distribuição de banca
 
-Ranking do dia:
+Candidatos do dia ({len(todos)} de {len(picks_aprovados)} aprovados pelo filtro):
 {chr(10).join(linhas)}
 
-Seja direto. Use os números. Não repita o que já está listado acima — adicione interpretação."""
+Seja direto. Use os números. Não repita o que já está listado — adicione interpretação."""
 
     try:
         resp = model.generate_content(prompt)
         return resp.text
     except Exception as e:
         return f"Erro ao consultar Gemini: {e}"
+
+
+# =========================================================================
+# 3b. CACHE GLOBAL DIÁRIO (compartilhado entre sessões e dispositivos)
+# =========================================================================
+# @st.cache_data armazena resultados no servidor, partilhados por TODAS as
+# sessões ativas. No Streamlit Cloud isso significa: Device A carrega às 9h,
+# Device B às 15h obtém o mesmo resultado sem nenhuma chamada à API.
+# TTL de 86400s (24h) garante que o cache não ultrapassa o dia corrente.
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _agenda_do_dia_cached(_dm: DadosManager, data_str: str) -> list:
+    """Busca agenda na API e armazena 24h no servidor. Underscore em _dm = não hasheado."""
+    return _dm.buscar_agenda_dia(data_str)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _gemini_do_dia_cached(data_str: str, candidatos: list) -> str:
+    """Chama Gemini e armazena resposta 24h. Re-chama se os candidatos mudarem."""
+    return consultar_gemini(candidatos)
 
 
 # =========================================================================
@@ -281,6 +326,41 @@ with st.sidebar:
             st.success(f"Banca inicial redefinida para R$ {nova_banca:.2f}")
             st.rerun()
 
+    with st.expander("🗑️ Reiniciar temporada (Hard Reset)", expanded=False):
+        st.error(
+            "**AÇÃO IRREVERSÍVEL.** Apaga todos os picks e depósitos registrados. "
+            "Use apenas para iniciar uma nova temporada do zero."
+        )
+        n_picks_hr = len(banco.picks)
+        n_dep_hr   = len(banco.depositos)
+        st.caption(f"Serão apagados: **{n_picks_hr} pick(s)** e **{n_dep_hr} depósito(s)**.")
+        nova_banca_hr = st.number_input(
+            "Nova banca inicial após reset (R$)",
+            value=float(banco.banca_inicial),
+            step=1.0, min_value=1.0,
+            key="hr_nova_banca",
+        )
+        confirmar_hr = st.checkbox(
+            f"Confirmo que quero APAGAR os {n_picks_hr} picks e {n_dep_hr} depósitos permanentemente",
+            key="hr_confirmar",
+        )
+        if st.button(
+            "🗑️ Executar Hard Reset",
+            type="primary",
+            use_container_width=True,
+            disabled=not confirmar_hr,
+        ):
+            banco.picks      = []
+            banco.depositos  = []
+            banco.banca_inicial = nova_banca_hr
+            dm.salvar_banco(banco)
+            st.session_state["banco"] = dm.carregar_banco(força_recarregar=True)
+            st.success(
+                f"✅ Hard Reset concluído. Banca inicial: R$ {nova_banca_hr:.2f}. "
+                "Picks e depósitos apagados."
+            )
+            st.rerun()
+
     # Métricas da banca
     c1, c2 = st.columns(2)
     c1.metric("Capital inicial", f"R$ {banco.banca_inicial:.2f}")
@@ -322,7 +402,24 @@ with st.sidebar:
         piso_kelly   = st.number_input("Piso de stake (R$)", value=PISO_KELLY_PADRAO, step=0.5, min_value=0.5)
         teto_pct     = st.slider("Teto % da banca", 5, 25, int(TETO_PCT_BANCA_PADRAO * 100)) / 100
         odd_min_save = st.number_input("Odd mínima p/ salvar", value=ODD_MIN_SAVE, step=0.05, min_value=1.01)
-        limite_div   = st.slider("Anomalia se divergência >", 10, 40, int(LIMITE_DIVERGENCIA_PP))
+        # Teto em 20pp: acima disso o detector de anomalia é desligado efetivamente.
+        # 20pp é o limiar documentado no paper de Dixon-Coles e nos bugs do V6.1.
+        limite_div   = st.slider("Anomalia se divergência >", 10, 20, int(LIMITE_DIVERGENCIA_PP))
+
+    st.divider()
+
+    # ── Memória Diária ───────────────────────────────────────────────
+    st.caption("**💾 Memória Diária** — agenda e IA cacheadas 24h no servidor.")
+    if st.button("🔄 Limpar Memória do Dia", use_container_width=True,
+                 help="Força re-fetch da agenda e re-geração da análise IA. Use se um jogo foi adiado."):
+        _agenda_do_dia_cached.clear()
+        _gemini_do_dia_cached.clear()
+        # Limpa também os dados da sessão atual
+        for _k in list(st.session_state.keys()):
+            if _k.startswith("_auto_loaded_") or _k == "gemini_resposta":
+                st.session_state.pop(_k, None)
+        st.success("Cache limpo. Próxima carga buscará dados frescos da API.")
+        st.rerun()
 
     st.divider()
 
@@ -369,9 +466,11 @@ tab_analise, tab_calibracao, tab_tracker, tab_auditoria = st.tabs([
 
 with tab_calibracao:
     st.markdown("### Status das ligas")
+    _custo_por_liga = CUSTO_ESTIMADO_HISTORICO_LIGA + CUSTO_ESTIMADO_XG_LIGA
     st.caption(
         f"Calibração manual: clique 'Calibrar TODAS' segunda e quinta. "
-        f"Custo estimado por liga: ~{CUSTO_ESTIMADO_HISTORICO_LIGA} créditos."
+        f"Custo estimado por liga: ~{_custo_por_liga} créditos "
+        f"(histórico + xG blend peso={PESO_XG_PRODUCAO})."
     )
 
     # Tabela de status
@@ -394,73 +493,385 @@ with tab_calibracao:
 
     st.dataframe(rows_status, use_container_width=True, hide_index=True)
 
-    custo_total = len(LIGAS_SUPORTADAS) * CUSTO_ESTIMADO_HISTORICO_LIGA
-    st.info(f"Custo estimado para calibrar todas as {len(LIGAS_SUPORTADAS)} ligas: ~{custo_total} créditos.")
+    custo_total = len(LIGAS_SUPORTADAS) * (CUSTO_ESTIMADO_HISTORICO_LIGA + CUSTO_ESTIMADO_XG_LIGA)
+    st.info(
+        f"Custo estimado para calibrar todas as {len(LIGAS_SUPORTADAS)} ligas: "
+        f"~{custo_total} créditos (inclui xG via /fixtures/statistics, peso={PESO_XG_PRODUCAO})."
+    )
 
-    # ── Botão principal: CALIBRAR TODAS ──────────────────────────────
-    st.markdown("#### 🔄 Calibração completa")
-    st.caption("Recalcula MLE do zero para todas as ligas. Use 2x por semana.")
+    # ── Trava de Custo — Calibrar TODAS (2 fases) ────────────────────
+    st.markdown("#### 🔄 Calibração com Delta Fetch")
+    st.caption(
+        "**Passo 1** analisa quantos jogos novos existem desde o último download "
+        f"(custo: ~{len(LIGAS_SUPORTADAS) * 2} créditos para as listas). "
+        "**Passo 2** confirma o download de xG e executa o MLE. "
+        "Nenhum crédito de xG é gasto antes da sua confirmação."
+    )
 
+    # ── FASE 1: botão de análise ──────────────────────────────────────
     if st.button(
-        f"🚀 Calibrar TODAS as {len(LIGAS_SUPORTADAS)} ligas",
-        type="primary", use_container_width=True
+        f"🔍 Passo 1 — Analisar Custo de Download ({len(LIGAS_SUPORTADAS)} ligas)",
+        use_container_width=True,
     ):
-        progress    = st.progress(0)
-        status_box  = st.empty()
-        erros       = []
-        timeouts    = []
-        total       = len(LIGAS_SUPORTADAS)
+        with st.spinner(
+            f"Consultando listas de fixtures para {len(LIGAS_SUPORTADAS)} ligas "
+            f"(~{len(LIGAS_SUPORTADAS) * 2} créditos)…"
+        ):
+            try:
+                preview = dm.calcular_custo_delta(season=season)
+                st.session_state["delta_preview"] = preview
+                st.session_state.pop("delta_confirmado", None)
+            except CreditosInsuficientesError as e:
+                st.error(f"Saldo insuficiente para análise: {e}")
+            except Exception as e:
+                st.error(f"Falha ao calcular custo: {e}")
+        st.rerun()
+
+    # ── Exibe preview (se calculado) ──────────────────────────────────
+    preview = st.session_state.get("delta_preview")
+    if preview:
+        n_total = preview["n_novos_total"]
+        custo   = preview["custo_estimado_creditos"]
+        saldo_ok = custo <= saldo - SALDO_MINIMO_EMERGENCIA
+
+        if n_total == 0:
+            st.success(
+                "✅ **Cache 100% atualizado.** Nenhum fixture novo para baixar. "
+                "Pode avançar para calibração diretamente."
+            )
+        elif saldo_ok:
+            st.warning(
+                f"📊 **{n_total} jogos novos detectados** · "
+                f"Custo estimado de xG: **{custo} créditos** · "
+                f"Saldo disponível: {saldo} créditos"
+            )
+        else:
+            st.error(
+                f"🔴 **Saldo insuficiente.** São necessários {custo + SALDO_MINIMO_EMERGENCIA} "
+                f"créditos ({custo} xG + {SALDO_MINIMO_EMERGENCIA} buffer), "
+                f"mas o saldo é {saldo}. Faça bootstrap parcial ou aguarde renovação."
+            )
+
+        # Tabela de detalhes por liga
+        rows_delta = []
+        for liga_info in preview["ligas"]:
+            n_novos_l = liga_info["n_novos_liga"]
+            if n_novos_l == 0:
+                st_icon = "✅"
+            elif n_novos_l > 150:
+                st_icon = "🔴 bootstrap"
+            else:
+                st_icon = "🟡"
+            season_detalhe = " | ".join(
+                f"s{s['season']}: +{s['n_novos']} ({s['n_cache']} cache)"
+                if s.get("erro") is None
+                else f"s{s['season']}: ERRO"
+                for s in liga_info["seasons"]
+            )
+            rows_delta.append({
+                "Liga":              liga_info["nome"],
+                "Novos fixtures":    n_novos_l,
+                "Créditos xG":       n_novos_l * CUSTO_ESTIMADO_XG_FIXTURE,
+                "Detalhe seasons":   season_detalhe,
+                "Status":            st_icon,
+            })
+
+        with st.expander("📋 Ver detalhes por liga"):
+            st.dataframe(rows_delta, use_container_width=True, hide_index=True)
+
+        # ── FASE 2: botão de confirmação ──────────────────────────────
+        btn_confirma_label = (
+            f"🚀 Calibrar TODAS (cache ok — 0 créditos de xG)"
+            if n_total == 0
+            else f"✅ Passo 2 — Confirmar Download de xG ({custo} créditos) e Calibrar TODAS"
+        )
+        if st.button(
+            btn_confirma_label,
+            type="primary",
+            use_container_width=True,
+            disabled=(not saldo_ok and n_total > 0),
+            help=(
+                "Executa o Delta Fetch e recalibra via MLE."
+                if saldo_ok or n_total == 0
+                else f"Saldo insuficiente: {saldo} < {custo + SALDO_MINIMO_EMERGENCIA} necessários."
+            ),
+        ):
+            st.session_state["delta_confirmado"] = True
+            st.session_state.pop("delta_preview", None)
+            st.rerun()
+
+    # ── Executa calibração após confirmação ───────────────────────────
+    if st.session_state.get("delta_confirmado"):
+        st.session_state.pop("delta_confirmado", None)
+        progress_bar = st.progress(0)
+        status_box   = st.empty()
+        erros, timeouts = [], []
+        total = len(LIGAS_SUPORTADAS)
 
         for i, (lid, nome) in enumerate(LIGAS_SUPORTADAS.items()):
             status_box.info(f"[{i+1}/{total}] Calibrando **{nome}**…")
             try:
                 dm.obter_params_liga(lid, season, forcar_recalibracao=True)
             except CreditosInsuficientesError as e:
-                # Saldo esgotado: para tudo — não adianta continuar
-                status_box.error(f"🔴 Saldo insuficiente. Parando na liga {nome}: {e}")
+                status_box.error(f"🔴 Saldo insuficiente. Parando em **{nome}**: {e}")
                 break
-            except TimeoutError as e:
-                # Timeout: pula esta liga mas continua as próximas
+            except TimeoutError:
                 timeouts.append(nome)
             except Exception as e:
                 erros.append(f"**{nome}**: {e}")
-            progress.progress((i + 1) / total)
+            progress_bar.progress((i + 1) / total)
 
         status_box.empty()
-
         if timeouts:
             st.warning(
-                f"⏱️ {len(timeouts)} liga(s) pulada(s) por timeout "
-                f"(MLE > {TIMEOUT_CALIBRACAO_SEGUNDOS}s):\n" +
-                "\n".join(f"• {n}" for n in timeouts) +
-                "\n\nTente calibrá-las individualmente ou com temporada diferente."
+                f"⏱️ {len(timeouts)} liga(s) com timeout (MLE > {TIMEOUT_CALIBRACAO_SEGUNDOS}s):\n"
+                + "\n".join(f"• {n}" for n in timeouts)
             )
         if erros:
-            st.warning("⚠️ Ligas com falha (dados insuficientes):\n" + "\n".join(f"• {e}" for e in erros))
+            st.warning("⚠️ Ligas com falha:\n" + "\n".join(f"• {e}" for e in erros))
         if not timeouts and not erros:
             st.success("✅ Todas as ligas calibradas com sucesso!")
 
         st.session_state["banco"] = dm.carregar_banco(força_recarregar=True)
         st.rerun()
 
-    # ── Calibrar liga individual (power user) ────────────────────────
-    with st.expander("⚙️ Calibrar liga específica"):
-        liga_sel = st.selectbox(
-            "Liga", options=list(LIGAS_SUPORTADAS.keys()),
+    # ── Calibrar ligas em lote ────────────────────────────────────────
+    with st.expander("⚙️ Calibrar ligas em lote"):
+        # Inicializa chave do multiselect antes de renderizar os atalhos
+        if "cal_lote_multiselect" not in st.session_state:
+            st.session_state["cal_lote_multiselect"] = []
+
+        # Atalhos de seleção rápida
+        col_qs1, col_qs2, col_qs3 = st.columns(3)
+        if col_qs1.button("✅ Todas as ligas", key="qs_todas", use_container_width=True):
+            st.session_state["cal_lote_multiselect"] = list(LIGAS_SUPORTADAS.keys())
+            st.session_state.pop("delta_preview_lote", None)
+            st.rerun()
+        if col_qs2.button("❌ Não calibradas", key="qs_nunca", use_container_width=True):
+            st.session_state["cal_lote_multiselect"] = [
+                lid for lid in LIGAS_SUPORTADAS if str(lid) not in banco.params_ligas
+            ]
+            st.session_state.pop("delta_preview_lote", None)
+            st.rerun()
+        if col_qs3.button("🗑️ Limpar seleção", key="qs_limpar", use_container_width=True):
+            st.session_state["cal_lote_multiselect"] = []
+            st.session_state.pop("delta_preview_lote", None)
+            st.rerun()
+
+        ligas_lote_sel = st.multiselect(
+            "Ligas a calibrar",
+            options=list(LIGAS_SUPORTADAS.keys()),
             format_func=lambda x: f"{LIGAS_SUPORTADAS[x]} (ID {x})",
-            key="cal_individual",
+            key="cal_lote_multiselect",
         )
-        if st.button(f"Calibrar {LIGAS_SUPORTADAS[liga_sel]}", use_container_width=True):
-            try:
-                with st.spinner(f"Calibrando {LIGAS_SUPORTADAS[liga_sel]}... (pode levar até {TIMEOUT_CALIBRACAO_SEGUNDOS}s)"):
-                    dm.obter_params_liga(liga_sel, season, forcar_recalibracao=True)
-                st.success("OK!")
-                st.session_state["banco"] = dm.carregar_banco(força_recarregar=True)
+
+        if not ligas_lote_sel:
+            st.info("Selecione ao menos uma liga. Use os atalhos acima para seleção rápida.")
+        else:
+            st.caption(
+                f"**{len(ligas_lote_sel)} liga(s) selecionada(s).** "
+                "O lote será processado em sequência de forma autônoma."
+            )
+
+            # Fase 1: análise de custo do lote
+            if st.button(
+                f"🔍 Analisar custo do lote ({len(ligas_lote_sel)} liga(s))",
+                use_container_width=True,
+                key="btn_analisa_lote",
+            ):
+                with st.spinner(
+                    f"Consultando listas de fixtures para {len(ligas_lote_sel)} liga(s) "
+                    f"(~{len(ligas_lote_sel) * 2} créditos)…"
+                ):
+                    try:
+                        _prev_lote = dm.calcular_custo_delta(ligas=ligas_lote_sel, season=season)
+                        st.session_state["delta_preview_lote"] = _prev_lote
+                        st.session_state["delta_lote_ids"]     = sorted(ligas_lote_sel)
+                        st.session_state.pop("delta_confirmado_lote", None)
+                    except CreditosInsuficientesError as e:
+                        st.error(f"Saldo insuficiente para análise: {e}")
+                    except Exception as e:
+                        st.error(f"Falha ao calcular custo: {e}")
                 st.rerun()
-            except TimeoutError as e:
-                st.error(f"⏱️ Timeout: {e}")
-            except Exception as e:
-                st.error(f"Falhou: {e}")
+
+            _prev_lote = st.session_state.get("delta_preview_lote")
+            # Invalida preview se a seleção mudou desde o cálculo
+            if _prev_lote and st.session_state.get("delta_lote_ids") != sorted(ligas_lote_sel):
+                _prev_lote = None
+                st.session_state.pop("delta_preview_lote", None)
+
+            if _prev_lote:
+                _n_tot_l = _prev_lote["n_novos_total"]
+                _custo_l = _prev_lote["custo_estimado_creditos"]
+                _ok_l    = _custo_l <= saldo - SALDO_MINIMO_EMERGENCIA
+
+                if _n_tot_l == 0:
+                    st.success(
+                        f"✅ **Cache 100% atualizado** para as {len(ligas_lote_sel)} liga(s). "
+                        "Pode calibrar sem gastar créditos de xG."
+                    )
+                elif _ok_l:
+                    st.warning(
+                        f"📊 **{_n_tot_l} fixtures novos** · "
+                        f"Custo xG estimado: **{_custo_l} créditos** · Saldo disponível: {saldo}"
+                    )
+                else:
+                    st.error(
+                        f"🔴 Saldo insuficiente: precisam de {_custo_l + SALDO_MINIMO_EMERGENCIA} "
+                        f"({_custo_l} xG + {SALDO_MINIMO_EMERGENCIA} buffer), saldo={saldo}. "
+                        "Reduza o lote ou aguarde renovação."
+                    )
+
+                # Tabela por liga
+                _rows_lote = []
+                for _li in _prev_lote["ligas"]:
+                    _nn = _li["n_novos_liga"]
+                    _rows_lote.append({
+                        "Liga":           _li["nome"],
+                        "Novos fixtures": _nn,
+                        "Créditos xG":    _nn * CUSTO_ESTIMADO_XG_FIXTURE,
+                        "Status":         "✅" if _nn == 0 else ("🔴 bootstrap" if _nn > 150 else "🟡"),
+                    })
+                with st.expander("📋 Detalhes por liga"):
+                    st.dataframe(_rows_lote, use_container_width=True, hide_index=True)
+
+                _btn_lote_lbl = (
+                    f"🚀 Calibrar lote ({len(ligas_lote_sel)} liga(s) — 0 créditos xG)"
+                    if _n_tot_l == 0
+                    else f"✅ Confirmar Download ({_custo_l} créditos) e Calibrar {len(ligas_lote_sel)} liga(s)"
+                )
+                if st.button(
+                    _btn_lote_lbl,
+                    type="primary",
+                    use_container_width=True,
+                    key="btn_confirma_lote",
+                    disabled=(not _ok_l and _n_tot_l > 0),
+                    help=(
+                        "Executa Delta Fetch e recalibra via MLE para cada liga em sequência."
+                        if _ok_l or _n_tot_l == 0
+                        else f"Saldo insuficiente: {saldo} < {_custo_l + SALDO_MINIMO_EMERGENCIA}."
+                    ),
+                ):
+                    st.session_state["delta_confirmado_lote"] = list(ligas_lote_sel)
+                    st.session_state.pop("delta_preview_lote", None)
+                    st.rerun()
+
+        # Execução autônoma do lote após confirmação
+        if st.session_state.get("delta_confirmado_lote"):
+            _ligas_batch  = st.session_state.pop("delta_confirmado_lote")
+            _prog_lote    = st.progress(0)
+            _stat_lote    = st.empty()
+            _erros_lote   = []
+            _timeouts_lote = []
+            _total_lote   = len(_ligas_batch)
+
+            for _i_l, _lid_l in enumerate(_ligas_batch):
+                _nome_l = LIGAS_SUPORTADAS.get(_lid_l, f"Liga {_lid_l}")
+                _stat_lote.info(f"[{_i_l+1}/{_total_lote}] Calibrando **{_nome_l}**…")
+                try:
+                    dm.obter_params_liga(_lid_l, season, forcar_recalibracao=True)
+                except CreditosInsuficientesError as e:
+                    _stat_lote.error(f"🔴 Saldo insuficiente. Parando em **{_nome_l}**: {e}")
+                    break
+                except TimeoutError:
+                    _timeouts_lote.append(_nome_l)
+                except Exception as e:
+                    _erros_lote.append(f"**{_nome_l}**: {e}")
+                _prog_lote.progress((_i_l + 1) / _total_lote)
+
+            _stat_lote.empty()
+            if _timeouts_lote:
+                st.warning(
+                    f"⏱️ {len(_timeouts_lote)} liga(s) com timeout (MLE > {TIMEOUT_CALIBRACAO_SEGUNDOS}s):\n"
+                    + "\n".join(f"• {n}" for n in _timeouts_lote)
+                )
+            if _erros_lote:
+                st.warning("⚠️ Ligas com falha:\n" + "\n".join(f"• {e}" for e in _erros_lote))
+            if not _timeouts_lote and not _erros_lote:
+                st.success(f"✅ {_total_lote} liga(s) calibrada(s) com sucesso!")
+
+            st.session_state["banco"] = dm.carregar_banco(força_recarregar=True)
+            st.rerun()
+
+    # ── Calibradores Isotônicos ────────────────────────────────────────
+    st.divider()
+    st.markdown("#### 📐 Calibradores Isotônicos")
+    st.caption(
+        "Corrige viés sistemático do Dixon-Coles por mercado usando o histórico local. "
+        "**Pré-requisito:** bootstrap do Delta Fetch concluído (≥30 fixtures por liga). "
+        "Após treinar, cada previsão passa pela correção isotônica automaticamente."
+    )
+
+    rows_cal_status = []
+    for _lid, _nome in LIGAS_SUPORTADAS.items():
+        _pd = banco.params_ligas.get(str(_lid), {})
+        _n_cal = len(_pd.get("calibradores", {}))
+        _n_max = len(MERCADOS_PRODUCAO)
+        if not _pd:
+            _st_cal = "❌ MLE ausente"
+        elif _n_cal == _n_max:
+            _st_cal = f"🟢 {_n_cal}/{_n_max} mercados"
+        elif _n_cal > 0:
+            _st_cal = f"🟡 {_n_cal}/{_n_max} mercados"
+        else:
+            _st_cal = "⚪ Params OK — sem calibradores"
+        rows_cal_status.append({"Liga": f"{_nome} (ID {_lid})", "Calibradores": _st_cal})
+    st.dataframe(rows_cal_status, use_container_width=True, hide_index=True)
+
+    try:
+        from treinar_calibradores import treinar_calibradores as _treinar_calibradores_fn
+        _tc_ok = True
+    except ImportError:
+        _tc_ok = False
+
+    if not _tc_ok:
+        st.warning("⚠️ `treinar_calibradores.py` não encontrado na pasta do projeto.")
+    else:
+        col_tc1, col_tc2 = st.columns([4, 1])
+        with col_tc1:
+            st.caption("O treinamento leva ~5s por liga. Todas com ≥ mínimo de amostras são processadas.")
+        with col_tc2:
+            tc_min = st.number_input("Min. amostras", value=30, min_value=10, step=5, key="tc_min")
+
+        if st.button("📐 Treinar Calibradores (todas as ligas)", type="primary", use_container_width=True):
+            with st.spinner("Treinando calibradores isotônicos..."):
+                try:
+                    _rel_cal = _treinar_calibradores_fn(verbose=False, n_min_amostras=int(tc_min))
+                    st.session_state["relatorio_calibradores"] = _rel_cal
+                    st.session_state["banco"] = dm.carregar_banco(força_recarregar=True)
+                    banco = st.session_state["banco"]
+                except FileNotFoundError as _e:
+                    st.error(f"Arquivo não encontrado: {_e}")
+                    _rel_cal = None
+                except ValueError as _e:
+                    st.error(f"Pré-requisito ausente: {_e}")
+                    _rel_cal = None
+                except Exception as _e:
+                    st.error(f"Erro ao treinar calibradores: {_e}")
+                    _rel_cal = None
+            if _rel_cal is not None:
+                st.rerun()
+
+        _rel_cal = st.session_state.get("relatorio_calibradores")
+        if _rel_cal:
+            st.success(f"✅ Calibradores treinados para {len(_rel_cal)} liga(s).")
+            _rows_rel = []
+            for _ls, _mkts in sorted(_rel_cal.items(), key=lambda x: int(x[0])):
+                _nome_r = LIGAS_SUPORTADAS.get(int(_ls), f"Liga {_ls}")
+                for _mkt, _info in sorted(_mkts.items()):
+                    _v = _info["vies_pp"]
+                    _icon = "🟢" if abs(_v) < 2 else ("🟡" if abs(_v) < 5 else "🔴")
+                    _rows_rel.append({
+                        "Liga":         _nome_r,
+                        "Mercado":      _mkt,
+                        "N fixtures":   _info["n"],
+                        "Real %":       f"{_info['freq_real']:.1f}%",
+                        "Bruta %":      f"{_info['prob_media_bruta']:.1f}%",
+                        "Viés (pp)":    f"{_icon} {'+' if _v >= 0 else ''}{_v:.1f}",
+                        "Corr. ±(pp)":  f"±{_info['correcao_media_pp']:.1f}",
+                    })
+            with st.expander("📊 Relatório detalhado por liga/mercado", expanded=True):
+                st.dataframe(_rows_rel, use_container_width=True, hide_index=True)
 
 
 # =========================================================================
@@ -469,28 +880,51 @@ with tab_calibracao:
 
 with tab_analise:
 
+    cache_dia = banco.datas.get(data_str, {})
+    agenda    = cache_dia.get("agenda", [])
+
+    # Auto-carrega da memória global se esta sessão ainda não tentou (0 créditos se já cacheado)
+    if not agenda and not st.session_state.get(f"_auto_loaded_{data_str}"):
+        st.session_state[f"_auto_loaded_{data_str}"] = True
+        try:
+            _auto = _agenda_do_dia_cached(dm, data_str)
+            if _auto:
+                banco.datas.setdefault(data_str, {})
+                banco.datas[data_str]["agenda"]   = _auto
+                banco.datas[data_str].setdefault("odds", {})
+                banco.datas[data_str].setdefault("previsoes", {})
+                cache_dia = banco.datas[data_str]
+                agenda = _auto
+        except Exception:
+            pass  # Cache miss + falha na API: o botão manual funciona como fallback
+
     col_a1, col_a2 = st.columns(2)
     with col_a1:
-        if st.button(f"📅 1. Carregar Agenda ({data_str})",
-                     use_container_width=True,
-                     help=f"Custo: {CUSTO_ESTIMADO_FIXTURES_DIA} crédito"):
+        _btn_label = (
+            f"🔄 Recarregar Agenda ({data_str})" if agenda
+            else f"📅 1. Carregar Agenda ({data_str})"
+        )
+        _btn_help = (
+            "Agenda já na memória — recarrega da API para obter jogos adiados/adicionados."
+            if agenda
+            else f"Custo: {CUSTO_ESTIMADO_FIXTURES_DIA} crédito"
+        )
+        if st.button(_btn_label, use_container_width=True, help=_btn_help):
             try:
                 with st.spinner("Buscando agenda..."):
-                    agenda = dm.buscar_agenda_dia(data_str)
+                    agenda = _agenda_do_dia_cached(dm, data_str)
                 banco.datas.setdefault(data_str, {})
                 banco.datas[data_str]["agenda"]    = agenda
                 banco.datas[data_str].setdefault("odds", {})
                 banco.datas[data_str].setdefault("previsoes", {})
                 dm.salvar_banco(banco)
+                cache_dia = banco.datas[data_str]
                 st.success(f"Agenda carregada: {len(agenda)} jogos.")
                 st.rerun()
             except CreditosInsuficientesError as e:
                 st.error(str(e))
             except Exception as e:
                 st.error(f"Erro: {e}")
-
-    cache_dia = banco.datas.get(data_str, {})
-    agenda    = cache_dia.get("agenda", [])
 
     if not agenda:
         st.info("Clique em 'Carregar Agenda' para começar.")
@@ -595,10 +1029,8 @@ with tab_analise:
     # 1. Coleta TODOS os mercados aprovados de TODOS os jogos
     candidatos = []
     MERCADOS_VARREDURA = [
-        "HOME", "DRAW", "AWAY",
-        "1X", "X2", "12",
-        "OVER_05", "OVER_15", "OVER_25", "OVER_35", "OVER_45",
-        "UNDER_05", "UNDER_15", "UNDER_25", "UNDER_35", "UNDER_45",
+        "OVER_15", "OVER_25", "OVER_35",
+        "UNDER_15", "UNDER_25", "UNDER_35",
         "BTTS_YES", "BTTS_NO",
     ]
     for j in jogos_com_odds:
@@ -620,8 +1052,10 @@ with tab_analise:
                                          MARGEM_BOOKMAKER_DEFAULT, limite_div)
             stake = calcular_stake_final(comp["kelly_fracao"], banca_atual,
                                          piso_kelly, teto_pct)
-            # Só entra se passou em todos os guard-rails
-            if not (comp["flag_aprovado"] and stake > 0 and not comp["anomalia"]):
+            # Filtro de gatilho por mercado: EV_MIN + PROB_MIN + delta > 0 (Dossiê v8 Seção 5.1)
+            if not (filtrar_gatilho(mercado, comp["ev_pct"], prob_modelo,
+                                    comp["divergencia_pp"], odd_val)
+                    and stake > 0 and not comp["anomalia"]):
                 continue
 
             score = calcular_score_qualidade(
@@ -668,7 +1102,8 @@ with tab_analise:
     if ranking:
         st.markdown(f"### 🏆 Ranking de Qualidade do Dia ({len(ranking)} entrada{'s' if len(ranking) > 1 else ''})")
         st.caption(
-            f"Score ≥ {SCORE_MINIMO_RANKING} · 1 mercado por jogo (melhor score) · "
+            f"Score ≥ {SCORE_MINIMO_RANKING} · 1 mercado/jogo (melhor score) · "
+            f"EV mínimo por mercado (UNDER_25 ≥ {EV_MIN_POR_MERCADO['UNDER_25']:.0f}%) · "
             f"{n_total_aprovados} candidatos antes da filtragem"
         )
 
@@ -719,14 +1154,50 @@ with tab_analise:
 
         # ── Consultora Gemini ────────────────────────────────────────
         st.markdown("#### 🤖 Consultora IA (Gemini)")
-        st.caption("Lê o ranking completo e entrega análise tática baseada no score, divergência e contexto.")
-        usar_gemini = st.toggle("Ativar Consultora Gemini", value=False)
+
+        # Resposta do dia: verifica sessão → banco.datas → cache global
+        _gemini_salvo = cache_dia.get("gemini_resposta", {})
+        _gemini_texto = (
+            st.session_state.get("gemini_resposta")
+            or (_gemini_salvo.get("texto") if isinstance(_gemini_salvo, dict) else None)
+        )
+
+        st.caption(
+            f"Analisa **todos os {len(candidatos)} candidatos** com EV aprovado "
+            f"({len(ranking)} jogo(s) únicos). "
+            + ("✅ Análise do dia já disponível — clique para expandir."
+               if _gemini_texto else
+               "Resposta cacheada 24h — não reprocessa se já analisou hoje.")
+        )
+        usar_gemini = st.toggle("Ativar Consultora Gemini", value=bool(_gemini_texto))
         if usar_gemini:
-            if st.button("📡 Analisar com Gemini", type="primary"):
-                with st.spinner("Consultando Gemini..."):
-                    resposta = consultar_gemini(ranking)
+            _col_g1, _col_g2 = st.columns([4, 1])
+            if _col_g1.button("📡 Analisar com Gemini", type="primary",
+                               help="Retorna do cache se já foi chamado hoje com os mesmos candidatos."):
+                with st.spinner("Consultando Gemini (pode retornar do cache instantaneamente)..."):
+                    _gemini_texto = _gemini_do_dia_cached(data_str, candidatos)
+                # Persiste na sessão e no banco.datas
+                st.session_state["gemini_resposta"] = _gemini_texto
+                banco.datas[data_str]["gemini_resposta"] = {
+                    "texto":       _gemini_texto,
+                    "gerado_em":   dt.datetime.now().isoformat(),
+                    "n_candidatos": len(candidatos),
+                }
+                dm.salvar_banco(banco)
+            if _gemini_texto and _col_g2.button("🔄 Novo", help="Força nova chamada ignorando cache."):
+                _gemini_do_dia_cached.clear()
+                st.session_state.pop("gemini_resposta", None)
+                banco.datas[data_str].pop("gemini_resposta", None)
+                dm.salvar_banco(banco)
+                st.rerun()
+            if _gemini_texto:
+                if isinstance(_gemini_salvo, dict) and _gemini_salvo.get("gerado_em"):
+                    st.caption(
+                        f"🕐 Análise gerada em: {_gemini_salvo['gerado_em'][:16].replace('T', ' ')} "
+                        f"| {_gemini_salvo.get('n_candidatos', '?')} candidatos"
+                    )
                 st.markdown("---")
-                st.markdown(resposta)
+                st.markdown(_gemini_texto)
 
         st.divider()
 
@@ -743,7 +1214,7 @@ with tab_analise:
 
     st.markdown(f"#### {len(jogos_com_odds)} jogos prontos para análise")
 
-    def render_mercado(col, label, prob_modelo_pct, odd_mercado,
+    def render_mercado(col, label, mercado, prob_modelo_pct, odd_mercado,
                        banca, piso, teto_pct, lim_div):
         if odd_mercado <= 1.0:
             col.markdown(f"**{label}**\n\n_(sem odd)_")
@@ -752,10 +1223,14 @@ with tab_analise:
                                      MARGEM_BOOKMAKER_DEFAULT, lim_div)
         stake = calcular_stake_final(comp["kelly_fracao"], banca, piso, teto_pct)
 
+        aprovado = filtrar_gatilho(mercado, comp["ev_pct"], prob_modelo_pct,
+                                   comp["divergencia_pp"], odd_mercado)
         if comp["anomalia"]:
             badge, cor = "🚨 ANOMALIA", "#dc3545"
-        elif comp["flag_aprovado"] and stake > 0:
+        elif aprovado and stake > 0:
             badge, cor = "✅ APROVADO", "#28a745"
+        elif mercado not in MERCADOS_PRODUCAO:
+            badge, cor = "📊 referência", "#6c757d"
         elif comp["ev_pct"] > 0:
             badge, cor = "🟡 marginal", "#ffc107"
         else:
@@ -814,47 +1289,29 @@ with tab_analise:
                 unsafe_allow_html=True,
             )
 
-            sub = st.tabs(["⚽ Resultado", "🔢 Gols", "🤝 BTTS",
-                           "📈 Handicap Asiático", "🎯 Placar Exato", "💾 Salvar Pick"])
+            sub = st.tabs(["🔢 Gols", "🤝 BTTS", "🎯 Placar Exato", "💾 Salvar Pick"])
 
             with sub[0]:
-                cols = st.columns(3)
-                for col, key, label in zip(cols, ["HOME", "DRAW", "AWAY"], ["Casa", "Empate", "Fora"]):
-                    render_mercado(col, label, prev["mercados"][key], odds_j.get(key, 0),
-                                   banca_atual, piso_kelly, teto_pct, limite_div)
-                cols2 = st.columns(3)
-                for col, key, label in zip(cols2, ["1X", "X2", "12"],
-                                           ["1X (Casa/Emp)", "X2 (Emp/Fora)", "12 (Casa/Fora)"]):
-                    render_mercado(col, label, prev["mercados"][key], odds_j.get(key, 0),
-                                   banca_atual, piso_kelly, teto_pct, limite_div)
-
-            with sub[1]:
                 cols_o = st.columns(5)
                 cols_u = st.columns(5)
                 for col, l in zip(cols_o, ["05", "15", "25", "35", "45"]):
-                    render_mercado(col, f"Over {l[0]}.{l[1]}", prev["mercados"][f"OVER_{l}"],
-                                   odds_j.get(f"OVER_{l}", 0), banca_atual, piso_kelly, teto_pct, limite_div)
+                    mk = f"OVER_{l}"
+                    render_mercado(col, f"Over {l[0]}.{l[1]}", mk,
+                                   prev["mercados"][mk], odds_j.get(mk, 0),
+                                   banca_atual, piso_kelly, teto_pct, limite_div)
                 for col, l in zip(cols_u, ["05", "15", "25", "35", "45"]):
-                    render_mercado(col, f"Under {l[0]}.{l[1]}", prev["mercados"][f"UNDER_{l}"],
-                                   odds_j.get(f"UNDER_{l}", 0), banca_atual, piso_kelly, teto_pct, limite_div)
-
-            with sub[2]:
-                cols = st.columns(2)
-                for col, key, label in zip(cols, ["BTTS_YES", "BTTS_NO"], ["Ambas marcam", "Não ambas"]):
-                    render_mercado(col, label, prev["mercados"][key], odds_j.get(key, 0),
+                    mk = f"UNDER_{l}"
+                    render_mercado(col, f"Under {l[0]}.{l[1]}", mk,
+                                   prev["mercados"][mk], odds_j.get(mk, 0),
                                    banca_atual, piso_kelly, teto_pct, limite_div)
 
-            with sub[3]:
-                st.caption("Probabilidades teóricas. Cole as odds AH manualmente.")
-                ah_keys = ["AH_CASA_-05", "AH_CASA_-10", "AH_CASA_-15",
-                           "AH_CASA_+10", "AH_CASA_+15", "AH_FORA_+05",
-                           "AH_FORA_+10", "AH_FORA_+15"]
-                cols = st.columns(4)
-                for i, key in enumerate(ah_keys):
-                    cols[i % 4].metric(key.replace("AH_", "").replace("_", " "),
-                                       f"{prev['mercados'].get(key, 0):.1f}%")
+            with sub[1]:
+                cols = st.columns(2)
+                for col, key, label in zip(cols, ["BTTS_YES", "BTTS_NO"], ["Ambas marcam", "Não ambas"]):
+                    render_mercado(col, label, key, prev["mercados"][key], odds_j.get(key, 0),
+                                   banca_atual, piso_kelly, teto_pct, limite_div)
 
-            with sub[4]:
+            with sub[2]:
                 pe = sorted(
                     [(k, v) for k, v in prev["mercados"].items() if k.startswith("PE_")],
                     key=lambda x: x[1], reverse=True
@@ -863,11 +1320,12 @@ with tab_analise:
                 for i, (k, v) in enumerate(pe):
                     cols[i % 4].metric(k.replace("PE_", ""), f"{v:.1f}%")
 
-            with sub[5]:
-                todos_mk = ["HOME", "DRAW", "AWAY", "1X", "X2", "12",
-                            "OVER_05", "OVER_15", "OVER_25", "OVER_35", "OVER_45",
-                            "UNDER_05", "UNDER_15", "UNDER_25", "UNDER_35", "UNDER_45",
-                            "BTTS_YES", "BTTS_NO"]
+            with sub[3]:
+                todos_mk = [
+                    "OVER_15", "OVER_25", "OVER_35",
+                    "UNDER_15", "UNDER_25", "UNDER_35",
+                    "BTTS_YES", "BTTS_NO",
+                ]
                 mk_sel    = st.selectbox("Mercado", todos_mk, key=f"sel_{f_id}")
                 odd_atual = odds_j.get(mk_sel, 0)
                 prob_mod  = prev["mercados"][mk_sel]
@@ -999,7 +1457,9 @@ with tab_auditoria:
 
         # Helper para resolver nome do time
         def nome_time(tid: int) -> str:
-            return params.nomes_times.get(int(tid), f"ID {tid}")
+            t = int(tid)
+            # JSON serializa chaves como strings; tenta str primeiro, depois int
+            return params.nomes_times.get(str(t), params.nomes_times.get(t, f"ID {t}"))
 
         # Métricas do motor
         c1, c2, c3, c4 = st.columns(4)
@@ -1010,11 +1470,17 @@ with tab_auditoria:
 
         seasons_str = " + ".join(str(s) for s in params.seasons_incluidas) if params.seasons_incluidas else str(params.season)
         tipo_season = "ano-calendário" if int(liga_aud) in LIGAS_TEMPORADA_ANO_ATUAL else "europeia"
+        xg_label = f"xG ✅ blend={PESO_XG_PRODUCAO}" if params.xg_ativo else "xG ❌ gols reais"
+        cal_n = len(params.calibradores)
+        cal_label = (
+            f"📐 {cal_n}/{len(MERCADOS_PRODUCAO)} mkt calibrados"
+            if cal_n > 0 else "📐 sem calibradores"
+        )
         st.caption(
             f"Calibrada em: {params.calibrado_em[:16]} | "
             f"Temporadas: **{seasons_str}** ({tipo_season}) | "
             f"Log-likelihood: {params.log_likelihood:.2f} | "
-            f"{len(params.nomes_times)} nomes resolvidos"
+            f"{len(params.nomes_times)} nomes resolvidos | {xg_label} | {cal_label}"
         )
 
         # ── Raio-X da base bruta ─────────────────────────────────────────
@@ -1086,6 +1552,44 @@ with tab_auditoria:
                     st.success(f"✅ Todos os times do modelo aparecem em {season_atual_str}.")
         else:
             st.info("💡 Raio-X disponível após recalibrar. Clique em 'Calibrar' para gerar.")
+
+        # ── Calibradores Isotônicos ──────────────────────────────────────────
+        if cal_n > 0:
+            with st.expander(
+                f"📐 Calibradores por mercado ({cal_n}/{len(MERCADOS_PRODUCAO)} ativos)",
+                expanded=False,
+            ):
+                st.caption(
+                    "Efeito da calibração isotônica: prob bruta → prob calibrada. "
+                    "Valores abaixo de 50% podem subir ou descer dependendo do viés histórico."
+                )
+                _rows_cal_aud = []
+                for _mkt_a in sorted(MERCADOS_PRODUCAO):
+                    if _mkt_a in params.calibradores:
+                        _cal_obj = params.calibradores[_mkt_a]
+                        _rows_cal_aud.append({
+                            "Mercado":          _mkt_a,
+                            "Amostras":         _cal_obj.n_amostras,
+                            "40% -> cal":       f"{_cal_obj.calibrar(40.0):.1f}%",
+                            "50% -> cal":       f"{_cal_obj.calibrar(50.0):.1f}%",
+                            "60% -> cal":       f"{_cal_obj.calibrar(60.0):.1f}%",
+                            "70% -> cal":       f"{_cal_obj.calibrar(70.0):.1f}%",
+                        })
+                    else:
+                        _rows_cal_aud.append({
+                            "Mercado":          _mkt_a,
+                            "Amostras":         "—",
+                            "40% -> cal":       "—",
+                            "50% -> cal":       "—",
+                            "60% -> cal":       "—",
+                            "70% -> cal":       "—",
+                        })
+                st.dataframe(_rows_cal_aud, use_container_width=True, hide_index=True)
+        else:
+            st.info(
+                "💡 **Calibradores não treinados** para esta liga. "
+                "Vá em **Calibração → 📐 Calibradores Isotônicos** e clique em 'Treinar Calibradores'."
+            )
 
         # Ranking de ataques
         times_ord = sorted(params.times.items(), key=lambda x: -x[1]["alpha"])
