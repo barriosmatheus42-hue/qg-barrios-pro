@@ -46,8 +46,11 @@ SALDO_MINIMO_EMERGENCIA = 50      # abaixo disso, NENHUMA chamada nova
 SALDO_MIN_PARA_CALIBRACAO = 200   # calibração custa ~10-30 créditos (paginação)
 CUSTO_ESTIMADO_HISTORICO_LIGA = 30
 TIMEOUT_CALIBRACAO_SEGUNDOS = 90   # MLE com muitos times pode travar; mata após 90s
-CUSTO_ESTIMADO_ODDS_JOGO = 1
+CUSTO_ESTIMADO_ODDS_JOGO    = 1
 CUSTO_ESTIMADO_FIXTURES_DIA = 1
+CUSTO_ESTIMADO_XG_FIXTURE   = 1    # 1 crédito por chamada GET /fixtures/statistics
+CUSTO_ESTIMADO_XG_LIGA      = 400  # estimativa conservadora: ~380 partidas/temporada
+PESO_XG_PRODUCAO            = 0.5  # blend validado no backtest (Dossiê v8 — Seção 3.1)
 
 # Bookmakers preferidos (ordem de prioridade)
 BOOKMAKERS_PRIORIDADE = [8, 4, 1, 6, 2]   # Bet365, Pinnacle, 10Bet, Bwin, Marathon
@@ -204,12 +207,24 @@ class ApiSportsClient:
     # ----------------------------------------------------------------
     # Endpoint: histórico completo de uma liga (para calibração)
     # ----------------------------------------------------------------
-    def buscar_historico_liga(self, league_id: int, season: int) -> tuple[pd.DataFrame, dict]:
+    def buscar_historico_liga(
+        self,
+        league_id: int,
+        season: int,
+        com_xg: bool = False,
+    ) -> tuple[pd.DataFrame, dict]:
         """
         Busca TODOS os jogos finalizados de uma liga/temporada.
 
+        com_xg=True: após buscar os fixtures, chama /fixtures/statistics para cada
+        partida e adiciona colunas xg_home e xg_away ao DataFrame.
+        Custo adicional: ~1 crédito por partida (CUSTO_ESTIMADO_XG_FIXTURE).
+        Ligas sem cobertura de xG retornam colunas all-NaN — calibrar_liga()
+        detecta isso e usa gols reais automaticamente.
+
         Retorna:
             (DataFrame com colunas: home_id, away_id, home_goals, away_goals, date,
+             [xg_home, xg_away se com_xg=True],
              dict {team_id: "Nome do Time"} para exibição na auditoria)
         """
         self.trava_saldo(CUSTO_ESTIMADO_HISTORICO_LIGA, saldo_minimo=SALDO_MIN_PARA_CALIBRACAO)
@@ -254,7 +269,84 @@ class ApiSportsClient:
         df = pd.DataFrame(registros)
         if not df.empty:
             df["date"] = pd.to_datetime(df["date"])
+
+        # ── Enriquecimento com xG via /fixtures/statistics ────────────────────
+        if com_xg and not df.empty:
+            custo_xg = len(df) * CUSTO_ESTIMADO_XG_FIXTURE
+            try:
+                self.trava_saldo(custo_xg, saldo_minimo=SALDO_MIN_PARA_CALIBRACAO)
+            except CreditosInsuficientesError as e:
+                log.warning(
+                    f"Liga {league_id} s{season}: créditos insuficientes para xG "
+                    f"({custo_xg} necessários — {e}). Calibração usará gols reais."
+                )
+                df["xg_home"] = None
+                df["xg_away"] = None
+                return df, nomes
+
+            xg_home_list, xg_away_list = [], []
+            for _, row in df.iterrows():
+                xg_h, xg_a = self.buscar_xg_fixture(
+                    int(row["fixture_id"]), int(row["home_id"]), int(row["away_id"])
+                )
+                xg_home_list.append(xg_h)
+                xg_away_list.append(xg_a)
+
+            df["xg_home"] = xg_home_list
+            df["xg_away"] = xg_away_list
+            n_xg = int(df["xg_home"].notna().sum())
+            log.info(
+                f"Liga {league_id} s{season}: xG disponível em "
+                f"{n_xg}/{len(df)} jogos ({n_xg / len(df) * 100:.1f}%)."
+            )
+
         return df, nomes
+
+    # ----------------------------------------------------------------
+    # Endpoint: xG de um fixture via /fixtures/statistics
+    # ----------------------------------------------------------------
+    def buscar_xg_fixture(
+        self,
+        fixture_id: int,
+        home_team_id: int,
+        away_team_id: int,
+    ) -> tuple:
+        """
+        Retorna (xg_home, xg_away) para um fixture via /fixtures/statistics.
+
+        Mapeia por team_id para garantir home/away corretos independente da ordem
+        da resposta. Retorna (None, None) se a liga não tem cobertura de xG.
+        NÃO chama trava_saldo — o caller faz o check único antes do loop.
+        """
+        try:
+            res = requests.get(
+                f"{BASE_URL}/fixtures/statistics",
+                headers=self.headers,
+                params={"fixture": fixture_id},
+                timeout=TIMEOUT_API,
+            )
+            data = res.json()
+        except requests.RequestException as e:
+            log.debug(f"Falha de rede em buscar_xg_fixture({fixture_id}): {e}")
+            return None, None
+
+        response = data.get("response", [])
+        xg_map: dict = {}
+        for entry in response:
+            team_id = entry.get("team", {}).get("id")
+            if team_id is None:
+                continue
+            for stat in entry.get("statistics", []):
+                if stat.get("type") == "Expected Goals":
+                    val = stat.get("value")
+                    if val is not None:
+                        try:
+                            xg_map[team_id] = float(val)
+                        except (TypeError, ValueError):
+                            pass
+                    break
+
+        return xg_map.get(home_team_id), xg_map.get(away_team_id)
 
     # ----------------------------------------------------------------
     # Endpoint: odds de um jogo
@@ -408,12 +500,18 @@ class BancoQG:
     - depositos:     lista de entradas/saídas manuais [{data, valor, nota}].
                      valor > 0 = depósito, valor < 0 = retirada.
     - banca_atual é calculada em runtime: banca_inicial + Σ depositos + P/L picks
+
+    DELTA FETCH (Passo 3):
+    - historico_ligas: cache local de fixtures enriquecidos com xG.
+                       Salvo APENAS no arquivo local — nunca sincronizado com JSONBin.
+                       Schema: {liga_id_str: {"registros": [...], "atualizado_em": str}}
     """
     picks: list = None
     banca_inicial: float = 30.0
     depositos: list = None           # [{data, valor, nota, registrado_em}]
     params_ligas: dict = None        # {league_id_str: {ParametrosLiga.to_dict()}}
     datas: dict = None               # cache de análises por data (agenda, odds, previsões)
+    historico_ligas: dict = None     # cache local de treino com xG — NÃO vai pro JSONBin
 
     def __post_init__(self):
         if self.picks is None:
@@ -424,6 +522,8 @@ class BancoQG:
             self.params_ligas = {}
         if self.datas is None:
             self.datas = {}
+        if self.historico_ligas is None:
+            self.historico_ligas = {}
 
     def to_dict(self) -> dict:
         return {
@@ -432,6 +532,7 @@ class BancoQG:
             "depositos": self.depositos,
             "params_ligas": self.params_ligas,
             "datas": self.datas,
+            "historico_ligas": self.historico_ligas,
         }
 
     @classmethod
@@ -442,6 +543,7 @@ class BancoQG:
             depositos=d.get("depositos", []),
             params_ligas=d.get("params_ligas", {}),
             datas=d.get("datas", {}),
+            historico_ligas=d.get("historico_ligas", {}),
         )
 
 
@@ -487,7 +589,8 @@ class DadosManager:
         banco.banca_inicial = float(banco_nuvem.get("banca_inicial", banco_local.get("banca_inicial", 30.0)))
         banco.depositos = banco_nuvem.get("depositos", banco_local.get("depositos", []))
         banco.params_ligas = banco_nuvem.get("params_ligas", banco_local.get("params_ligas", {}))
-        banco.datas = banco_local.get("datas", {})   # cache do dia fica local
+        banco.datas = banco_local.get("datas", {})                      # cache do dia fica local
+        banco.historico_ligas = banco_local.get("historico_ligas", {}) # xG cache — local apenas
 
         self._banco = banco
         return banco
@@ -498,12 +601,8 @@ class DadosManager:
         if b is None:
             raise RuntimeError("Nenhum banco carregado para salvar")
 
-        # Local (tudo)
-        try:
-            with open(self.dir / ARQUIVO_BANCO_LOCAL, "w", encoding="utf-8") as f:
-                json.dump(b.to_dict(), f, indent=2, default=str)
-        except Exception as e:
-            log.warning(f"Falha ao salvar banco local: {e}")
+        # Local (append-only merge — nunca sobrescreve dados históricos)
+        self._merge_salvar_local(b)
 
         # Nuvem (sem `datas` para não estourar quota do JSONBin)
         nuvem = {
@@ -518,6 +617,75 @@ class DadosManager:
     # ----------------------------------------------------------------
     # CALIBRAÇÃO (MLE full — sem incremental)
     # ----------------------------------------------------------------
+    def _merge_salvar_local(self, banco: BancoQG) -> None:
+        """
+        Append-only write do arquivo local.
+
+        Sempre lê o estado atual do disco antes de escrever — garante que nenhum
+        dado histórico seja perdido por reinicializações ou atualizações de código.
+
+        Regras de merge campo a campo:
+        - picks / depositos  : lista maior vence (itens são imutáveis e nunca deletados)
+        - params_ligas/datas : dict update (nova calibração sobrescreve mesma chave,
+                               mas nunca apaga outras ligas)
+        - historico_ligas    : append-only estrito por fixture_id — nunca remove fixtures
+        - banca_inicial      : in-memory é autoritativo (veio da nuvem via carregar_banco)
+        """
+        arquivo = self.dir / ARQUIVO_BANCO_LOCAL
+        disco: dict = {}
+        if arquivo.exists():
+            try:
+                with open(arquivo, "r", encoding="utf-8") as f:
+                    disco = json.load(f)
+            except Exception as e:
+                log.warning(f"Merge local: arquivo corrompido ({e}). Escrevendo do zero.")
+
+        # Picks e depósitos: lista maior vence (itens nunca são deletados)
+        picks_mem   = banco.picks   or []
+        picks_disco = disco.get("picks", [])
+        picks_final = picks_mem if len(picks_mem) >= len(picks_disco) else picks_disco
+
+        dep_mem   = banco.depositos or []
+        dep_disco = disco.get("depositos", [])
+        dep_final = dep_mem if len(dep_mem) >= len(dep_disco) else dep_disco
+
+        # Parâmetros e datas: dict update — nova calibração sobrescreve mesma liga,
+        # mas nunca apaga ligas que estão no disco mas não em memória
+        params_final = dict(disco.get("params_ligas", {}))
+        params_final.update(banco.params_ligas or {})
+
+        datas_final = dict(disco.get("datas", {}))
+        datas_final.update(banco.datas or {})
+
+        # Histórico de ligas: append-only estrito por fixture_id
+        hist_final = dict(disco.get("historico_ligas", {}))
+        for liga_str, liga_nova in (banco.historico_ligas or {}).items():
+            if liga_str not in hist_final:
+                hist_final[liga_str] = liga_nova
+            else:
+                ids_disco = {int(r["fixture_id"]) for r in hist_final[liga_str].get("registros", [])}
+                novos = [
+                    r for r in liga_nova.get("registros", [])
+                    if int(r["fixture_id"]) not in ids_disco
+                ]
+                if novos:
+                    hist_final[liga_str]["registros"].extend(novos)
+                    hist_final[liga_str]["atualizado_em"] = liga_nova.get("atualizado_em", "")
+
+        resultado = {
+            "picks":           picks_final,
+            "banca_inicial":   banco.banca_inicial,
+            "depositos":       dep_final,
+            "params_ligas":    params_final,
+            "datas":           datas_final,
+            "historico_ligas": hist_final,
+        }
+        try:
+            with open(arquivo, "w", encoding="utf-8") as f:
+                json.dump(resultado, f, indent=2, default=str)
+        except Exception as e:
+            log.warning(f"Falha ao salvar banco local (merge): {e}")
+
     def precisa_recalibrar(self, params_dict: dict) -> bool:
         """True se params estão velhos OU ausentes."""
         if not params_dict:
@@ -531,6 +699,110 @@ class DadosManager:
             return dias >= INTERVALO_RECALIBRACAO_DIAS
         except Exception:
             return True
+
+    def _obter_historico_com_delta_xg(
+        self,
+        league_id: int,
+        season_principal: int,
+        season_anterior: Optional[int] = None,
+    ) -> tuple[pd.DataFrame, dict]:
+        """
+        Delta Fetch: busca xG apenas para fixtures novos, usando cache local.
+
+        Fluxo por season:
+        1. GET /fixtures (barato — só gols) para obter a lista atual de IDs.
+        2. Compara IDs com banco.historico_ligas[liga] → identifica novidades.
+        3. GET /fixtures/statistics apenas para os IDs ausentes do cache.
+        4. Mescla novos registros no cache e persiste só no arquivo local.
+        5. Retorna DataFrame de todas as seasons solicitadas pronto para calibrar_liga().
+
+        Custo típico: 1 crédito (lista) + N_novos créditos (xG) por season.
+        Bootstrap (primeiro run): N_total créditos — dividir em 2 dias manualmente.
+        """
+        banco = self.carregar_banco()
+        chave = str(league_id)
+        cache_liga = banco.historico_ligas.get(chave, {"registros": [], "atualizado_em": ""})
+
+        ids_cache: set[int] = {int(r["fixture_id"]) for r in cache_liga["registros"]}
+
+        nomes_global: dict[int, str] = {}
+        houve_novidades = False
+        seasons = [season_anterior, season_principal] if season_anterior is not None else [season_principal]
+
+        for season in seasons:
+            # Busca lista de fixtures sem xG (apenas gols reais — barato)
+            try:
+                df_api, nomes = self.api.buscar_historico_liga(league_id, season, com_xg=False)
+            except Exception as e:
+                log.warning(f"Liga {league_id} s{season}: falha ao buscar lista de fixtures: {e}")
+                continue
+
+            nomes_global.update(nomes)
+
+            if df_api.empty:
+                continue
+
+            df_novos = df_api[~df_api["fixture_id"].isin(ids_cache)].copy()
+
+            if df_novos.empty:
+                log.info(f"Liga {league_id} s{season}: sem fixtures novos (cache 100%).")
+                continue
+
+            n_novos = len(df_novos)
+            log.info(f"Liga {league_id} s{season}: {n_novos} fixtures novos — buscando xG.")
+
+            # Verifica créditos antes do loop de xG
+            custo_xg = n_novos * CUSTO_ESTIMADO_XG_FIXTURE
+            xg_home_list: list = []
+            xg_away_list: list = []
+            try:
+                self.api.trava_saldo(custo_xg, saldo_minimo=SALDO_MIN_PARA_CALIBRACAO)
+                for _, row in df_novos.iterrows():
+                    xg_h, xg_a = self.api.buscar_xg_fixture(
+                        int(row["fixture_id"]), int(row["home_id"]), int(row["away_id"])
+                    )
+                    xg_home_list.append(xg_h)
+                    xg_away_list.append(xg_a)
+            except CreditosInsuficientesError as e:
+                log.warning(
+                    f"Liga {league_id} s{season}: créditos insuficientes para xG "
+                    f"({custo_xg} necessários — {e}). Fixtures entram no cache sem xG."
+                )
+                xg_home_list = [None] * n_novos
+                xg_away_list = [None] * n_novos
+
+            df_novos = df_novos.copy()
+            df_novos["xg_home"] = xg_home_list
+            df_novos["xg_away"] = xg_away_list
+            df_novos["season_year"] = season
+
+            novos = df_novos.to_dict("records")
+            cache_liga["registros"].extend(novos)
+            ids_cache.update(int(r["fixture_id"]) for r in novos)
+            houve_novidades = True
+
+        # Persiste cache no arquivo local via append-only merge (nunca vai pro JSONBin)
+        if houve_novidades:
+            cache_liga["atualizado_em"] = dt.datetime.now().isoformat()
+            banco.historico_ligas[chave] = cache_liga
+            self._merge_salvar_local(banco)
+
+        # Monta DataFrame completo filtrado pelas seasons solicitadas
+        todos = cache_liga["registros"]
+        if not todos:
+            return pd.DataFrame(columns=["home_id", "away_id", "home_goals", "away_goals", "date"]), nomes_global
+
+        df_full = pd.DataFrame(todos)
+        df_full["date"] = pd.to_datetime(df_full["date"])
+
+        if "season_year" in df_full.columns:
+            df_full = df_full[df_full["season_year"].isin(seasons)].reset_index(drop=True)
+
+        n_xg = int(df_full["xg_home"].notna().sum()) if "xg_home" in df_full.columns else 0
+        pct = n_xg / len(df_full) * 100 if len(df_full) > 0 else 0.0
+        log.info(f"Liga {league_id}: cache final — {len(df_full)} jogos, xG em {n_xg} ({pct:.1f}%).")
+
+        return df_full, nomes_global
 
     def obter_params_liga(
         self,
@@ -574,24 +846,8 @@ class DadosManager:
             seasons_label    = [season_principal]
             log.info(f"Calibrando liga {league_id} (season {season_principal}) via MLE...")
 
-        # Busca temporada principal — marca coluna season_year para rastreabilidade
-        df_principal, nomes = self.api.buscar_historico_liga(league_id, season_principal)
-        df_principal["season_year"] = season_principal
-
-        # Busca temporada anterior (se aplicável) e mescla
-        if season_anterior is not None:
-            try:
-                df_ant, nomes_ant = self.api.buscar_historico_liga(league_id, season_anterior)
-                df_ant["season_year"] = season_anterior
-                nomes.update(nomes_ant)            # nomes da temporada anterior preenchem gaps
-                n_ant = len(df_ant)
-                df_principal = pd.concat([df_ant, df_principal], ignore_index=True)
-                log.info(f"  → Combinado: {n_ant} jogos de {season_anterior} "
-                         f"+ {len(df_principal) - n_ant} jogos de {season_principal}")
-            except Exception as e:
-                log.warning(f"Temporada anterior {season_anterior} indisponível: {e}. Usando só {season_principal}.")
-
-        df = df_principal
+        # Delta Fetch: busca xG apenas para fixtures novos (cache local) — Dossiê v8 Seção 3.1
+        df, nomes = self._obter_historico_com_delta_xg(league_id, season_principal, season_anterior)
         if len(df) < 20:
             raise ValueError(
                 f"Liga {league_id} season {season_principal} tem apenas {len(df)} jogos finalizados. "
@@ -603,6 +859,7 @@ class DadosManager:
             future = executor.submit(
                 calibrar_liga, df, league_id, season_principal,
                 nomes_times=nomes, seasons_incluidas=seasons_label,
+                peso_xg=PESO_XG_PRODUCAO,
             )
             try:
                 params = future.result(timeout=TIMEOUT_CALIBRACAO_SEGUNDOS)
@@ -618,6 +875,98 @@ class DadosManager:
         log.info(f"Liga {league_id} calibrada: {params.n_jogos_calibracao} jogos, "
                  f"seasons={seasons_label}, LL={params.log_likelihood:.2f}")
         return params
+
+    def calcular_custo_delta(
+        self,
+        ligas: Optional[list[int]] = None,
+        season: Optional[int] = None,
+    ) -> dict:
+        """
+        Preview de custo do Delta Fetch SEM fazer download de xG.
+
+        Para cada liga, busca apenas a lista de fixtures finalizados (1 crédito/chamada)
+        e compara os IDs com o cache local. Retorna o delta: quantos fixtures faltam
+        e quanto custará o download de xG.
+
+        Args:
+            ligas:  lista de league_ids (default: todas LIGAS_SUPORTADAS)
+            season: season para ligas europeias (default: ano_atual - 1)
+
+        Returns:
+            {
+                "n_novos_total":            int,
+                "custo_estimado_creditos":  int,   # n_novos × CUSTO_ESTIMADO_XG_FIXTURE
+                "ligas": [
+                    {
+                        "league_id":    int,
+                        "nome":         str,
+                        "n_novos_liga": int,
+                        "seasons": [
+                            {"season": int, "n_api": int, "n_cache": int,
+                             "n_novos": int, "erro": str|None}
+                        ],
+                    }
+                ],
+            }
+        """
+        banco = self.carregar_banco()
+        ano_atual = dt.date.today().year
+        season_europeia = season or (ano_atual - 1)
+
+        ligas_alvo = ligas or list(LIGAS_SUPORTADAS.keys())
+        resultado_ligas = []
+        n_novos_total = 0
+
+        for league_id in ligas_alvo:
+            chave = str(league_id)
+            cache_liga = banco.historico_ligas.get(chave, {"registros": []})
+            ids_cache: set[int] = {int(r["fixture_id"]) for r in cache_liga.get("registros", [])}
+
+            usar_ano_atual = league_id in LIGAS_TEMPORADA_ANO_ATUAL
+            if usar_ano_atual:
+                seasons = [ano_atual - 1, ano_atual]
+            else:
+                seasons = [season_europeia]
+
+            detalhes_seasons = []
+            n_novos_liga = 0
+
+            for s in seasons:
+                try:
+                    df_api, _ = self.api.buscar_historico_liga(league_id, s, com_xg=False)
+                    ids_api = set(df_api["fixture_id"].astype(int).tolist()) if not df_api.empty else set()
+                    novos_ids = ids_api - ids_cache
+                    n_novos = len(novos_ids)
+                    detalhes_seasons.append({
+                        "season":  s,
+                        "n_api":   len(df_api),
+                        "n_cache": len(df_api) - n_novos,
+                        "n_novos": n_novos,
+                        "erro":    None,
+                    })
+                    n_novos_liga += n_novos
+                except Exception as e:
+                    detalhes_seasons.append({
+                        "season":  s,
+                        "n_api":   0,
+                        "n_cache": 0,
+                        "n_novos": 0,
+                        "erro":    str(e),
+                    })
+
+            resultado_ligas.append({
+                "league_id":    league_id,
+                "nome":         LIGAS_SUPORTADAS.get(league_id, f"Liga {league_id}"),
+                "n_novos_liga": n_novos_liga,
+                "seasons":      detalhes_seasons,
+            })
+            n_novos_total += n_novos_liga
+
+        return {
+            "n_novos_total":           n_novos_total,
+            "custo_estimado_creditos": n_novos_total * CUSTO_ESTIMADO_XG_FIXTURE,
+            "ligas":                   resultado_ligas,
+        }
 
     def calibrar_liga_avulsa(self, league_id: int, season: int) -> ParametrosLiga:
         """
