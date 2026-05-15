@@ -1,915 +1,1138 @@
 """
-QG Barrios PRO - Motor V2 (Dixon-Coles real)
-=============================================
+QG Barrios PRO - Camada de Dados V2
+====================================
 
-Motor matemático puro. Standalone. SEM dependência de Streamlit ou API.
+Responsabilidades:
+1. Wrapper limpo da API-Sports v3 (com trava de créditos)
+2. Persistência no JSONBin (picks, banca, parâmetros de ligas)
+3. Cache local + cache semanal de parâmetros calibrados das ligas
+4. Calibração híbrida: re-MLE semanal + atualização incremental por jogo novo
 
-Implementa Dixon-Coles (1997) "Modelling Association Football Scores and
-Inefficiencies in the Football Betting Market":
-
-    P(X=x, Y=y) = tau(x,y; lambda, mu) * Pois(x; lambda) * Pois(y; mu)
-
-onde:
-    lambda = alpha_home * beta_away * gamma   (gols esperados time da casa)
-    mu     = alpha_away * beta_home           (gols esperados time visitante)
-
-alpha_i = força ofensiva do time i
-beta_i  = força defensiva do time i (quanto MAIOR, pior defesa)
-gamma   = vantagem de jogar em casa (por liga)
-tau     = ajuste de correlação para placares baixos:
-            tau(0,0) = 1 - lambda*mu*rho
-            tau(0,1) = 1 + lambda*rho
-            tau(1,0) = 1 + mu*rho
-            tau(1,1) = 1 - rho
-            tau(.,.) = 1                       (qualquer outro placar)
-
-Restrições do MLE:
-    soma(alpha_i) / n_times = 1.0    (identificabilidade do modelo)
-    beta_i > 0, alpha_i > 0, gamma > 0
-    rho em (-1, 1)
-
-Decay temporal:
-    L(theta) = soma_t  exp(-xi * dias_atras_t) * log P(jogo_t | theta)
-
-Autor: QG Barrios PRO
-Versão: 2.0.0
+Princípios:
+- Zero lógica matemática aqui (delegada para motor.py)
+- Zero código Streamlit (apresentação fica em app.py)
+- Toda chamada de API passa pela trava de saldo
+- Erros explícitos (não engole exceções com try/except: pass)
 """
 
 from __future__ import annotations
 
-import math
+import os
 import json
+import time
 import datetime as dt
-from dataclasses import dataclass, field, asdict
+import logging
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from pathlib import Path
+from dataclasses import dataclass
 from typing import Optional
 
-import numpy as np
+import requests
 import pandas as pd
-from scipy.optimize import minimize
-from scipy.stats import poisson
+
+from motor import (
+    ParametrosLiga,
+    calibrar_liga,
+)
+
+# =========================================================================
+# 1. CONFIGURAÇÃO
+# =========================================================================
+
+BASE_URL = "https://v3.football.api-sports.io"
+TIMEOUT_API = 12
+INTERVALO_RECALIBRACAO_DIAS = 7
+SALDO_MINIMO_EMERGENCIA = 50      # abaixo disso, NENHUMA chamada nova
+SALDO_MIN_PARA_CALIBRACAO = 200   # calibração custa ~10-30 créditos (paginação)
+CUSTO_ESTIMADO_HISTORICO_LIGA = 30
+TIMEOUT_CALIBRACAO_SEGUNDOS = 90   # MLE com muitos times pode travar; mata após 90s
+CUSTO_ESTIMADO_ODDS_JOGO    = 1
+CUSTO_ESTIMADO_FIXTURES_DIA = 1
+CUSTO_ESTIMADO_XG_FIXTURE   = 1    # 1 crédito por chamada GET /fixtures/statistics
+CUSTO_ESTIMADO_XG_LIGA      = 400  # estimativa conservadora: ~380 partidas/temporada
+PESO_XG_PRODUCAO            = 0.5  # blend validado no backtest (Dossiê v8 — Seção 3.1)
+
+# Bookmakers preferidos (ordem de prioridade)
+BOOKMAKERS_PRIORIDADE = [8, 4, 1, 6, 2]   # Bet365, Pinnacle, 10Bet, Bwin, Marathon
+
+# Ligas suportadas (calibração cobre todas essas)
+LIGAS_SUPORTADAS = {
+    # ── Top 5 Europa ──────────────────────────────────────────────────
+    39:  "Premier League",
+    140: "La Liga",
+    135: "Serie A",
+    78:  "Bundesliga",
+    61:  "Ligue 1",
+    # ── Copas Europeias ───────────────────────────────────────────────
+    2:   "Champions League",
+    3:   "Europa League",
+    848: "Conference League",
+    556: "Copa del Rey",
+    137: "Coppa Italia",
+    529: "DFB Pokal",
+    66:  "Coupe de France",
+    45:  "FA Cup",
+    48:  "League Cup (EFL)",
+    # ── Outras Europeias ──────────────────────────────────────────────
+    88:  "Eredivisie",
+    94:  "Primeira Liga",
+    203: "Süper Lig",
+    179: "Scottish Premiership",
+    144: "Belgian Pro League",
+    103: "Eliteserien (Noruega)",
+    113: "Allsvenskan (Suécia)",
+    # ── Brasil ────────────────────────────────────────────────────────
+    71:  "Brasileirão Série A",
+    72:  "Brasileirão Série B",
+    75:  "Brasileirão Série C",
+    73:  "Copa do Brasil",
+    # ── Américas ──────────────────────────────────────────────────────
+    13:  "Copa Libertadores",
+    11:  "Copa Sudamericana",
+    128: "Liga Argentina",
+    253: "MLS",
+    262: "Liga MX",
+    # ── Oriente Médio / Ásia ──────────────────────────────────────────
+    307: "Saudi Pro League",
+    98:  "J1 League (Japão)",
+}
+
+# Ligas que usam ano-calendário como temporada (Brasil, Américas, Japão).
+# Para estas, o motor combina season_atual + season_anterior automaticamente,
+# garantindo dados de 2026 (recentes) + 2025 (contexto) com decay temporal.
+LIGAS_TEMPORADA_ANO_ATUAL = {
+    71,   # Brasileirão Série A
+    72,   # Brasileirão Série B
+    75,   # Brasileirão Série C
+    73,   # Copa do Brasil
+    13,   # Copa Libertadores
+    11,   # Copa Sudamericana
+    128,  # Liga Argentina
+    253,  # MLS
+    262,  # Liga MX
+    98,   # J1 League (Japão)
+}
+
+ARQUIVO_BANCO_LOCAL = "banco_barrios_pro.json"
+ARQUIVO_PARAMS_LOCAL = "params_ligas.json"
+
+log = logging.getLogger("dados")
 
 
 # =========================================================================
-# 1. ESTRUTURAS DE DADOS
+# 2. EXCEÇÕES ESPECÍFICAS
+# =========================================================================
+
+class CreditosInsuficientesError(Exception):
+    """Lançada quando o saldo está abaixo do mínimo de segurança."""
+    pass
+
+
+class APIError(Exception):
+    """Erro genérico da API-Sports."""
+    pass
+
+
+# =========================================================================
+# 3. CLIENT API-SPORTS
+# =========================================================================
+
+class ApiSportsClient:
+    """Wrapper da API-Sports v3 com trava de créditos."""
+
+    def __init__(self, api_key: str):
+        if not api_key:
+            raise ValueError("api_key vazia")
+        self.api_key = api_key
+        self.headers = {"x-apisports-key": api_key}
+        self._saldo_cache: Optional[int] = None
+        self._saldo_cache_em: Optional[dt.datetime] = None
+
+    # ----------------------------------------------------------------
+    # Saldo / créditos
+    # ----------------------------------------------------------------
+    def saldo(self, cache_segundos: int = 30) -> int:
+        """Retorna créditos disponíveis. Usa cache curto para evitar spam."""
+        agora = dt.datetime.now()
+        if (
+            self._saldo_cache is not None
+            and self._saldo_cache_em is not None
+            and (agora - self._saldo_cache_em).total_seconds() < cache_segundos
+        ):
+            return self._saldo_cache
+
+        try:
+            res = requests.get(f"{BASE_URL}/status", headers=self.headers, timeout=TIMEOUT_API)
+            data = res.json()
+            req_info = data.get("response", {}).get("requests", {})
+            limite = req_info.get("limit_day", 7500)
+            usados = req_info.get("current", 0)
+            saldo = limite - usados
+            self._saldo_cache = saldo
+            self._saldo_cache_em = agora
+            return saldo
+        except Exception as e:
+            log.warning(f"Falha ao consultar saldo: {e}. Retornando 0 por segurança.")
+            return 0
+
+    def trava_saldo(self, custo_estimado: int, saldo_minimo: int = SALDO_MINIMO_EMERGENCIA) -> None:
+        """Bloqueia chamada se não houver saldo suficiente."""
+        saldo_atual = self.saldo()
+        if saldo_atual < saldo_minimo:
+            raise CreditosInsuficientesError(
+                f"Saldo {saldo_atual} < mínimo de emergência {saldo_minimo}. Bloqueando."
+            )
+        if saldo_atual < custo_estimado + saldo_minimo:
+            raise CreditosInsuficientesError(
+                f"Saldo {saldo_atual} insuficiente para custo estimado {custo_estimado} "
+                f"+ buffer {saldo_minimo}. Bloqueando."
+            )
+
+    # ----------------------------------------------------------------
+    # Endpoint: agenda do dia
+    # ----------------------------------------------------------------
+    def buscar_agenda_dia(self, data_str: str, timezone: str = "America/Sao_Paulo") -> list[dict]:
+        """Busca fixtures agendadas para uma data específica."""
+        self.trava_saldo(CUSTO_ESTIMADO_FIXTURES_DIA)
+        params = {"date": data_str, "timezone": timezone}
+        try:
+            res = requests.get(f"{BASE_URL}/fixtures", headers=self.headers, params=params, timeout=TIMEOUT_API)
+            data = res.json()
+            if data.get("errors"):
+                raise APIError(f"API retornou erros: {data['errors']}")
+            return data.get("response", [])
+        except requests.RequestException as e:
+            raise APIError(f"Falha de rede em buscar_agenda_dia: {e}") from e
+
+    # ----------------------------------------------------------------
+    # Endpoint: histórico completo de uma liga (para calibração)
+    # ----------------------------------------------------------------
+    def buscar_historico_liga(
+        self,
+        league_id: int,
+        season: int,
+        com_xg: bool = False,
+    ) -> tuple[pd.DataFrame, dict]:
+        """
+        Busca TODOS os jogos finalizados de uma liga/temporada.
+
+        com_xg=True: após buscar os fixtures, chama /fixtures/statistics para cada
+        partida e adiciona colunas xg_home e xg_away ao DataFrame.
+        Custo adicional: ~1 crédito por partida (CUSTO_ESTIMADO_XG_FIXTURE).
+        Ligas sem cobertura de xG retornam colunas all-NaN — calibrar_liga()
+        detecta isso e usa gols reais automaticamente.
+
+        Retorna:
+            (DataFrame com colunas: home_id, away_id, home_goals, away_goals, date,
+             [xg_home, xg_away se com_xg=True],
+             dict {team_id: "Nome do Time"} para exibição na auditoria)
+        """
+        self.trava_saldo(CUSTO_ESTIMADO_HISTORICO_LIGA, saldo_minimo=SALDO_MIN_PARA_CALIBRACAO)
+        params = {"league": league_id, "season": season, "status": "FT"}
+        try:
+            res = requests.get(f"{BASE_URL}/fixtures", headers=self.headers, params=params, timeout=TIMEOUT_API)
+            data = res.json()
+            if data.get("errors"):
+                raise APIError(f"API errors em buscar_historico_liga({league_id}, {season}): {data['errors']}")
+            jogos = data.get("response", [])
+        except requests.RequestException as e:
+            raise APIError(f"Falha de rede em buscar_historico_liga: {e}") from e
+
+        vazio = pd.DataFrame(columns=["home_id", "away_id", "home_goals", "away_goals", "date"])
+        if not jogos:
+            return vazio, {}
+
+        registros = []
+        nomes: dict[int, str] = {}
+        for j in jogos:
+            try:
+                gh = j["goals"]["home"]
+                ga = j["goals"]["away"]
+                if gh is None or ga is None:
+                    continue
+                h_id = j["teams"]["home"]["id"]
+                a_id = j["teams"]["away"]["id"]
+                nomes[h_id] = j["teams"]["home"]["name"]
+                nomes[a_id] = j["teams"]["away"]["name"]
+                registros.append({
+                    "fixture_id": j["fixture"]["id"],
+                    "home_id":    h_id,
+                    "away_id":    a_id,
+                    "home_goals": int(gh),
+                    "away_goals": int(ga),
+                    "date":       j["fixture"]["date"][:10],
+                })
+            except (KeyError, TypeError, ValueError) as e:
+                log.debug(f"Jogo ignorado por dados inconsistentes: {e}")
+                continue
+
+        df = pd.DataFrame(registros)
+        if not df.empty:
+            df["date"] = pd.to_datetime(df["date"])
+
+        # ── Enriquecimento com xG via /fixtures/statistics ────────────────────
+        if com_xg and not df.empty:
+            custo_xg = len(df) * CUSTO_ESTIMADO_XG_FIXTURE
+            try:
+                self.trava_saldo(custo_xg, saldo_minimo=SALDO_MIN_PARA_CALIBRACAO)
+            except CreditosInsuficientesError as e:
+                log.warning(
+                    f"Liga {league_id} s{season}: créditos insuficientes para xG "
+                    f"({custo_xg} necessários — {e}). Calibração usará gols reais."
+                )
+                df["xg_home"] = None
+                df["xg_away"] = None
+                return df, nomes
+
+            xg_home_list, xg_away_list = [], []
+            for _, row in df.iterrows():
+                xg_h, xg_a = self.buscar_xg_fixture(
+                    int(row["fixture_id"]), int(row["home_id"]), int(row["away_id"])
+                )
+                xg_home_list.append(xg_h)
+                xg_away_list.append(xg_a)
+
+            df["xg_home"] = xg_home_list
+            df["xg_away"] = xg_away_list
+            n_xg = int(df["xg_home"].notna().sum())
+            log.info(
+                f"Liga {league_id} s{season}: xG disponível em "
+                f"{n_xg}/{len(df)} jogos ({n_xg / len(df) * 100:.1f}%)."
+            )
+
+        return df, nomes
+
+    # ----------------------------------------------------------------
+    # Endpoint: xG de um fixture via /fixtures/statistics
+    # ----------------------------------------------------------------
+    def buscar_xg_fixture(
+        self,
+        fixture_id: int,
+        home_team_id: int,
+        away_team_id: int,
+    ) -> tuple:
+        """
+        Retorna (xg_home, xg_away) para um fixture via /fixtures/statistics.
+
+        Mapeia por team_id para garantir home/away corretos independente da ordem
+        da resposta. Retorna (None, None) se a liga não tem cobertura de xG.
+        NÃO chama trava_saldo — o caller faz o check único antes do loop.
+        """
+        try:
+            res = requests.get(
+                f"{BASE_URL}/fixtures/statistics",
+                headers=self.headers,
+                params={"fixture": fixture_id},
+                timeout=TIMEOUT_API,
+            )
+            data = res.json()
+        except requests.RequestException as e:
+            log.debug(f"Falha de rede em buscar_xg_fixture({fixture_id}): {e}")
+            return None, None
+
+        response = data.get("response", [])
+        xg_map: dict = {}
+        for entry in response:
+            team_id = entry.get("team", {}).get("id")
+            if team_id is None:
+                continue
+            for stat in entry.get("statistics", []):
+                if stat.get("type") == "Expected Goals":
+                    val = stat.get("value")
+                    if val is not None:
+                        try:
+                            xg_map[team_id] = float(val)
+                        except (TypeError, ValueError):
+                            pass
+                    break
+
+        return xg_map.get(home_team_id), xg_map.get(away_team_id)
+
+    # ----------------------------------------------------------------
+    # Endpoint: odds de um jogo
+    # ----------------------------------------------------------------
+    def buscar_odds_jogo(self, fixture_id: int) -> dict:
+        """
+        Retorna dict de odds normalizado para um jogo.
+        Chaves: HOME, DRAW, AWAY, 1X, X2, 12, BTTS_YES, BTTS_NO,
+                OVER_05..OVER_45, UNDER_05..UNDER_45.
+        Valor 0 indica odd indisponível.
+        """
+        self.trava_saldo(CUSTO_ESTIMADO_ODDS_JOGO)
+
+        odds_default = {
+            "HOME": 0, "DRAW": 0, "AWAY": 0,
+            "1X": 0, "X2": 0, "12": 0,
+            "BTTS_YES": 0, "BTTS_NO": 0,
+        }
+        for linha in ["05", "15", "25", "35", "45"]:
+            odds_default[f"OVER_{linha}"] = 0
+            odds_default[f"UNDER_{linha}"] = 0
+
+        try:
+            res = requests.get(
+                f"{BASE_URL}/odds",
+                headers=self.headers,
+                params={"fixture": fixture_id},
+                timeout=TIMEOUT_API,
+            )
+            data = res.json()
+        except requests.RequestException as e:
+            log.warning(f"Falha de rede em buscar_odds_jogo({fixture_id}): {e}")
+            return odds_default
+
+        response = data.get("response", [])
+        if not response:
+            return odds_default
+
+        bookmakers = response[0].get("bookmakers", [])
+        bkm = None
+        for target_id in BOOKMAKERS_PRIORIDADE:
+            bkm = next((b for b in bookmakers if b["id"] == target_id), None)
+            if bkm:
+                break
+        if not bkm and bookmakers:
+            bkm = bookmakers[0]   # fallback: qualquer um
+        if not bkm:
+            return odds_default
+
+        odds = odds_default.copy()
+        for bet in bkm.get("bets", []):
+            nome = bet.get("name", "")
+            valores = bet.get("values", [])
+
+            if nome == "Match Winner":
+                for v in valores:
+                    val = v.get("value", "")
+                    try:
+                        if val == "Home":
+                            odds["HOME"] = float(v["odd"])
+                        elif val == "Draw":
+                            odds["DRAW"] = float(v["odd"])
+                        elif val == "Away":
+                            odds["AWAY"] = float(v["odd"])
+                    except (KeyError, ValueError):
+                        continue
+            elif nome == "Double Chance":
+                for v in valores:
+                    val = v.get("value", "")
+                    try:
+                        if val == "Home/Draw":
+                            odds["1X"] = float(v["odd"])
+                        elif val == "Draw/Away":
+                            odds["X2"] = float(v["odd"])
+                        elif val == "Home/Away":
+                            odds["12"] = float(v["odd"])
+                    except (KeyError, ValueError):
+                        continue
+            elif nome == "Both Teams Score":
+                for v in valores:
+                    val = v.get("value", "")
+                    try:
+                        if val == "Yes":
+                            odds["BTTS_YES"] = float(v["odd"])
+                        elif val == "No":
+                            odds["BTTS_NO"] = float(v["odd"])
+                    except (KeyError, ValueError):
+                        continue
+            elif nome == "Goals Over/Under":
+                for v in valores:
+                    val = v.get("value", "")
+                    try:
+                        odd_val = float(v["odd"])
+                    except (KeyError, ValueError):
+                        continue
+                    for linha_str, linha_num in [("0.5", "05"), ("1.5", "15"), ("2.5", "25"), ("3.5", "35"), ("4.5", "45")]:
+                        if val == f"Over {linha_str}":
+                            odds[f"OVER_{linha_num}"] = odd_val
+                        elif val == f"Under {linha_str}":
+                            odds[f"UNDER_{linha_num}"] = odd_val
+
+        return odds
+
+
+# =========================================================================
+# 4. CLIENT JSONBIN (banco + parâmetros de ligas)
+# =========================================================================
+
+class JSONBinClient:
+    """Wrapper do JSONBin para persistência de banco e parâmetros."""
+
+    def __init__(self, key: str, bin_id: str):
+        if not key or not bin_id:
+            raise ValueError("key/bin_id do JSONBin vazios")
+        self.key = key
+        self.bin_id = bin_id
+        self.url = f"https://api.jsonbin.io/v3/b/{bin_id}"
+        self.headers = {"X-Master-Key": key, "Content-Type": "application/json"}
+
+    def ler(self, timeout: int = 10) -> dict:
+        try:
+            res = requests.get(f"{self.url}/latest", headers=self.headers, timeout=timeout)
+            if res.status_code == 200:
+                return res.json().get("record", {}) or {}
+        except requests.RequestException as e:
+            log.warning(f"Falha ao ler JSONBin: {e}")
+        return {}
+
+    def escrever(self, dados: dict, timeout: int = 10) -> bool:
+        h = self.headers.copy()
+        h["X-Bin-Versioning"] = "false"
+        try:
+            res = requests.put(self.url, headers=h, json=dados, timeout=timeout)
+            return res.status_code == 200
+        except requests.RequestException as e:
+            log.warning(f"Falha ao escrever JSONBin: {e}")
+            return False
+
+
+# =========================================================================
+# 5. MANAGER PRINCIPAL (orquestrador)
 # =========================================================================
 
 @dataclass
-class ParametrosLiga:
-    """Parâmetros calibrados de uma liga via MLE."""
-    league_id: int
-    season: int
-    times: dict[int, dict[str, float]]   # {team_id: {"alpha": x, "beta": y, "n_jogos": z}}
-    home_advantage: float                 # gamma
-    rho: float                            # ajuste D-C para placares baixos
-    xi: float                             # decay temporal
-    media_liga_gols: float                # média de gols/jogo da liga (para shrinkage)
-    calibrado_em: str = field(default_factory=lambda: dt.datetime.now().isoformat())
-    n_jogos_calibracao: int = 0
-    log_likelihood: float = 0.0
-    nomes_times: dict = field(default_factory=dict)    # {team_id: "Nome do Time"}
-    seasons_incluidas: list = field(default_factory=list)
-    raio_x_times: dict = field(default_factory=dict)
-    # raio_x_times: {team_id: {n_atual, n_historico, n_total, ultimo_jogo,
-    #                           na_temporada_atual, no_modelo}}
-    # "na_temporada_atual" = False → time aparece só no histórico (ex: rebaixado)
-    # "no_modelo"          = False → filtrado pelo min_aparicoes ou por não ser da temporada atual
+class BancoQG:
+    """
+    Estado completo do banco QG Barrios.
+
+    SEPARAÇÃO CRÍTICA (fix do bug de ROI):
+    - banca_inicial: capital original investido — NUNCA muda. É o denominador do ROI.
+    - depositos:     lista de entradas/saídas manuais [{data, valor, nota}].
+                     valor > 0 = depósito, valor < 0 = retirada.
+    - banca_atual é calculada em runtime: banca_inicial + Σ depositos + P/L picks
+
+    DELTA FETCH (Passo 3):
+    - historico_ligas: cache local de fixtures enriquecidos com xG.
+                       Salvo APENAS no arquivo local — nunca sincronizado com JSONBin.
+                       Schema: {liga_id_str: {"registros": [...], "atualizado_em": str}}
+    """
+    picks: list = None
+    banca_inicial: float = 30.0
+    depositos: list = None           # [{data, valor, nota, registrado_em}]
+    params_ligas: dict = None        # {league_id_str: {ParametrosLiga.to_dict()}}
+    datas: dict = None               # cache de análises por data (agenda, odds, previsões)
+    historico_ligas: dict = None     # cache local de treino com xG — NÃO vai pro JSONBin
+
+    def __post_init__(self):
+        if self.picks is None:
+            self.picks = []
+        if self.depositos is None:
+            self.depositos = []
+        if self.params_ligas is None:
+            self.params_ligas = {}
+        if self.datas is None:
+            self.datas = {}
+        if self.historico_ligas is None:
+            self.historico_ligas = {}
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        return {
+            "picks": self.picks,
+            "banca_inicial": self.banca_inicial,
+            "depositos": self.depositos,
+            "params_ligas": self.params_ligas,
+            "datas": self.datas,
+            "historico_ligas": self.historico_ligas,
+        }
 
     @classmethod
-    def from_dict(cls, d: dict) -> "ParametrosLiga":
-        times = {int(k): v for k, v in d["times"].items()}
-        nomes_raw = d.get("nomes_times", {})
-        nomes_times = {int(k): v for k, v in nomes_raw.items()} if nomes_raw else {}
-        raio_x_raw = d.get("raio_x_times", {})
-        raio_x_times = {int(k): v for k, v in raio_x_raw.items()} if raio_x_raw else {}
+    def from_dict(cls, d: dict) -> "BancoQG":
         return cls(
-            league_id=d["league_id"],
-            season=d["season"],
-            times=times,
-            home_advantage=d["home_advantage"],
-            rho=d["rho"],
-            xi=d["xi"],
-            media_liga_gols=d["media_liga_gols"],
-            calibrado_em=d.get("calibrado_em", ""),
-            n_jogos_calibracao=d.get("n_jogos_calibracao", 0),
-            log_likelihood=d.get("log_likelihood", 0.0),
-            nomes_times=nomes_times,
-            seasons_incluidas=d.get("seasons_incluidas", []),
-            raio_x_times=raio_x_times,
+            picks=d.get("picks", []),
+            banca_inicial=float(d.get("banca_inicial", 30.0)),
+            depositos=d.get("depositos", []),
+            params_ligas=d.get("params_ligas", {}),
+            datas=d.get("datas", {}),
+            historico_ligas=d.get("historico_ligas", {}),
         )
 
 
-# =========================================================================
-# 2. AJUSTE DIXON-COLES (TAU) — IMPLEMENTAÇÃO CORRETA
-# =========================================================================
+class DadosManager:
+    """Orquestrador: API-Sports + JSONBin + cache local + motor."""
 
-def tau_dixon_coles(x: int, y: int, lam: float, mu: float, rho: float) -> float:
-    """
-    Ajuste de correlação D-C para placares baixos.
+    def __init__(
+        self,
+        api_key: str,
+        jsonbin_key: str,
+        jsonbin_id: str,
+        diretorio_local: str = ".",
+    ):
+        self.api = ApiSportsClient(api_key)
+        self.jsonbin = JSONBinClient(jsonbin_key, jsonbin_id)
+        self.dir = Path(diretorio_local)
+        self._banco: Optional[BancoQG] = None
 
-    BUG FIXADO DO V6.1: a versão anterior aplicava (1 - rho) em (0,0) e (1 + rho)
-    em (1,1), que é EXATAMENTE o oposto do paper original. Resultado: empates
-    1x1 inflados, 0x0 esmagados, todas as probs de Under/BTTS distorcidas.
+    # ----------------------------------------------------------------
+    # Banco completo
+    # ----------------------------------------------------------------
+    def carregar_banco(self, força_recarregar: bool = False) -> BancoQG:
+        """Carrega banco da nuvem (JSONBin) + cache local."""
+        if self._banco is not None and not força_recarregar:
+            return self._banco
 
-    A direção correta (Dixon & Coles 1997):
-        (0,0): 1 - lambda*mu*rho      -> AUMENTA prob de 0x0 (rho > 0)
-        (0,1): 1 + lambda*rho         -> DIMINUI prob de 0x1
-        (1,0): 1 + mu*rho             -> DIMINUI prob de 1x0
-        (1,1): 1 - rho                -> DIMINUI prob de 1x1
-        outros: 1
-    """
-    if x == 0 and y == 0:
-        return 1.0 - lam * mu * rho
-    if x == 0 and y == 1:
-        return 1.0 + lam * rho
-    if x == 1 and y == 0:
-        return 1.0 + mu * rho
-    if x == 1 and y == 1:
-        return 1.0 - rho
-    return 1.0
+        # 1. Local (rápido, fallback offline)
+        banco_local = {}
+        arquivo_local = self.dir / ARQUIVO_BANCO_LOCAL
+        if arquivo_local.exists():
+            try:
+                with open(arquivo_local, "r", encoding="utf-8") as f:
+                    banco_local = json.load(f)
+            except Exception as e:
+                log.warning(f"Falha ao ler banco local: {e}")
 
+        # 2. Nuvem (autoritativa para picks/banca)
+        banco_nuvem = self.jsonbin.ler()
 
-def prob_placar(x: int, y: int, lam: float, mu: float, rho: float) -> float:
-    """Probabilidade do placar (x, y) sob Dixon-Coles."""
-    p = poisson.pmf(x, lam) * poisson.pmf(y, mu) * tau_dixon_coles(x, y, lam, mu, rho)
-    return max(p, 1e-12)   # evita log(0) no MLE
+        # 3. Mescla: nuvem manda em picks/banca/depositos/params_ligas; local manda em datas
+        banco = BancoQG()
+        banco.picks = banco_nuvem.get("picks", banco_local.get("picks", []))
+        banco.banca_inicial = float(banco_nuvem.get("banca_inicial", banco_local.get("banca_inicial", 30.0)))
+        banco.depositos = banco_nuvem.get("depositos", banco_local.get("depositos", []))
+        banco.params_ligas = banco_nuvem.get("params_ligas", banco_local.get("params_ligas", {}))
+        banco.datas = banco_local.get("datas", {})                      # cache do dia fica local
+        banco.historico_ligas = banco_local.get("historico_ligas", {}) # xG cache — local apenas
 
+        self._banco = banco
+        return banco
 
-# =========================================================================
-# 3. LIKELIHOOD E CALIBRAÇÃO MLE
-# =========================================================================
+    def salvar_banco(self, banco: Optional[BancoQG] = None) -> None:
+        """Persiste banco em ambos (nuvem + local)."""
+        b = banco or self._banco
+        if b is None:
+            raise RuntimeError("Nenhum banco carregado para salvar")
 
-def _neg_log_likelihood(
-    params: np.ndarray,
-    home_idx: np.ndarray,
-    away_idx: np.ndarray,
-    home_goals: np.ndarray,
-    away_goals: np.ndarray,
-    pesos: np.ndarray,
-    n_times: int,
-) -> float:
-    """
-    Função objetivo do MLE.
+        # Local (append-only merge — nunca sobrescreve dados históricos)
+        self._merge_salvar_local(b)
 
-    params layout:
-        [0 : n_times]            -> alpha_i (ataque)
-        [n_times : 2*n_times]    -> beta_i  (defesa)
-        [2*n_times]              -> gamma   (home advantage)
-        [2*n_times + 1]          -> rho     (D-C tau parameter)
-    """
-    alphas = params[:n_times]
-    betas = params[n_times:2 * n_times]
-    gamma = params[2 * n_times]
-    rho = params[2 * n_times + 1]
-
-    # Penalidades para sair do domínio (alpha, beta > 0; rho em (-0.2, 0.2))
-    if np.any(alphas <= 0) or np.any(betas <= 0) or gamma <= 0:
-        return 1e10
-    if rho <= -0.2 or rho >= 0.2:
-        return 1e10
-
-    lam = alphas[home_idx] * betas[away_idx] * gamma   # gols esperados casa
-    mu = alphas[away_idx] * betas[home_idx]             # gols esperados fora
-
-    # Log-likelihood ponderada de cada partida
-    log_p_home = home_goals * np.log(lam) - lam - np.array([math.lgamma(g + 1) for g in home_goals])
-    log_p_away = away_goals * np.log(mu) - mu - np.array([math.lgamma(g + 1) for g in away_goals])
-
-    # Ajuste tau (só relevante em placares baixos)
-    log_tau = np.zeros(len(home_idx))
-    for i, (x, y) in enumerate(zip(home_goals, away_goals)):
-        log_tau[i] = math.log(max(tau_dixon_coles(int(x), int(y), lam[i], mu[i], rho), 1e-12))
-
-    log_lik = pesos * (log_p_home + log_p_away + log_tau)
-    return -np.sum(log_lik)
-
-
-def calibrar_liga(
-    df_jogos: pd.DataFrame,
-    league_id: int,
-    season: int,
-    xi: float = 0.0019,
-    data_referencia: Optional[dt.datetime] = None,
-    min_aparicoes_time: int = 3,
-    max_times: int = 80,
-    nomes_times: Optional[dict] = None,
-    seasons_incluidas: Optional[list] = None,
-) -> ParametrosLiga:
-    """
-    Calibra parâmetros Dixon-Coles para uma liga via MLE.
-
-    df_jogos colunas esperadas:
-        - home_id, away_id (int)
-        - home_goals, away_goals (int)
-        - date (datetime ou string ISO)
-
-    xi padrão = 0.0019/dia => peso 0.5 em ~365 dias (paper original).
-
-    min_aparicoes_time (padrão=3):
-        Times com menos de N aparições são excluídos do MLE.
-        Crítico para copas nacionais (FA Cup, Copa do Brasil, DFB Pokal, etc.)
-        que têm 300-400 times nas fases preliminares — sem este filtro o SLSQP
-        recebe 800+ parâmetros e trava por horas.
-
-        Times eliminados nas primeiras fases têm ≤ 2 jogos e não oferecem
-        informação estatística relevante para análise das fases principais.
-
-    max_times (padrão=80):
-        Teto absoluto de times no MLE. Acima disso, mantém os N com mais jogos.
-        Protege contra casos extremos (ex: qualificação europeia multilateral).
-    """
-    if data_referencia is None:
-        data_referencia = dt.datetime.now()
-
-    df = df_jogos.copy()
-    df = df.dropna(subset=["home_id", "away_id", "home_goals", "away_goals"])
-    df["home_id"] = df["home_id"].astype(int)
-    df["away_id"] = df["away_id"].astype(int)
-    df["home_goals"] = df["home_goals"].astype(int)
-    df["away_goals"] = df["away_goals"].astype(int)
-
-    # Preserva df completo para raio-x (antes de qualquer filtro de times)
-    df_para_raio_x = df.copy()
-
-    # Identifica times que aparecem na temporada ATUAL (season_year == season).
-    # Isso é usado para post-filtrar o modelo — times rebaixados ficam fora.
-    has_season_col = "season_year" in df.columns
-    if has_season_col:
-        df_atual_mask = df["season_year"] == season
-        times_na_temporada_atual: set = (
-            set(df.loc[df_atual_mask, "home_id"]) |
-            set(df.loc[df_atual_mask, "away_id"])
-        )
-    else:
-        times_na_temporada_atual = set()   # sem coluna → sem filtro (liga europeia)
-
-    # ── FILTRO DE TIMES RAROS (fix do bug FA Cup / Copa do Brasil) ────────
-    # Conta aparições totais (casa + fora) de cada time
-    aparicoes = pd.concat([df["home_id"], df["away_id"]]).value_counts()
-    times_validos = set(aparicoes[aparicoes >= min_aparicoes_time].index)
-
-    # Se o teto max_times for atingido, mantém os N mais frequentes
-    if len(times_validos) > max_times:
-        times_validos = set(aparicoes.nlargest(max_times).index)
-
-    # Remove partidas onde algum dos times foi filtrado
-    n_jogos_antes = len(df)
-    df = df[df["home_id"].isin(times_validos) & df["away_id"].isin(times_validos)]
-    n_jogos_filtrados = n_jogos_antes - len(df)
-
-    if len(df) < 20:
-        raise ValueError(
-            f"Liga {league_id}: após filtrar times com < {min_aparicoes_time} aparições, "
-            f"restaram apenas {len(df)} jogos (eram {n_jogos_antes}). "
-            f"Dados insuficientes para MLE confiável."
-        )
-
-    if n_jogos_filtrados > 0:
-        print(f"[motor.py] Liga {league_id}: {n_jogos_filtrados} jogos de fases iniciais "
-              f"removidos. {len(df)} jogos / {len(times_validos)} times no MLE.")
-
-    # Pesos temporais
-    if "date" in df.columns:
-        df["date"] = pd.to_datetime(df["date"])
-        dias_atras = (data_referencia - df["date"]).dt.days.clip(lower=0)
-        df["peso"] = np.exp(-xi * dias_atras)
-    else:
-        df["peso"] = 1.0
-
-    # Indexação dos times
-    times_unicos = sorted(set(df["home_id"]) | set(df["away_id"]))
-    idx_map = {t: i for i, t in enumerate(times_unicos)}
-    n_times = len(times_unicos)
-
-    if n_times < 4:
-        raise ValueError(f"Liga {league_id} tem apenas {n_times} times após filtro — insuficiente para MLE")
-
-    home_idx = df["home_id"].map(idx_map).to_numpy()
-    away_idx = df["away_id"].map(idx_map).to_numpy()
-    home_goals = df["home_goals"].to_numpy()
-    away_goals = df["away_goals"].to_numpy()
-    pesos = df["peso"].to_numpy()
-
-    # Chute inicial: alpha=1, beta=1, gamma=1.3 (vantagem casa típica), rho=-0.05
-    x0 = np.concatenate([
-        np.ones(n_times),         # alphas
-        np.ones(n_times),         # betas
-        np.array([1.3]),          # gamma
-        np.array([-0.05]),        # rho
-    ])
-
-    # Constraint: média de alphas = 1 (identificabilidade)
-    def constraint_alpha_mean(p):
-        return np.mean(p[:n_times]) - 1.0
-
-    constraints = [{"type": "eq", "fun": constraint_alpha_mean}]
-
-    # Bounds
-    bounds = (
-        [(0.1, 3.0)] * n_times +     # alphas
-        [(0.1, 3.0)] * n_times +     # betas
-        [(0.8, 2.0)] +                # gamma
-        [(-0.2, 0.2)]                 # rho
-    )
-
-    # maxiter proporcional ao tamanho do problema: mais times = menos iterações por parâmetro
-    # Para ligas normais (20 times): 300 iters. Para copas (60 times): ~180 iters.
-    maxiter = max(150, 300 - max(0, (n_times - 20)) * 2)
-
-    result = minimize(
-        _neg_log_likelihood,
-        x0,
-        args=(home_idx, away_idx, home_goals, away_goals, pesos, n_times),
-        method="SLSQP",
-        bounds=bounds,
-        constraints=constraints,
-        options={"maxiter": maxiter, "ftol": 1e-6},
-    )
-
-    if not result.success:
-        print(f"[motor.py] AVISO: MLE não convergiu para liga {league_id}: {result.message}")
-
-    alphas = result.x[:n_times]
-    betas = result.x[n_times:2 * n_times]
-    gamma = float(result.x[2 * n_times])
-    rho = float(result.x[2 * n_times + 1])
-
-    # Conta jogos por time (importante para shrinkage)
-    jogos_por_time = pd.concat([df["home_id"], df["away_id"]]).value_counts().to_dict()
-
-    times_dict = {}
-    for t, i in idx_map.items():
-        times_dict[int(t)] = {
-            "alpha": float(alphas[i]),
-            "beta": float(betas[i]),
-            "n_jogos": int(jogos_por_time.get(t, 0)),
+        # Nuvem (sem `datas` para não estourar quota do JSONBin)
+        nuvem = {
+            "picks": b.picks,
+            "banca_inicial": b.banca_inicial,
+            "depositos": b.depositos,
+            "params_ligas": b.params_ligas,
         }
+        self.jsonbin.escrever(nuvem)
+        self._banco = b
 
-    # ── POST-FILTRO: expulsa times que NÃO aparecem na temporada atual ─────
-    # Ex: Série A 2026 — Sport Recife (38 jogos em 2025, 0 em 2026) → removido
-    #                    Remo (0 em 2025, ≥14 em 2026)               → mantido
-    # Para ligas europeias (sem season_year) this block is a no-op.
-    if has_season_col and times_na_temporada_atual:
-        times_dict = {
-            tid: tv for tid, tv in times_dict.items()
-            if tid in times_na_temporada_atual
+    # ----------------------------------------------------------------
+    # CALIBRAÇÃO (MLE full — sem incremental)
+    # ----------------------------------------------------------------
+    def _merge_salvar_local(self, banco: BancoQG) -> None:
+        """
+        Append-only write do arquivo local.
+
+        Sempre lê o estado atual do disco antes de escrever — garante que nenhum
+        dado histórico seja perdido por reinicializações ou atualizações de código.
+
+        Regras de merge campo a campo:
+        - picks / depositos  : lista maior vence (itens são imutáveis e nunca deletados)
+        - params_ligas/datas : dict update (nova calibração sobrescreve mesma chave,
+                               mas nunca apaga outras ligas)
+        - historico_ligas    : append-only estrito por fixture_id — nunca remove fixtures
+        - banca_inicial      : in-memory é autoritativo (veio da nuvem via carregar_banco)
+        """
+        arquivo = self.dir / ARQUIVO_BANCO_LOCAL
+        disco: dict = {}
+        if arquivo.exists():
+            try:
+                with open(arquivo, "r", encoding="utf-8") as f:
+                    disco = json.load(f)
+            except Exception as e:
+                log.warning(f"Merge local: arquivo corrompido ({e}). Escrevendo do zero.")
+
+        # Picks e depósitos: lista maior vence (itens nunca são deletados)
+        picks_mem   = banco.picks   or []
+        picks_disco = disco.get("picks", [])
+        picks_final = picks_mem if len(picks_mem) >= len(picks_disco) else picks_disco
+
+        dep_mem   = banco.depositos or []
+        dep_disco = disco.get("depositos", [])
+        dep_final = dep_mem if len(dep_mem) >= len(dep_disco) else dep_disco
+
+        # Parâmetros e datas: dict update — nova calibração sobrescreve mesma liga,
+        # mas nunca apaga ligas que estão no disco mas não em memória
+        params_final = dict(disco.get("params_ligas", {}))
+        params_final.update(banco.params_ligas or {})
+
+        datas_final = dict(disco.get("datas", {}))
+        datas_final.update(banco.datas or {})
+
+        # Histórico de ligas: append-only estrito por fixture_id
+        hist_final = dict(disco.get("historico_ligas", {}))
+        for liga_str, liga_nova in (banco.historico_ligas or {}).items():
+            if liga_str not in hist_final:
+                hist_final[liga_str] = liga_nova
+            else:
+                ids_disco = {int(r["fixture_id"]) for r in hist_final[liga_str].get("registros", [])}
+                novos = [
+                    r for r in liga_nova.get("registros", [])
+                    if int(r["fixture_id"]) not in ids_disco
+                ]
+                if novos:
+                    hist_final[liga_str]["registros"].extend(novos)
+                    hist_final[liga_str]["atualizado_em"] = liga_nova.get("atualizado_em", "")
+
+        resultado = {
+            "picks":           picks_final,
+            "banca_inicial":   banco.banca_inicial,
+            "depositos":       dep_final,
+            "params_ligas":    params_final,
+            "datas":           datas_final,
+            "historico_ligas": hist_final,
         }
-
-    media_liga = float((df["home_goals"].sum() + df["away_goals"].sum()) / (2 * len(df)))
-
-    # ── RAIO-X: estatísticas por time (ALL times, incluindo rebaixados) ─────
-    # Permite ao usuário ver exatamente o que entrou e o que foi filtrado.
-    raio_x: dict[int, dict] = {}
-    todos_times_raio_x = set(df_para_raio_x["home_id"]) | set(df_para_raio_x["away_id"])
-
-    for t in sorted(todos_times_raio_x):
-        t = int(t)
-        mask_t = (df_para_raio_x["home_id"] == t) | (df_para_raio_x["away_id"] == t)
-        jogos_t = df_para_raio_x[mask_t]
-
-        if has_season_col and "season_year" in jogos_t.columns:
-            n_atual = int((jogos_t["season_year"] == season).sum())
-            n_hist  = int((jogos_t["season_year"] != season).sum())
-        else:
-            n_atual = len(jogos_t)
-            n_hist  = 0
-
         try:
-            ultimo = str(jogos_t["date"].max())[:10]
-        except Exception:
-            ultimo = "?"
+            with open(arquivo, "w", encoding="utf-8") as f:
+                json.dump(resultado, f, indent=2, default=str)
+        except Exception as e:
+            log.warning(f"Falha ao salvar banco local (merge): {e}")
 
-        raio_x[t] = {
-            "n_atual":            n_atual,
-            "n_historico":        n_hist,
-            "n_total":            len(jogos_t),
-            "ultimo_jogo":        ultimo,
-            "na_temporada_atual": t in times_na_temporada_atual if has_season_col else True,
-            "no_modelo":          t in times_dict,
+    def precisa_recalibrar(self, params_dict: dict) -> bool:
+        """True se params estão velhos OU ausentes."""
+        if not params_dict:
+            return True
+        calibrado_em = params_dict.get("calibrado_em", "")
+        if not calibrado_em:
+            return True
+        try:
+            data_calib = dt.datetime.fromisoformat(calibrado_em)
+            dias = (dt.datetime.now() - data_calib).days
+            return dias >= INTERVALO_RECALIBRACAO_DIAS
+        except Exception:
+            return True
+
+    def _obter_historico_com_delta_xg(
+        self,
+        league_id: int,
+        season_principal: int,
+        season_anterior: Optional[int] = None,
+    ) -> tuple[pd.DataFrame, dict]:
+        """
+        Delta Fetch: busca xG apenas para fixtures novos, usando cache local.
+
+        Fluxo por season:
+        1. GET /fixtures (barato — só gols) para obter a lista atual de IDs.
+        2. Compara IDs com banco.historico_ligas[liga] → identifica novidades.
+        3. GET /fixtures/statistics apenas para os IDs ausentes do cache.
+        4. Mescla novos registros no cache e persiste só no arquivo local.
+        5. Retorna DataFrame de todas as seasons solicitadas pronto para calibrar_liga().
+
+        Custo típico: 1 crédito (lista) + N_novos créditos (xG) por season.
+        Bootstrap (primeiro run): N_total créditos — dividir em 2 dias manualmente.
+        """
+        banco = self.carregar_banco()
+        chave = str(league_id)
+        cache_liga = banco.historico_ligas.get(chave, {"registros": [], "atualizado_em": ""})
+
+        ids_cache: set[int] = {int(r["fixture_id"]) for r in cache_liga["registros"]}
+
+        nomes_global: dict[int, str] = {}
+        houve_novidades = False
+        seasons = [season_anterior, season_principal] if season_anterior is not None else [season_principal]
+
+        for season in seasons:
+            # Busca lista de fixtures sem xG (apenas gols reais — barato)
+            try:
+                df_api, nomes = self.api.buscar_historico_liga(league_id, season, com_xg=False)
+            except Exception as e:
+                log.warning(f"Liga {league_id} s{season}: falha ao buscar lista de fixtures: {e}")
+                continue
+
+            nomes_global.update(nomes)
+
+            if df_api.empty:
+                continue
+
+            df_novos = df_api[~df_api["fixture_id"].isin(ids_cache)].copy()
+
+            if df_novos.empty:
+                log.info(f"Liga {league_id} s{season}: sem fixtures novos (cache 100%).")
+                continue
+
+            n_novos = len(df_novos)
+            log.info(f"Liga {league_id} s{season}: {n_novos} fixtures novos — buscando xG.")
+
+            # Verifica créditos antes do loop de xG
+            custo_xg = n_novos * CUSTO_ESTIMADO_XG_FIXTURE
+            xg_home_list: list = []
+            xg_away_list: list = []
+            try:
+                self.api.trava_saldo(custo_xg, saldo_minimo=SALDO_MIN_PARA_CALIBRACAO)
+                for _, row in df_novos.iterrows():
+                    xg_h, xg_a = self.api.buscar_xg_fixture(
+                        int(row["fixture_id"]), int(row["home_id"]), int(row["away_id"])
+                    )
+                    xg_home_list.append(xg_h)
+                    xg_away_list.append(xg_a)
+            except CreditosInsuficientesError as e:
+                log.warning(
+                    f"Liga {league_id} s{season}: créditos insuficientes para xG "
+                    f"({custo_xg} necessários — {e}). Fixtures entram no cache sem xG."
+                )
+                xg_home_list = [None] * n_novos
+                xg_away_list = [None] * n_novos
+
+            df_novos = df_novos.copy()
+            df_novos["xg_home"] = xg_home_list
+            df_novos["xg_away"] = xg_away_list
+            df_novos["season_year"] = season
+
+            novos = df_novos.to_dict("records")
+            cache_liga["registros"].extend(novos)
+            ids_cache.update(int(r["fixture_id"]) for r in novos)
+            houve_novidades = True
+
+        # Persiste cache no arquivo local via append-only merge (nunca vai pro JSONBin)
+        if houve_novidades:
+            cache_liga["atualizado_em"] = dt.datetime.now().isoformat()
+            banco.historico_ligas[chave] = cache_liga
+            self._merge_salvar_local(banco)
+
+        # Monta DataFrame completo filtrado pelas seasons solicitadas
+        todos = cache_liga["registros"]
+        if not todos:
+            return pd.DataFrame(columns=["home_id", "away_id", "home_goals", "away_goals", "date"]), nomes_global
+
+        df_full = pd.DataFrame(todos)
+        df_full["date"] = pd.to_datetime(df_full["date"])
+
+        if "season_year" in df_full.columns:
+            df_full = df_full[df_full["season_year"].isin(seasons)].reset_index(drop=True)
+
+        n_xg = int(df_full["xg_home"].notna().sum()) if "xg_home" in df_full.columns else 0
+        pct = n_xg / len(df_full) * 100 if len(df_full) > 0 else 0.0
+        log.info(f"Liga {league_id}: cache final — {len(df_full)} jogos, xG em {n_xg} ({pct:.1f}%).")
+
+        return df_full, nomes_global
+
+    def obter_params_liga(
+        self,
+        league_id: int,
+        season: int,
+        forcar_recalibracao: bool = False,
+    ) -> ParametrosLiga:
+        """
+        Retorna parâmetros calibrados de uma liga (MLE completo).
+        - Se cache fresco (< INTERVALO_RECALIBRACAO_DIAS): retorna do cache
+        - Senão (ou forcar_recalibracao=True): busca histórico na API + MLE + salva
+        """
+        banco = self.carregar_banco()
+        chave = str(league_id)
+        params_cache = banco.params_ligas.get(chave, {})
+
+        if not forcar_recalibracao and not self.precisa_recalibrar(params_cache):
+            try:
+                return ParametrosLiga.from_dict(params_cache)
+            except Exception as e:
+                log.warning(f"Cache inválido para liga {league_id}: {e}. Recalibrando.")
+
+        # ── Determina quais temporadas buscar ─────────────────────────────────
+        # Ligas que usam ano-calendário (BR, Americas, JP): combina ano atual + ano anterior.
+        # Isso garante que Brasileirão 2026 (em andamento) + 2025 (histórico completo)
+        # entrem juntos no MLE. O decay temporal (xi) dá peso maior aos jogos de 2026.
+        #
+        # Ligas europeias (PL, La Liga…): usam season fornecida (ex: 2025 = temporada 2025-26).
+        ano_atual = dt.date.today().year
+        usar_ano_atual = league_id in LIGAS_TEMPORADA_ANO_ATUAL
+
+        if usar_ano_atual:
+            season_principal = ano_atual
+            season_anterior  = ano_atual - 1
+            seasons_label    = [season_anterior, season_principal]
+            log.info(f"Liga {league_id} ({LIGAS_SUPORTADAS.get(league_id,'?')}): "
+                     f"buscando temporadas {season_anterior} + {season_principal} (ano-calendário)")
+        else:
+            season_principal = season
+            season_anterior  = None
+            seasons_label    = [season_principal]
+            log.info(f"Calibrando liga {league_id} (season {season_principal}) via MLE...")
+
+        # Delta Fetch: busca xG apenas para fixtures novos (cache local) — Dossiê v8 Seção 3.1
+        df, nomes = self._obter_historico_com_delta_xg(league_id, season_principal, season_anterior)
+        if len(df) < 20:
+            raise ValueError(
+                f"Liga {league_id} season {season_principal} tem apenas {len(df)} jogos finalizados. "
+                f"Mínimo: 20. Tente aguardar mais rodadas."
+            )
+
+        # MLE em thread separada com timeout (proteção contra copas com 400+ times)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                calibrar_liga, df, league_id, season_principal,
+                nomes_times=nomes, seasons_incluidas=seasons_label,
+                peso_xg=PESO_XG_PRODUCAO,
+            )
+            try:
+                params = future.result(timeout=TIMEOUT_CALIBRACAO_SEGUNDOS)
+            except FuturesTimeoutError:
+                raise TimeoutError(
+                    f"Liga {league_id} ({LIGAS_SUPORTADAS.get(league_id, '?')}): "
+                    f"MLE excedeu {TIMEOUT_CALIBRACAO_SEGUNDOS}s. "
+                    f"Possível: copa com muitas fases ou season com poucos jogos finalizados."
+                )
+
+        banco.params_ligas[chave] = params.to_dict()
+        self.salvar_banco(banco)
+        log.info(f"Liga {league_id} calibrada: {params.n_jogos_calibracao} jogos, "
+                 f"seasons={seasons_label}, LL={params.log_likelihood:.2f}")
+        return params
+
+    def calcular_custo_delta(
+        self,
+        ligas: Optional[list[int]] = None,
+        season: Optional[int] = None,
+    ) -> dict:
+        """
+        Preview de custo do Delta Fetch SEM fazer download de xG.
+
+        Para cada liga, busca apenas a lista de fixtures finalizados (1 crédito/chamada)
+        e compara os IDs com o cache local. Retorna o delta: quantos fixtures faltam
+        e quanto custará o download de xG.
+
+        Args:
+            ligas:  lista de league_ids (default: todas LIGAS_SUPORTADAS)
+            season: season para ligas europeias (default: ano_atual - 1)
+
+        Returns:
+            {
+                "n_novos_total":            int,
+                "custo_estimado_creditos":  int,   # n_novos × CUSTO_ESTIMADO_XG_FIXTURE
+                "ligas": [
+                    {
+                        "league_id":    int,
+                        "nome":         str,
+                        "n_novos_liga": int,
+                        "seasons": [
+                            {"season": int, "n_api": int, "n_cache": int,
+                             "n_novos": int, "erro": str|None}
+                        ],
+                    }
+                ],
+            }
+        """
+        banco = self.carregar_banco()
+        ano_atual = dt.date.today().year
+        season_europeia = season or (ano_atual - 1)
+
+        ligas_alvo = ligas or list(LIGAS_SUPORTADAS.keys())
+        resultado_ligas = []
+        n_novos_total = 0
+
+        for league_id in ligas_alvo:
+            chave = str(league_id)
+            cache_liga = banco.historico_ligas.get(chave, {"registros": []})
+            ids_cache: set[int] = {int(r["fixture_id"]) for r in cache_liga.get("registros", [])}
+
+            usar_ano_atual = league_id in LIGAS_TEMPORADA_ANO_ATUAL
+            if usar_ano_atual:
+                seasons = [ano_atual - 1, ano_atual]
+            else:
+                seasons = [season_europeia]
+
+            detalhes_seasons = []
+            n_novos_liga = 0
+
+            for s in seasons:
+                try:
+                    df_api, _ = self.api.buscar_historico_liga(league_id, s, com_xg=False)
+                    ids_api = set(df_api["fixture_id"].astype(int).tolist()) if not df_api.empty else set()
+                    novos_ids = ids_api - ids_cache
+                    n_novos = len(novos_ids)
+                    detalhes_seasons.append({
+                        "season":  s,
+                        "n_api":   len(df_api),
+                        "n_cache": len(df_api) - n_novos,
+                        "n_novos": n_novos,
+                        "erro":    None,
+                    })
+                    n_novos_liga += n_novos
+                except Exception as e:
+                    detalhes_seasons.append({
+                        "season":  s,
+                        "n_api":   0,
+                        "n_cache": 0,
+                        "n_novos": 0,
+                        "erro":    str(e),
+                    })
+
+            resultado_ligas.append({
+                "league_id":    league_id,
+                "nome":         LIGAS_SUPORTADAS.get(league_id, f"Liga {league_id}"),
+                "n_novos_liga": n_novos_liga,
+                "seasons":      detalhes_seasons,
+            })
+            n_novos_total += n_novos_liga
+
+        return {
+            "n_novos_total":           n_novos_total,
+            "custo_estimado_creditos": n_novos_total * CUSTO_ESTIMADO_XG_FIXTURE,
+            "ligas":                   resultado_ligas,
         }
 
-    # Nomes: só os times que passaram no filtro final
-    nomes_filtrados: dict = {}
-    if nomes_times:
-        for tid in times_dict:
-            if tid in nomes_times:
-                nomes_filtrados[tid] = nomes_times[tid]
+    def calibrar_liga_avulsa(self, league_id: int, season: int) -> ParametrosLiga:
+        """
+        Fallback: calibra qualquer liga (mesmo fora de LIGAS_SUPORTADAS) sob demanda.
+        Usado pelo botão 'Forçar Busca' na UI quando um jogo tem liga desconhecida.
+        Limiar menor (20 jogos) para aceitar copas em fase inicial.
+        """
+        return self.obter_params_liga(league_id, season, forcar_recalibracao=True)
 
-    return ParametrosLiga(
-        league_id=league_id,
-        season=season,
-        times=times_dict,
-        home_advantage=gamma,
-        rho=rho,
-        xi=xi,
-        media_liga_gols=media_liga,
-        n_jogos_calibracao=len(df),
-        log_likelihood=-float(result.fun),
-        nomes_times=nomes_filtrados,
-        seasons_incluidas=seasons_incluidas or [season],
-        raio_x_times=raio_x,
+    # ----------------------------------------------------------------
+    # Wrappers de conveniência
+    # ----------------------------------------------------------------
+    def saldo_creditos(self) -> int:
+        return self.api.saldo()
+
+    def buscar_agenda_dia(self, data_str: str) -> list[dict]:
+        return self.api.buscar_agenda_dia(data_str)
+
+    def buscar_odds_jogo(self, fixture_id: int) -> dict:
+        return self.api.buscar_odds_jogo(fixture_id)
+
+
+# =========================================================================
+# 6. FACTORY (para uso no Streamlit ou script)
+# =========================================================================
+
+def criar_dados_manager_de_secrets(secrets_dict: dict, diretorio_local: str = ".") -> DadosManager:
+    """
+    Constrói DadosManager a partir de um dict tipo st.secrets.
+
+    Espera as chaves:
+        - API_KEY_PRO (ou API_SPORTS_KEY)
+        - JSONBIN_KEY
+        - JSONBIN_BIN_ID
+    """
+    api_key = secrets_dict.get("API_KEY_PRO") or secrets_dict.get("API_SPORTS_KEY")
+    jsonbin_key = secrets_dict.get("JSONBIN_KEY")
+    jsonbin_id = secrets_dict.get("JSONBIN_BIN_ID")
+
+    if not api_key:
+        raise ValueError("Falta API_KEY_PRO (ou API_SPORTS_KEY) em secrets")
+    if not jsonbin_key or not jsonbin_id:
+        raise ValueError("Faltam JSONBIN_KEY e/ou JSONBIN_BIN_ID em secrets")
+
+    return DadosManager(api_key, jsonbin_key, jsonbin_id, diretorio_local)
+
+
+def criar_dados_manager_de_env(diretorio_local: str = ".") -> DadosManager:
+    """Constrói DadosManager a partir de variáveis de ambiente (para testes CLI)."""
+    return DadosManager(
+        api_key=os.environ.get("API_SPORTS_KEY", ""),
+        jsonbin_key=os.environ.get("JSONBIN_KEY", ""),
+        jsonbin_id=os.environ.get("JSONBIN_BIN_ID", ""),
+        diretorio_local=diretorio_local,
     )
 
 
 # =========================================================================
-# 4. SHRINKAGE PARA MÉDIA DA LIGA
+# 7. SELF-TEST (sem chamadas reais à API)
 # =========================================================================
 
-def aplicar_shrinkage(
-    alpha: float,
-    beta: float,
-    n_jogos: int,
-    n_minimo: int = 10,
-    forca_shrinkage: float = 6.0,
-) -> tuple[float, float]:
-    """
-    Shrinkage Bayesiano para média da liga.
-
-    Times com poucos jogos têm α/β puxados para 1.0 (média).
-    Times com muitos jogos mantêm os valores estimados.
-
-    Fórmula: α_ajustado = (n * α + forca_shrinkage * 1.0) / (n + forca_shrinkage)
-
-    Isso resolve o bug "xG fantasma" do V6.1: time com 5 jogos sortudos
-    (defesa virtualmente perfeita) deixa de gerar projeções absurdas.
-    """
-    if n_jogos < n_minimo:
-        # Shrinkage agressivo para times com pouco histórico
-        peso_amostra = n_jogos / (n_jogos + forca_shrinkage * 2)
-    else:
-        peso_amostra = n_jogos / (n_jogos + forca_shrinkage)
-
-    peso_prior = 1.0 - peso_amostra
-    alpha_ajustado = peso_amostra * alpha + peso_prior * 1.0
-    beta_ajustado = peso_amostra * beta + peso_prior * 1.0
-    return alpha_ajustado, beta_ajustado
-
-
-# =========================================================================
-# 5. ATUALIZAÇÃO INCREMENTAL (após calibração principal)
-# =========================================================================
-
-def atualizar_incremental(
-    params: ParametrosLiga,
-    home_id: int,
-    away_id: int,
-    home_goals: int,
-    away_goals: int,
-    taxa_aprendizado: float = 0.05,
-) -> ParametrosLiga:
-    """
-    Online gradient update para um único jogo novo.
-
-    Atualiza α/β dos dois times envolvidos via gradiente do log-likelihood.
-    Útil entre calibrações semanais completas — barato e mantém parâmetros vivos.
-
-    NÃO altera gamma, rho ou xi (esses precisam de re-MLE completo).
-    """
-    if home_id not in params.times or away_id not in params.times:
-        return params   # time novo precisa de calibração completa
-
-    th = params.times[home_id]
-    ta = params.times[away_id]
-
-    lam = th["alpha"] * ta["beta"] * params.home_advantage
-    mu = ta["alpha"] * th["beta"]
-
-    # Gradientes de log P(x,y) com respeito a α/β (ignora τ — efeito 2ª ordem)
-    # d log Pois(x; lambda) / d lambda = x/lambda - 1
-    d_log_p_home = home_goals / lam - 1.0
-    d_log_p_away = away_goals / mu - 1.0
-
-    # d lambda / d alpha_home = beta_away * gamma
-    # d mu     / d alpha_away = beta_home
-    # d lambda / d beta_away  = alpha_home * gamma
-    # d mu     / d beta_home  = alpha_away
-
-    grad_alpha_home = d_log_p_home * ta["beta"] * params.home_advantage
-    grad_alpha_away = d_log_p_away * th["beta"]
-    grad_beta_home = d_log_p_away * ta["alpha"]
-    grad_beta_away = d_log_p_home * th["alpha"] * params.home_advantage
-
-    novo_alpha_home = np.clip(th["alpha"] + taxa_aprendizado * grad_alpha_home, 0.1, 3.0)
-    novo_alpha_away = np.clip(ta["alpha"] + taxa_aprendizado * grad_alpha_away, 0.1, 3.0)
-    novo_beta_home = np.clip(th["beta"] + taxa_aprendizado * grad_beta_home, 0.1, 3.0)
-    novo_beta_away = np.clip(ta["beta"] + taxa_aprendizado * grad_beta_away, 0.1, 3.0)
-
-    params.times[home_id] = {
-        "alpha": float(novo_alpha_home),
-        "beta": float(novo_beta_home),
-        "n_jogos": th["n_jogos"] + 1,
-    }
-    params.times[away_id] = {
-        "alpha": float(novo_alpha_away),
-        "beta": float(novo_beta_away),
-        "n_jogos": ta["n_jogos"] + 1,
-    }
-    return params
-
-
-# =========================================================================
-# 6. MATRIZ DE PLACARES E PREVISÃO
-# =========================================================================
-
-def matriz_placar(
-    lam: float,
-    mu: float,
-    rho: float,
-    max_gols: int = 10,
-) -> np.ndarray:
-    """
-    Retorna matriz [max_gols+1, max_gols+1] de P(home=x, away=y) sob D-C.
-    Normalizada para somar 1 (truncamento corrigido).
-    """
-    n = max_gols + 1
-    m = np.zeros((n, n))
-    for x in range(n):
-        for y in range(n):
-            m[x, y] = prob_placar(x, y, lam, mu, rho)
-    return m / m.sum()
-
-
-def prever_jogo(
-    params: ParametrosLiga,
-    home_id: int,
-    away_id: int,
-    aplicar_shrink: bool = True,
-    cobertura_minima: int = 10,
-) -> dict:
-    """
-    Calcula todas as probabilidades de mercados para um jogo.
-
-    Retorna dict com:
-        - lambda, mu (gols esperados)
-        - matriz: np.ndarray 11x11
-        - mercados: dict {nome_mercado: prob_em_porcentagem}
-        - flags: lista de anomalias detectadas
-        - cobertura_ok: True/False (se os dois times têm >= cobertura_minima jogos)
-    """
-    flags = []
-
-    if home_id not in params.times:
-        return {"erro": f"Time casa (id={home_id}) não está nos parâmetros da liga", "flags": ["TIME_DESCONHECIDO"]}
-    if away_id not in params.times:
-        return {"erro": f"Time fora (id={away_id}) não está nos parâmetros da liga", "flags": ["TIME_DESCONHECIDO"]}
-
-    th = params.times[home_id]
-    ta = params.times[away_id]
-
-    # Cobertura
-    n_h, n_a = th["n_jogos"], ta["n_jogos"]
-    cobertura_ok = n_h >= cobertura_minima and n_a >= cobertura_minima
-    if not cobertura_ok:
-        flags.append(f"COBERTURA_BAIXA(casa={n_h}, fora={n_a})")
-
-    # Shrinkage
-    if aplicar_shrink:
-        alpha_h, beta_h = aplicar_shrinkage(th["alpha"], th["beta"], n_h)
-        alpha_a, beta_a = aplicar_shrinkage(ta["alpha"], ta["beta"], n_a)
-    else:
-        alpha_h, beta_h = th["alpha"], th["beta"]
-        alpha_a, beta_a = ta["alpha"], ta["beta"]
-
-    lam = alpha_h * beta_a * params.home_advantage
-    mu = alpha_a * beta_h
-
-    # Sanity checks de gols esperados
-    xg_total = lam + mu
-    if xg_total < 0.8:
-        flags.append(f"XG_TOTAL_BAIXO({xg_total:.2f})")
-    if xg_total > 5.5:
-        flags.append(f"XG_TOTAL_ALTO({xg_total:.2f})")
-
-    M = matriz_placar(lam, mu, params.rho, max_gols=10)
-    mercados = derivar_mercados(M, lam, mu)
-
-    return {
-        "home_id": home_id,
-        "away_id": away_id,
-        "lambda": float(lam),
-        "mu": float(mu),
-        "xg_total": float(xg_total),
-        "rho": params.rho,
-        "matriz": M,
-        "mercados": mercados,
-        "cobertura_ok": cobertura_ok,
-        "n_jogos_casa": n_h,
-        "n_jogos_fora": n_a,
-        "flags": flags,
-    }
-
-
-# =========================================================================
-# 7. DERIVAÇÃO DE MERCADOS A PARTIR DA MATRIZ
-# =========================================================================
-
-def derivar_mercados(M: np.ndarray, lam: float, mu: float) -> dict:
-    """
-    A partir da matriz placar normalizada, calcula probs (em %) de todos os
-    mercados ampliados.
-
-    Vantagem: mercados derivados são INTERNAMENTE COERENTES (somam 1 onde
-    devem somar 1) — fim da incoerência V6.1 onde Over + Under não fechavam.
-    """
-    n = M.shape[0]
-
-    # 1X2
-    p_home = float(np.tril(M, -1).sum())
-    p_draw = float(np.trace(M))
-    p_away = float(np.triu(M, 1).sum())
-
-    # Dupla Chance
-    p_1x = p_home + p_draw
-    p_x2 = p_draw + p_away
-    p_12 = p_home + p_away
-
-    # BTTS
-    p_btts_yes = float(M[1:, 1:].sum())
-    p_btts_no = 1.0 - p_btts_yes
-
-    # Totais (Over/Under N.5)
-    soma_gols = np.add.outer(np.arange(n), np.arange(n))   # matriz com gols totais
-    overunder = {}
-    for linha in [0.5, 1.5, 2.5, 3.5, 4.5]:
-        overunder[f"OVER_{int(linha*10):02d}"] = float(M[soma_gols > linha].sum())
-        overunder[f"UNDER_{int(linha*10):02d}"] = float(M[soma_gols < linha].sum())
-
-    # Handicap Asiático (formato europeu — sem push split, simplificado)
-    # AH casa -0.5: casa vence por 1+. AH casa -1: casa vence por 2+, empate vira push.
-    diff = np.subtract.outer(np.arange(n), np.arange(n))   # home - away
-    ah = {}
-    # -0.5 (casa precisa vencer)
-    ah["AH_CASA_-05"] = float(M[diff >= 1].sum())
-    ah["AH_FORA_+05"] = float(M[diff <= 0].sum())
-    # -1.0 (casa precisa vencer por 2+, diff==1 é push)
-    p_casa_2plus = float(M[diff >= 2].sum())
-    p_push_1 = float(M[diff == 1].sum())
-    ah["AH_CASA_-10"] = p_casa_2plus / (1.0 - p_push_1) if p_push_1 < 0.999 else 0.0
-    ah["AH_FORA_+10"] = float(M[diff <= 0].sum()) / (1.0 - p_push_1) if p_push_1 < 0.999 else 0.0
-    # -1.5
-    ah["AH_CASA_-15"] = float(M[diff >= 2].sum())
-    ah["AH_FORA_+15"] = float(M[diff <= 1].sum())
-    # +0.5 (fora vence ou empata)
-    # já calculado acima como AH_FORA_+05
-    # +1.0
-    p_fora_ou_empate_amplo = float(M[diff <= 0].sum())
-    ah["AH_CASA_+10"] = (p_fora_ou_empate_amplo + float(M[diff == 1].sum())) / (1.0 - p_push_1) if p_push_1 < 0.999 else 0.0
-    # +1.5
-    ah["AH_CASA_+15"] = float(M[diff <= 1].sum())
-
-    # Placar Exato top-N (retorna top 10 placares mais prováveis)
-    placares = []
-    for x in range(n):
-        for y in range(n):
-            placares.append(((x, y), float(M[x, y])))
-    placares.sort(key=lambda z: z[1], reverse=True)
-    top_placares = {f"PE_{p[0][0]}-{p[0][1]}": p[1] * 100 for p in placares[:10]}
-
-    # Monta dict final em PORCENTAGEM (consistente com convenção do app)
-    mercados = {
-        "HOME": p_home * 100,
-        "DRAW": p_draw * 100,
-        "AWAY": p_away * 100,
-        "1X": p_1x * 100,
-        "X2": p_x2 * 100,
-        "12": p_12 * 100,
-        "BTTS_YES": p_btts_yes * 100,
-        "BTTS_NO": p_btts_no * 100,
-    }
-    for k, v in overunder.items():
-        mercados[k] = v * 100
-    for k, v in ah.items():
-        mercados[k] = v * 100
-    mercados.update(top_placares)
-
-    return mercados
-
-
-# =========================================================================
-# 8. DETECTOR DE ANOMALIAS (vs mercado)
-# =========================================================================
-
-def comparar_com_mercado(
-    prob_modelo_pct: float,
-    odd_mercado: float,
-    margem_bookmaker: float = 1.05,
-    limite_divergencia_pp: float = 20.0,
-) -> dict:
-    """
-    Compara probabilidade do modelo com probabilidade implícita do mercado.
-
-    Detecta anomalias do tipo "modelo diz 80%, mercado diz 51%" (bug clássico
-    do V6.1).
-
-    Retorna:
-        - prob_mercado_pct: prob implícita ajustada pela margem
-        - divergencia_pp: pontos percentuais de diferença
-        - ev_pct: valor esperado em %
-        - kelly_fracao: fração de Kelly (0.0 a 1.0)
-        - anomalia: True se divergência > limite_divergencia_pp
-        - flag_aprovado: True se não houver anomalia E EV > 3%
-    """
-    if odd_mercado <= 1.0:
-        return {"erro": "Odd inválida", "anomalia": True, "flag_aprovado": False}
-
-    prob_implicita = 100.0 / odd_mercado
-    prob_mercado_pct = prob_implicita / margem_bookmaker   # remove vig
-
-    divergencia = prob_modelo_pct - prob_mercado_pct
-    ev_pct = (prob_modelo_pct / 100.0 * odd_mercado - 1.0) * 100.0
-
-    # Kelly Critério
-    p = prob_modelo_pct / 100.0
-    b = odd_mercado - 1.0
-    if b > 0:
-        kelly_puro = (b * p - (1 - p)) / b
-        kelly_fracao = max(0.0, kelly_puro)
-    else:
-        kelly_fracao = 0.0
-
-    anomalia = abs(divergencia) > limite_divergencia_pp
-    flag_aprovado = (not anomalia) and ev_pct > 3.0 and odd_mercado >= 1.50
-
-    return {
-        "prob_modelo_pct": prob_modelo_pct,
-        "prob_mercado_pct": prob_mercado_pct,
-        "divergencia_pp": divergencia,
-        "ev_pct": ev_pct,
-        "kelly_fracao": kelly_fracao,
-        "anomalia": anomalia,
-        "flag_aprovado": flag_aprovado,
-    }
-
-
-# =========================================================================
-# 9. SERIALIZAÇÃO PARA CACHE (JSONBin / arquivo local)
-# =========================================================================
-
-def salvar_params_json(params: ParametrosLiga, caminho: str) -> None:
-    """Salva ParametrosLiga em arquivo JSON."""
-    with open(caminho, "w", encoding="utf-8") as f:
-        json.dump(params.to_dict(), f, indent=2)
-
-
-def carregar_params_json(caminho: str) -> ParametrosLiga:
-    """Carrega ParametrosLiga de arquivo JSON."""
-    with open(caminho, "r", encoding="utf-8") as f:
-        return ParametrosLiga.from_dict(json.load(f))
-
-
-# =========================================================================
-# 10. SELF-TEST (rodar com: python motor.py)
-# =========================================================================
-
-def _gerar_liga_sintetica(n_times: int = 12, n_rodadas: int = 24, seed: int = 42) -> tuple[pd.DataFrame, dict]:
-    """Gera uma liga sintética com α/β/γ CONHECIDOS para validar o MLE."""
-    rng = np.random.default_rng(seed)
-    alphas_reais = rng.uniform(0.6, 1.5, n_times)
-    alphas_reais = alphas_reais / alphas_reais.mean()   # normaliza pra média 1
-    betas_reais = rng.uniform(0.7, 1.4, n_times)
-    gamma_real = 1.35
-    rho_real = -0.08
-
-    jogos = []
-    data_base = dt.datetime.now() - dt.timedelta(days=n_rodadas * 7)
-    for rodada in range(n_rodadas):
-        # cada time joga 1x por rodada (turno único)
-        ordem = rng.permutation(n_times)
-        for k in range(0, n_times, 2):
-            h, a = int(ordem[k]), int(ordem[k + 1])
-            lam = alphas_reais[h] * betas_reais[a] * gamma_real
-            mu = alphas_reais[a] * betas_reais[h]
-            # Amostragem aproximada (ignora tau para simplicidade da geração)
-            hg = rng.poisson(lam)
-            ag = rng.poisson(mu)
-            jogos.append({
-                "home_id": h,
-                "away_id": a,
-                "home_goals": int(hg),
-                "away_goals": int(ag),
-                "date": data_base + dt.timedelta(days=rodada * 7),
-            })
-
-    return pd.DataFrame(jogos), {
-        "alphas": alphas_reais,
-        "betas": betas_reais,
-        "gamma": gamma_real,
-        "rho": rho_real,
-    }
-
-
-def _self_test() -> None:
+def _self_test_offline() -> None:
+    """Testes que NÃO consomem créditos da API."""
     print("=" * 70)
-    print("MOTOR V2 - SELF TEST")
+    print("DADOS.PY - SELF TEST OFFLINE")
     print("=" * 70)
 
-    # Teste 1: tau D-C na direção correta
-    print("\n[TESTE 1] Ajuste tau Dixon-Coles na direção correta")
-    rho_pos = 0.10
-    t00 = tau_dixon_coles(0, 0, 1.2, 1.0, rho_pos)
-    t11 = tau_dixon_coles(1, 1, 1.2, 1.0, rho_pos)
-    t01 = tau_dixon_coles(0, 1, 1.2, 1.0, rho_pos)
-    t10 = tau_dixon_coles(1, 0, 1.2, 1.0, rho_pos)
-    print(f"  tau(0,0) = {t00:.4f}  (deve ser < 1 se rho>0: {t00 < 1})")
-    print(f"  tau(1,1) = {t11:.4f}  (deve ser < 1 se rho>0: {t11 < 1})")
-    print(f"  tau(0,1) = {t01:.4f}  (deve ser > 1 se rho>0: {t01 > 1})")
-    print(f"  tau(1,0) = {t10:.4f}  (deve ser > 1 se rho>0: {t10 > 1})")
-    # Para rho NEGATIVO (caso típico no futebol), inverte: 0x0 e 1x1 ficam INFLADOS
-    rho_neg = -0.10
-    assert tau_dixon_coles(0, 0, 1.2, 1.0, rho_neg) > 1.0, "tau(0,0) deveria > 1 com rho negativo"
-    assert tau_dixon_coles(1, 1, 1.2, 1.0, rho_neg) > 1.0, "tau(1,1) deveria > 1 com rho negativo"
-    print("  OK: direção do ajuste D-C está correta (oposta ao V6.1)")
+    # Teste 1: BancoQG serializa/deserializa
+    print("\n[TESTE 1] BancoQG round-trip")
+    b1 = BancoQG(picks=[{"jogo": "A v B", "odd": 1.95}], banca_inicial=29.0)
+    b1.params_ligas["39"] = {"league_id": 39, "season": 2025, "times": {"10": {"alpha": 1.1, "beta": 0.9, "n_jogos": 20}},
+                              "home_advantage": 1.3, "rho": -0.05, "xi": 0.0019, "media_liga_gols": 2.7,
+                              "calibrado_em": "2026-05-10T10:00:00", "n_jogos_calibracao": 200, "log_likelihood": -1500.0}
+    d = b1.to_dict()
+    b2 = BancoQG.from_dict(d)
+    assert b2.picks == b1.picks
+    assert b2.banca_inicial == 29.0
+    assert "39" in b2.params_ligas
+    print("  OK: BancoQG serializa/deserializa corretamente")
 
-    # Teste 2: matriz de placares normaliza
-    print("\n[TESTE 2] Matriz de placares soma 1")
-    M = matriz_placar(1.4, 1.1, -0.08, max_gols=10)
-    soma = M.sum()
-    print(f"  Soma da matriz = {soma:.6f} (deve ser 1.000000)")
-    assert abs(soma - 1.0) < 1e-9, "Matriz não normalizada"
-    print("  OK")
+    # Teste 2: trava de saldo
+    print("\n[TESTE 2] Trava de saldo")
+    class _ApiMock(ApiSportsClient):
+        def __init__(self, saldo_fake):
+            self._fake = saldo_fake
+        def saldo(self, cache_segundos=30):
+            return self._fake
 
-    # Teste 3: mercados derivados são coerentes
-    print("\n[TESTE 3] Mercados derivados internamente coerentes")
-    merc = derivar_mercados(M, 1.4, 1.1)
-    s_1x2 = merc["HOME"] + merc["DRAW"] + merc["AWAY"]
-    s_ou25 = merc["OVER_25"] + merc["UNDER_25"]
-    s_btts = merc["BTTS_YES"] + merc["BTTS_NO"]
-    print(f"  HOME+DRAW+AWAY = {s_1x2:.4f}% (deve ser 100)")
-    print(f"  OVER_25+UNDER_25 = {s_ou25:.4f}% (deve ser 100)")
-    print(f"  BTTS_YES+BTTS_NO = {s_btts:.4f}% (deve ser 100)")
-    assert abs(s_1x2 - 100) < 1e-6
-    assert abs(s_ou25 - 100) < 1e-6
-    assert abs(s_btts - 100) < 1e-6
-    print("  OK: mercados são internamente coerentes")
+    api_mock_baixo = _ApiMock(30)
+    try:
+        api_mock_baixo.trava_saldo(custo_estimado=10)
+        assert False, "Trava deveria ter disparado"
+    except CreditosInsuficientesError as e:
+        print(f"  OK: bloqueou com saldo 30 (msg: {str(e)[:60]}...)")
 
-    # Teste 4: MLE recupera parâmetros conhecidos em liga sintética
-    print("\n[TESTE 4] MLE recupera parâmetros de liga sintética")
-    df, reais = _gerar_liga_sintetica(n_times=12, n_rodadas=30, seed=42)
-    print(f"  Gerada liga sintética: {len(df)} jogos, {df['home_id'].nunique()} times")
-    print(f"  Calibrando... (pode levar alguns segundos)")
-    params = calibrar_liga(df, league_id=9999, season=2026)
-    print(f"  Convergiu. Log-likelihood = {params.log_likelihood:.2f}")
-    print(f"  gamma estimado = {params.home_advantage:.3f}  (real = {reais['gamma']:.3f})")
-    print(f"  media_liga_gols = {params.media_liga_gols:.2f}")
-    erro_gamma = abs(params.home_advantage - reais["gamma"])
-    print(f"  Erro absoluto em gamma = {erro_gamma:.3f}")
-    assert erro_gamma < 0.20, "MLE não recuperou gamma razoavelmente"
-    print("  OK: gamma recuperado com erro < 0.20")
+    api_mock_alto = _ApiMock(1000)
+    try:
+        api_mock_alto.trava_saldo(custo_estimado=10)
+        print("  OK: permitiu com saldo 1000")
+    except CreditosInsuficientesError:
+        assert False, "Não deveria ter bloqueado"
 
-    # Teste 5: previsão de um jogo + comparação com mercado
-    print("\n[TESTE 5] Previsão de jogo + comparação com mercado")
-    h_id = list(params.times.keys())[0]
-    a_id = list(params.times.keys())[1]
-    prev = prever_jogo(params, h_id, a_id)
-    print(f"  Jogo: time {h_id} (casa) vs time {a_id} (fora)")
-    print(f"  Lambda = {prev['lambda']:.2f}, Mu = {prev['mu']:.2f}, xG total = {prev['xg_total']:.2f}")
-    print(f"  HOME = {prev['mercados']['HOME']:.1f}% | DRAW = {prev['mercados']['DRAW']:.1f}% | AWAY = {prev['mercados']['AWAY']:.1f}%")
-    print(f"  OVER 2.5 = {prev['mercados']['OVER_25']:.1f}% | BTTS = {prev['mercados']['BTTS_YES']:.1f}%")
-    print(f"  Top placar exato: ", end="")
-    placares_exatos = {k: v for k, v in prev["mercados"].items() if k.startswith("PE_")}
-    top_pe = max(placares_exatos.items(), key=lambda x: x[1])
-    print(f"{top_pe[0]} = {top_pe[1]:.1f}%")
-    print(f"  Flags: {prev['flags']}")
+    # Teste 3: precisa_recalibrar
+    print("\n[TESTE 3] precisa_recalibrar")
+    # Cria DadosManager fake (sem chamar API)
+    class _DM(DadosManager):
+        def __init__(self):
+            pass
+    dm = _DM()
 
-    # Teste 6: detector de anomalia
-    print("\n[TESTE 6] Detector de anomalia (caso Mirassol x Chape do relatório)")
-    # Reproduzir cenário: modelo diz 80.7%, mercado oferece 1.95 (51.3% implícita)
-    resultado = comparar_com_mercado(prob_modelo_pct=80.7, odd_mercado=1.95)
-    print(f"  Modelo: 80.7% | Mercado: {resultado['prob_mercado_pct']:.1f}%")
-    print(f"  Divergência: {resultado['divergencia_pp']:.1f}pp")
-    print(f"  EV: +{resultado['ev_pct']:.1f}%")
-    print(f"  Anomalia detectada: {resultado['anomalia']}")
-    print(f"  Aprovado: {resultado['flag_aprovado']}")
-    assert resultado["anomalia"] is True, "Falhou em detectar anomalia óbvia"
-    assert resultado["flag_aprovado"] is False, "Aprovou pick suicida"
-    print("  OK: detector REJEITA a pick suicida (V6.1 aprovaria com Score 100/100)")
+    assert dm.precisa_recalibrar({}) is True
+    assert dm.precisa_recalibrar({"calibrado_em": ""}) is True
+    ontem = (dt.datetime.now() - dt.timedelta(days=1)).isoformat()
+    semana = (dt.datetime.now() - dt.timedelta(days=8)).isoformat()
+    assert dm.precisa_recalibrar({"calibrado_em": ontem}) is False
+    assert dm.precisa_recalibrar({"calibrado_em": semana}) is True
+    print("  OK: detecta cache fresco (1 dia) e velho (8 dias)")
 
-    # Teste 7: caso coerente passa
-    print("\n[TESTE 7] Caso coerente (Burnley x Aston Villa do relatório)")
-    resultado2 = comparar_com_mercado(prob_modelo_pct=60.6, odd_mercado=1.91)
-    print(f"  Modelo: 60.6% | Mercado: {resultado2['prob_mercado_pct']:.1f}%")
-    print(f"  Divergência: {resultado2['divergencia_pp']:.1f}pp")
-    print(f"  EV: +{resultado2['ev_pct']:.1f}%")
-    print(f"  Anomalia: {resultado2['anomalia']} | Aprovado: {resultado2['flag_aprovado']}")
-    assert resultado2["anomalia"] is False, "Marcou como anomalia caso normal"
-    assert resultado2["flag_aprovado"] is True, "Rejeitou pick legítima"
-    print("  OK: detector aprova pick legítima")
-
-    # Teste 8: atualização incremental
-    print("\n[TESTE 8] Atualização incremental")
-    alpha_antes = params.times[h_id]["alpha"]
-    params_atualizado = atualizar_incremental(params, h_id, a_id, home_goals=3, away_goals=0)
-    alpha_depois = params_atualizado.times[h_id]["alpha"]
-    print(f"  alpha casa antes: {alpha_antes:.4f}, depois (3x0): {alpha_depois:.4f}")
-    assert alpha_depois > alpha_antes, "Vitória em casa deveria aumentar alpha"
-    print("  OK: gradiente atualiza na direção correta")
+    # Teste 4: ligas suportadas
+    print("\n[TESTE 4] Ligas suportadas")
+    print(f"  Total: {len(LIGAS_SUPORTADAS)} ligas configuradas")
+    print(f"  Custo estimado calibração total (1x/semana): {len(LIGAS_SUPORTADAS) * CUSTO_ESTIMADO_HISTORICO_LIGA} créditos")
+    print(f"  Custo diário típico (50 jogos): {50 * CUSTO_ESTIMADO_ODDS_JOGO + CUSTO_ESTIMADO_FIXTURES_DIA} créditos")
 
     print("\n" + "=" * 70)
-    print("TODOS OS TESTES PASSARAM")
+    print("TODOS OS TESTES OFFLINE PASSARAM")
     print("=" * 70)
+    print("\nNota: para teste online com API real, defina variáveis de ambiente:")
+    print("  API_SPORTS_KEY, JSONBIN_KEY, JSONBIN_BIN_ID")
+    print("E execute: python -c 'from dados import _self_test_online; _self_test_online()'")
+
+
+def _self_test_online() -> None:
+    """Testes que CONSOMEM créditos da API. Usar com moderação."""
+    print("=" * 70)
+    print("DADOS.PY - SELF TEST ONLINE (consome créditos!)")
+    print("=" * 70)
+
+    dm = criar_dados_manager_de_env()
+    saldo = dm.saldo_creditos()
+    print(f"\nSaldo inicial: {saldo}/7500")
+    if saldo < 100:
+        print("ABORTANDO: saldo muito baixo para testes online.")
+        return
+
+    print("\n[TESTE ONLINE 1] buscar_agenda_dia para hoje")
+    hoje = dt.date.today().strftime("%Y-%m-%d")
+    agenda = dm.buscar_agenda_dia(hoje)
+    print(f"  Retornou {len(agenda)} jogos")
+    print(f"  Saldo após: {dm.saldo_creditos()}/7500")
+
+    print("\n[TESTE ONLINE 2] calibração Premier League (season 2025)")
+    try:
+        params = dm.obter_params_liga(39, 2025)
+        print(f"  OK. {len(params.times)} times calibrados.")
+        print(f"  gamma = {params.home_advantage:.3f}, rho = {params.rho:.3f}")
+        print(f"  Saldo após: {dm.saldo_creditos()}/7500")
+    except Exception as e:
+        print(f"  ERRO: {e}")
+
+    print("\nTeste online concluído.")
 
 
 if __name__ == "__main__":
-    _self_test()
+    import sys
+    if "--online" in sys.argv:
+        _self_test_online()
+    else:
+        _self_test_offline()
