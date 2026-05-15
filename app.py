@@ -242,21 +242,42 @@ def consultar_gemini(picks_aprovados: list[dict]) -> str:
             f"Δ {p.get('divergencia', 0):+.1f}pp | EV {p['ev']:+.1f}% | Stake R$ {p['stake']:.2f}"
         )
 
-    prompt = f"""Você é um analista quantitativo de apostas esportivas especializado em Dixon-Coles.
-Os {len(todos)} candidatos abaixo passaram pelo filtro de EV e score mínimo do modelo. \
-Cada linha é um mercado independente (pode haver múltiplos mercados do mesmo jogo). \
+    prompt = f"""Você é um analista quantitativo de apostas esportivas especializado em modelos Dixon-Coles.
+Recebeu {len(todos)} candidatos aprovados (Score ≥ mínimo + EV positivo). \
+Cada linha é um mercado independente — pode haver múltiplos mercados do mesmo jogo. \
 Score 0-100 pondera EV, divergência modelo×mercado, probabilidade absoluta e critério de Kelly.
 
-Analise e entregue:
-1. **Focos do Dia** — destaque os 3 candidatos com maior score e explique em 1 frase o que os torna interessantes (use os números)
-2. **Alertas** — aponte candidatos com odd > 4.0 ou prob_modelo < 20% que mereçam cautela extra
-3. **Correlações** — identifique se há múltiplos mercados do mesmo jogo e avalie se faz sentido apostar em ambos
-4. **Resumo Tático** — em 2 linhas: perfil de risco do dia e sugestão de distribuição de banca
+=== ESTRUTURA DE ENTREGA — SIGA RIGOROSAMENTE ===
 
-Candidatos do dia ({len(todos)} de {len(picks_aprovados)} aprovados pelo filtro):
+## 1. SINAIS DO DIA (Entradas Executivas)
+
+REGRA DE ESCALABILIDADE: Avalie e entregue UMA recomendação para CADA jogo único presente nos dados. \
+Se há 10 jogos distintos, entregue 10 sinais. Não limite a um Top 3 ou Top 5 arbitrário.
+
+REGRA DE DEDUPLICAÇÃO: Escolha APENAS UM mercado por partida — aquele com a melhor combinação \
+de Score e segurança estatística (prefira prob_modelo > 55%, menor variância, odd entre 1.50 e 2.50). \
+É ESTRITAMENTE PROIBIDO listar o mesmo jogo duas vezes.
+
+FORMATO OBRIGATÓRIO para cada sinal (uma linha por jogo):
+[Liga] Time A v Time B | Mercado | Odd X.XX | Score ZZ/100 | justificativa de valor em 1 linha curta
+
+## 2. RESUMO DE DESCARTES
+
+Em 1 ou 2 parágrafos, cite quais mercados correlacionados foram descartados para evitar sobreposição \
+de risco. Exemplo: "No jogo X, BTTS_NO e Under 2.5 foram descartados em favor do Under 3.5 \
+(Score mais alto + menor exposição a variância ofensiva)."
+
+## 3. ALERTAS DE RISCO
+
+Mencione APENAS se houver: odds > 4.0, prob_modelo < 20%, divergência extrema ou flags do sistema. \
+Se não houver alertas graves, escreva somente: "Nenhum alerta crítico."
+
+=== FIM DA ESTRUTURA ===
+
+Dados do dia — {len(todos)} candidatos ({len(picks_aprovados)} aprovados pelo filtro de EV):
 {chr(10).join(linhas)}
 
-Seja direto. Use os números. Não repita o que já está listado — adicione interpretação."""
+Seja cirúrgico e objetivo. Use os números fornecidos. Não repita dados já listados — adicione interpretação."""
 
     try:
         resp = model.generate_content(prompt)
