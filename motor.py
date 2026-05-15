@@ -30,11 +30,6 @@ from typing import Optional
 import requests
 import pandas as pd
 
-from motor import (
-    ParametrosLiga,
-    calibrar_liga,
-)
-
 # =========================================================================
 # 1. CONFIGURAÇÃO
 # =========================================================================
