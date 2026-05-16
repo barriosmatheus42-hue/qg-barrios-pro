@@ -860,9 +860,10 @@ with tab_calibracao:
             with st.spinner("Treinando calibradores isotônicos..."):
                 try:
                     _rel_cal = _treinar_calibradores_fn(verbose=False, n_min_amostras=int(tc_min))
-                    st.session_state["relatorio_calibradores"] = _rel_cal
+                    # Recarrega banco do disco: dados.py injeta calibradores do JSON local
+                    # automaticamente (cloud não os armazena — local-only).
                     st.session_state["banco"] = dm.carregar_banco(força_recarregar=True)
-                    banco = st.session_state["banco"]
+                    st.session_state["relatorio_calibradores"] = _rel_cal
                 except FileNotFoundError as _e:
                     st.error(f"Arquivo não encontrado: {_e}")
                     _rel_cal = None
@@ -873,11 +874,11 @@ with tab_calibracao:
                     st.error(f"Erro ao treinar calibradores: {_e}")
                     _rel_cal = None
             if _rel_cal is not None:
-                st.rerun()
+                st.rerun()  # tabela de status relida com calibradores injetados
 
+        # Relatório detalhado da última sessão de treino (colapsado — tabela de status é a canônica)
         _rel_cal = st.session_state.get("relatorio_calibradores")
         if _rel_cal:
-            st.success(f"✅ Calibradores treinados para {len(_rel_cal)} liga(s).")
             _rows_rel = []
             for _ls, _mkts in sorted(_rel_cal.items(), key=lambda x: int(x[0])):
                 _nome_r = LIGAS_SUPORTADAS.get(int(_ls), f"Liga {_ls}")
@@ -893,7 +894,7 @@ with tab_calibracao:
                         "Viés (pp)":    f"{_icon} {'+' if _v >= 0 else ''}{_v:.1f}",
                         "Corr. ±(pp)":  f"±{_info['correcao_media_pp']:.1f}",
                     })
-            with st.expander("📊 Relatório detalhado por liga/mercado", expanded=True):
+            with st.expander(f"📊 Relatório do último treino ({len(_rel_cal)} liga(s))", expanded=False):
                 st.dataframe(_rows_rel, use_container_width=True, hide_index=True)
 
 
