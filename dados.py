@@ -589,6 +589,14 @@ class DadosManager:
         banco.banca_inicial = float(banco_nuvem.get("banca_inicial", banco_local.get("banca_inicial", 30.0)))
         banco.depositos = banco_nuvem.get("depositos", banco_local.get("depositos", []))
         banco.params_ligas = banco_nuvem.get("params_ligas", banco_local.get("params_ligas", {}))
+        # Calibradores são local-only: grandes demais para JSONBin e regeneráveis via
+        # treinar_calibradores.py. A nuvem nunca os armazena; injeta do JSON local
+        # em cada liga conhecida para que as previsões e a UI os enxerguem sempre.
+        _params_local_raw = banco_local.get("params_ligas", {})
+        for _lid_str, _params_dict in banco.params_ligas.items():
+            _cals = _params_local_raw.get(_lid_str, {}).get("calibradores", {})
+            if _cals:
+                _params_dict["calibradores"] = _cals
         banco.datas = banco_local.get("datas", {})                      # cache do dia fica local
         banco.historico_ligas = banco_local.get("historico_ligas", {}) # xG cache — local apenas
 
