@@ -15,6 +15,7 @@ Stack: Streamlit, motor.py, dados.py
 from __future__ import annotations
 
 import datetime as dt
+import json
 from pathlib import Path
 
 import streamlit as st
@@ -30,6 +31,7 @@ from motor import (
 from dados import (
     BancoQG,
     DadosManager,
+    ARQUIVO_BANCO_LOCAL,
     LIGAS_SUPORTADAS,
     LIGAS_TEMPORADA_ANO_ATUAL,
     INTERVALO_RECALIBRACAO_DIAS,
@@ -304,6 +306,52 @@ def _agenda_do_dia_cached(_dm: DadosManager, data_str: str) -> list:
 def _gemini_do_dia_cached(data_str: str, candidatos: list) -> str:
     """Chama Gemini e armazena resposta 24h. Re-chama se os candidatos mudarem."""
     return consultar_gemini(candidatos)
+
+
+def exibir_status_calibracao() -> None:
+    """
+    Lê o arquivo JSON local diretamente (nunca usa session_state nem banco da nuvem)
+    e renderiza a tabela canônica de status dos calibradores.
+
+    Chamada no início da seção de calibradores e novamente após st.rerun()
+    pós-treino, garantindo que a UI reflita sempre o estado real do disco.
+    """
+    _n_max = len(MERCADOS_PRODUCAO)
+    _params_disco: dict = {}
+    _arquivo = Path(ARQUIVO_BANCO_LOCAL)
+    if _arquivo.exists():
+        try:
+            with open(_arquivo, "r", encoding="utf-8") as _f:
+                _params_disco = json.load(_f).get("params_ligas", {})
+        except Exception:
+            pass
+
+    rows: list[dict] = []
+    n_completas = n_parciais = n_sem = n_sem_mle = 0
+    for _lid, _nome in LIGAS_SUPORTADAS.items():
+        _pd   = _params_disco.get(str(_lid), {})
+        _n_cal = len(_pd.get("calibradores", {}))
+        if not _pd:
+            _st = "❌ MLE ausente"
+            n_sem_mle += 1
+        elif _n_cal == _n_max:
+            _st = f"🟢 {_n_cal}/{_n_max} mercados"
+            n_completas += 1
+        elif _n_cal > 0:
+            _st = f"🟡 {_n_cal}/{_n_max} mercados"
+            n_parciais += 1
+        else:
+            _st = "⚪ Params OK — sem calibradores"
+            n_sem += 1
+        rows.append({"Liga": f"{_nome} (ID {_lid})", "Calibradores": _st})
+
+    partes = []
+    if n_completas: partes.append(f"🟢 {n_completas} completa(s)")
+    if n_parciais:  partes.append(f"🟡 {n_parciais} parcial(is)")
+    if n_sem:       partes.append(f"⚪ {n_sem} sem calibradores")
+    if n_sem_mle:   partes.append(f"❌ {n_sem_mle} sem MLE")
+    st.caption("  ·  ".join(partes) if partes else "Nenhuma liga carregada no disco.")
+    st.dataframe(rows, use_container_width=True, hide_index=True)
 
 
 # =========================================================================
@@ -825,21 +873,7 @@ with tab_calibracao:
         "Após treinar, cada previsão passa pela correção isotônica automaticamente."
     )
 
-    rows_cal_status = []
-    for _lid, _nome in LIGAS_SUPORTADAS.items():
-        _pd = banco.params_ligas.get(str(_lid), {})
-        _n_cal = len(_pd.get("calibradores", {}))
-        _n_max = len(MERCADOS_PRODUCAO)
-        if not _pd:
-            _st_cal = "❌ MLE ausente"
-        elif _n_cal == _n_max:
-            _st_cal = f"🟢 {_n_cal}/{_n_max} mercados"
-        elif _n_cal > 0:
-            _st_cal = f"🟡 {_n_cal}/{_n_max} mercados"
-        else:
-            _st_cal = "⚪ Params OK — sem calibradores"
-        rows_cal_status.append({"Liga": f"{_nome} (ID {_lid})", "Calibradores": _st_cal})
-    st.dataframe(rows_cal_status, use_container_width=True, hide_index=True)
+    exibir_status_calibracao()
 
     try:
         from treinar_calibradores import treinar_calibradores as _treinar_calibradores_fn
