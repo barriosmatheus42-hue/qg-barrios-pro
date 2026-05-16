@@ -17,6 +17,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 from pathlib import Path
+import pandas as pd
 
 import streamlit as st
 
@@ -1249,6 +1250,124 @@ with tab_analise:
                     )
                 st.markdown("---")
                 st.markdown(_gemini_texto)
+
+        # ── Painel de Execução em Lote ───────────────────────────────────────
+        st.markdown("---")
+        st.markdown("#### 📥 Painel de Execução")
+        st.caption(
+            f"{len(ranking)} entrada(s) do ranking. "
+            "Score ≥ 90 pré-selecionado. Defina a stake, revise e confirme em um clique."
+        )
+
+        # Proteção de banca: < R$ 50 → stake padrão inicial travada em R$ 1,00
+        _banca_baixa  = banca_atual < 50.0
+        _stake_init   = 1.0 if _banca_baixa else 1.0   # ambos 1.0 — usuário ajusta
+
+        _col_sp1, _col_sp2 = st.columns([2, 6])
+        with _col_sp1:
+            _stake_padrao = st.number_input(
+                "💰 Stake Padrão (R$)",
+                value=_stake_init,
+                min_value=0.5,
+                step=0.5,
+                key="painel_stake_padrao",
+            )
+        with _col_sp2:
+            if _banca_baixa:
+                st.warning(
+                    f"⚠️ Banca baixa (R$ {banca_atual:.2f}) — "
+                    "stake padrão sugerida em R$ 1,00 para proteção."
+                )
+            else:
+                st.caption(
+                    "Altere a Stake Padrão para aplicar o mesmo valor em todas as linhas. "
+                    "Cada célula de stake pode ser editada individualmente na tabela."
+                )
+
+        # Ao mudar a stake padrão, reseta o estado do data_editor para que todas
+        # as linhas reinicializem com o novo valor (checkboxes também voltam ao padrão).
+        if st.session_state.get("_painel_stake_prev") != _stake_padrao:
+            st.session_state.pop("_painel_editor", None)
+            st.session_state["_painel_stake_prev"] = _stake_padrao
+
+        _df_painel = pd.DataFrame([
+            {
+                "✅":         p.get("score", 0) >= 90,
+                "Jogo":       p.get("jogo", "—"),
+                "Mercado":    p.get("mercado", "—"),
+                "Odd":        round(float(p.get("odd", 0)), 2),
+                "Score":      int(p.get("score", 0)),
+                "Stake (R$)": float(_stake_padrao),
+            }
+            for p in ranking
+        ])
+
+        _edited_painel = st.data_editor(
+            _df_painel,
+            column_config={
+                "✅":         st.column_config.CheckboxColumn(
+                    "✅", width="small",
+                    help="Marque para incluir no registro em lote"
+                ),
+                "Jogo":       st.column_config.TextColumn("Jogo", disabled=True, width="large"),
+                "Mercado":    st.column_config.TextColumn("Mercado", disabled=True, width="small"),
+                "Odd":        st.column_config.NumberColumn("Odd", disabled=True, format="%.2f", width="small"),
+                "Score":      st.column_config.NumberColumn("Score", disabled=True, width="small"),
+                "Stake (R$)": st.column_config.NumberColumn(
+                    "Stake (R$)", min_value=0.5, step=0.5, format="R$ %.2f", width="medium"
+                ),
+            },
+            hide_index=True,
+            use_container_width=True,
+            key="_painel_editor",
+        )
+
+        _sel_mask  = _edited_painel["✅"].fillna(False).astype(bool)
+        _n_sel     = int(_sel_mask.sum())
+        _tot_stake = float(_edited_painel.loc[_sel_mask, "Stake (R$)"].sum())
+
+        _col_info, _col_btn = st.columns([3, 2])
+        with _col_info:
+            st.caption(
+                f"**{_n_sel}** selecionada(s)  ·  "
+                f"Stake total: **R$ {_tot_stake:.2f}**  ·  "
+                f"Banca atual: R$ {banca_atual:.2f}"
+            )
+        with _col_btn:
+            if st.button(
+                f"📥 Confirmar e Registrar {_n_sel} Pick(s)" if _n_sel > 0
+                else "📥 Nenhuma pick selecionada",
+                type="primary",
+                use_container_width=True,
+                disabled=_n_sel == 0,
+                key="_btn_registrar_lote",
+            ):
+                _picks_novos = []
+                for _idx in _edited_painel[_sel_mask].index:
+                    _p   = ranking[_idx]
+                    _stk = float(_edited_painel.at[_idx, "Stake (R$)"])
+                    _picks_novos.append({
+                        "data":           data_str,
+                        "jogo":           _p.get("jogo", "—"),
+                        "liga_id":        _p.get("liga", ""),
+                        "fixture_id":     str(_p.get("fixture_id", "")),
+                        "mercado":        _p.get("mercado", "—"),
+                        "odd":            float(_p.get("odd", 0)),
+                        "prob_modelo":    round(float(_p.get("prob_modelo", 0)), 2),
+                        "prob_mercado":   round(float(_p.get("prob_mercado", 0)), 2),
+                        "divergencia_pp": round(float(_p.get("divergencia", 0)), 2),
+                        "ev":             round(float(_p.get("ev", 0)), 2),
+                        "kelly_frac":     round(float(_p.get("kelly", 0)), 4),
+                        "stake":          _stk,
+                        "status":         "Pendente",
+                        "salvo_em":       dt.datetime.now().isoformat(),
+                    })
+                banco.picks.extend(_picks_novos)
+                dm.salvar_banco(banco)
+                st.session_state["banco"] = banco
+                st.session_state.pop("_painel_editor", None)
+                st.success(f"✅ {len(_picks_novos)} pick(s) registrada(s) com sucesso!")
+                st.rerun()
 
         st.divider()
 
