@@ -1121,49 +1121,52 @@ with tab_analise:
         )
 
         for i, p in enumerate(ranking, 1):
-            score     = p["score"]
-            # Cor por nível de score
-            if score >= 70:
-                cor, badge = "#28a745", "🟢 Alta"
-            elif score >= 50:
-                cor, badge = "#17a2b8", "🔵 Média"
-            else:
-                cor, badge = "#ffc107", "🟡 Marginal"
+            try:
+                score     = p["score"]
+                # Cor por nível de score
+                if score >= 70:
+                    cor, badge = "#28a745", "🟢 Alta"
+                elif score >= 50:
+                    cor, badge = "#17a2b8", "🔵 Média"
+                else:
+                    cor, badge = "#ffc107", "🟡 Marginal"
 
-            # Barra de score visual (█ preenchidos proporcionalmente)
-            barras  = int(score / 10)
-            bar_str = "█" * barras + "░" * (10 - barras)
+                # Barra de score visual (█ preenchidos proporcionalmente)
+                barras  = int(score / 10)
+                bar_str = "█" * barras + "░" * (10 - barras)
 
-            cob_icon = "✅" if p["cobertura_ok"] else "⚠️ dados parciais"
+                cob_icon = "✅" if p.get("cobertura_ok") else "⚠️ dados parciais"
 
-            st.markdown(
-                f"""<div style='border-left:4px solid {cor};padding:10px 14px;
-                              margin-bottom:10px;background:#0e1117;border-radius:4px;'>
-                  <div style='display:flex;justify-content:space-between;
-                              font-size:11px;color:#888;'>
-                    <span>#{i} · {p['liga']} · {cob_icon}</span>
-                    <span style='color:{cor};font-weight:bold;'>{badge} &nbsp;
-                      <span style='font-family:monospace;letter-spacing:1px;'>{bar_str}</span>
-                      &nbsp;{score:.0f}/100
-                    </span>
-                  </div>
-                  <div style='font-size:17px;font-weight:bold;color:white;margin:5px 0 3px;'>
-                    {p['jogo']}
-                  </div>
-                  <div style='font-size:13px;color:#ccc;'>
-                    <b>{p['mercado']}</b> &nbsp;·&nbsp;
-                    Odd <b>{p['odd']:.2f}</b> &nbsp;·&nbsp;
-                    Modelo <b>{p['prob_modelo']:.1f}%</b> vs Mercado {p['prob_mercado']:.1f}%
-                    &nbsp;·&nbsp; Δ <b>{p['divergencia']:+.1f}pp</b>
-                  </div>
-                  <div style='font-size:12px;color:#aaa;margin-top:2px;'>
-                    EV <span style='color:{cor};font-weight:bold;'>{p['ev']:+.1f}%</span>
-                    &nbsp;·&nbsp; Kelly {p['kelly']*100:.1f}%
-                    &nbsp;·&nbsp; 💵 Stake: <b>R$ {p['stake']:.2f}</b>
-                  </div>
-                </div>""",
-                unsafe_allow_html=True,
-            )
+                st.markdown(
+                    f"""<div style='border-left:4px solid {cor};padding:10px 14px;
+                                  margin-bottom:10px;background:#0e1117;border-radius:4px;'>
+                      <div style='display:flex;justify-content:space-between;
+                                  font-size:11px;color:#888;'>
+                        <span>#{i} · {p.get('liga','—')} · {cob_icon}</span>
+                        <span style='color:{cor};font-weight:bold;'>{badge} &nbsp;
+                          <span style='font-family:monospace;letter-spacing:1px;'>{bar_str}</span>
+                          &nbsp;{score:.0f}/100
+                        </span>
+                      </div>
+                      <div style='font-size:17px;font-weight:bold;color:white;margin:5px 0 3px;'>
+                        {p.get('jogo','—')}
+                      </div>
+                      <div style='font-size:13px;color:#ccc;'>
+                        <b>{p.get('mercado','—')}</b> &nbsp;·&nbsp;
+                        Odd <b>{p.get('odd',0):.2f}</b> &nbsp;·&nbsp;
+                        Modelo <b>{p.get('prob_modelo',0):.1f}%</b> vs Mercado {p.get('prob_mercado',0):.1f}%
+                        &nbsp;·&nbsp; Δ <b>{p.get('divergencia',0):+.1f}pp</b>
+                      </div>
+                      <div style='font-size:12px;color:#aaa;margin-top:2px;'>
+                        EV <span style='color:{cor};font-weight:bold;'>{p.get('ev',0):+.1f}%</span>
+                        &nbsp;·&nbsp; Kelly {p.get('kelly',0)*100:.1f}%
+                        &nbsp;·&nbsp; 💵 Stake: <b>R$ {p.get('stake',0):.2f}</b>
+                      </div>
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
+            except Exception:
+                continue
 
         # ── Consultora Gemini ────────────────────────────────────────
         st.markdown("#### 🤖 Consultora IA (Gemini)")
@@ -1282,12 +1285,13 @@ with tab_analise:
             )
             continue
 
-        hora      = j["fixture"]["date"][11:16]
-        liga_nome = j["league"]["name"]
-        flags_str = " | ".join(prev["flags"]) if prev.get("flags") else "—"
-        cobertura = "✅" if prev.get("cobertura_ok") else "⚠️ dados insuficientes (usando média)"
+        try:
+          hora      = j["fixture"]["date"][11:16]
+          liga_nome = j["league"]["name"]
+          flags_str = " | ".join(prev["flags"]) if prev.get("flags") else "—"
+          cobertura = "✅" if prev.get("cobertura_ok") else "⚠️ dados insuficientes (usando média)"
 
-        with st.container():
+          with st.container():
             st.markdown(
                 f"""<div style='background:#0e1117;padding:10px;border-radius:6px;border:1px solid #333;'>
                   <div style='display:flex;justify-content:space-between;color:#888;font-size:11px;'>
@@ -1347,18 +1351,18 @@ with tab_analise:
 
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Odd", f"{odd_atual:.2f}")
-                c2.metric("EV", f"{comp['ev_pct']:+.1f}%")
+                c2.metric("EV", f"{comp.get('ev_pct', 0):+.1f}%")
                 c3.metric("Stake sugerida", f"R$ {stake_sug:.2f}" if stake_sug > 0 else "DESCARTAR")
 
                 stake_input = st.number_input("Stake final (R$)", value=stake_sug,
                                               step=0.5, min_value=0.0, key=f"stk_{f_id}")
-                bloqueado   = odd_atual < odd_min_save or comp["anomalia"] or stake_input <= 0
+                bloqueado   = odd_atual < odd_min_save or comp.get("anomalia", True) or stake_input <= 0
 
                 if bloqueado:
                     motivos = []
-                    if odd_atual < odd_min_save:   motivos.append(f"odd {odd_atual:.2f} < {odd_min_save}")
-                    if comp["anomalia"]:            motivos.append(f"anomalia (Δ {comp['divergencia_pp']:+.1f}pp)")
-                    if stake_input <= 0:            motivos.append("stake zero")
+                    if odd_atual < odd_min_save:         motivos.append(f"odd {odd_atual:.2f} < {odd_min_save}")
+                    if comp.get("anomalia"):             motivos.append(f"anomalia (Δ {comp.get('divergencia_pp', 0):+.1f}pp)")
+                    if stake_input <= 0:                 motivos.append("stake zero")
                     st.warning("⚠️ Save bloqueado: " + " | ".join(motivos))
 
                 if st.button("💾 Salvar pick", disabled=bloqueado,
@@ -1371,9 +1375,9 @@ with tab_analise:
                         "mercado":      mk_sel,
                         "odd":          odd_atual,
                         "prob_modelo":  round(prob_mod, 2),
-                        "prob_mercado": round(comp["prob_mercado_pct"], 2),
-                        "divergencia_pp": round(comp["divergencia_pp"], 2),
-                        "ev":           round(comp["ev_pct"], 2),
+                        "prob_mercado": round(comp.get("prob_mercado_pct", 0), 2),
+                        "divergencia_pp": round(comp.get("divergencia_pp", 0), 2),
+                        "ev":           round(comp.get("ev_pct", 0), 2),
                         "kelly_frac":   round(comp.get("kelly_fracao", 0), 4),
                         "stake":        stake_input,
                         "status":       "Pendente",
@@ -1382,6 +1386,10 @@ with tab_analise:
                     dm.salvar_banco(banco)
                     st.success("Pick salva! ✅")
                     st.rerun()
+
+        except Exception as _e:
+            st.warning(f"⚠️ Erro ao renderizar jogo {f_id}: {_e}")
+            continue
 
 
 # =========================================================================
