@@ -57,9 +57,9 @@ st.set_page_config(page_title="QG Barrios PRO V3", layout="wide", page_icon="�
 # 1. CONSTANTES DE NEGÓCIO
 # =========================================================================
 
-PISO_KELLY_PADRAO        = 2.0
+PISO_KELLY_PADRAO        = 1.0
 TETO_PCT_BANCA_PADRAO    = 0.10
-ODD_MIN_SAVE             = 1.50
+ODD_MIN_SAVE             = 1.70
 LIMITE_DIVERGENCIA_PP    = 20.0
 MARGEM_BOOKMAKER_DEFAULT = 1.05
 
@@ -359,6 +359,18 @@ def exibir_status_calibracao() -> None:
 # 4. SIDEBAR — BANCA (FIX DO BUG DE ROI)
 # =========================================================================
 
+# ── Session state: Gestão de Risco (persiste entre abas e reloads) ──────────
+_risk_defaults = {
+    "risk_piso_kelly":   1.0,
+    "risk_odd_min":      1.70,
+    "risk_prob_min":     45.0,
+    "risk_teto_pct_pct": 10,
+    "risk_limite_div":   20,
+}
+for _rk, _rv in _risk_defaults.items():
+    if _rk not in st.session_state:
+        st.session_state[_rk] = _rv
+
 with st.sidebar:
     st.markdown("## 👑 QG Barrios PRO V3")
     st.caption("Motor: Dixon-Coles (MLE) · Sem incremental")
@@ -469,12 +481,12 @@ with st.sidebar:
 
     # ── Configurações Kelly ───────────────────────────────────────────
     with st.expander("⚙️ Gestão de Risco"):
-        piso_kelly   = st.number_input("Piso de stake (R$)", value=PISO_KELLY_PADRAO, step=0.5, min_value=0.5)
-        teto_pct     = st.slider("Teto % da banca", 5, 25, int(TETO_PCT_BANCA_PADRAO * 100)) / 100
-        odd_min_save = st.number_input("Odd mínima p/ salvar", value=ODD_MIN_SAVE, step=0.05, min_value=1.01)
-        # Teto em 20pp: acima disso o detector de anomalia é desligado efetivamente.
-        # 20pp é o limiar documentado no paper de Dixon-Coles e nos bugs do V6.1.
-        limite_div   = st.slider("Anomalia se divergência >", 10, 20, int(LIMITE_DIVERGENCIA_PP))
+        piso_kelly   = st.number_input("Piso de stake (R$)", min_value=0.5, step=0.5, key="risk_piso_kelly")
+        teto_pct     = st.slider("Teto % da banca", 5, 25, key="risk_teto_pct_pct") / 100
+        odd_min_save = st.number_input("Odd mínima p/ analisar", min_value=1.01, step=0.05, key="risk_odd_min")
+        prob_min     = st.number_input("Prob. mínima do modelo (%)", min_value=0.0, max_value=99.0, step=5.0, key="risk_prob_min")
+        # 20pp: limiar documentado no paper Dixon-Coles e nos bugs do V6.1.
+        limite_div   = st.slider("Anomalia se divergência >", 10, 20, key="risk_limite_div")
 
     st.divider()
 
@@ -1096,6 +1108,8 @@ with tab_analise:
             prob_modelo = prev["mercados"].get(mercado, 0)
             odd_val     = odds_j.get(mercado, 0)
             if odd_val <= 1.0 or odd_val < odd_min_save:
+                continue
+            if prob_modelo < prob_min:
                 continue
             comp  = comparar_com_mercado(prob_modelo, odd_val,
                                          MARGEM_BOOKMAKER_DEFAULT, limite_div)
