@@ -433,12 +433,14 @@ with st.sidebar:
     st.caption("**💾 Memória Diária** — agenda e IA cacheadas 24h no servidor.")
     if st.button("🔄 Limpar Memória do Dia", use_container_width=True,
                  help="Força re-fetch da agenda e re-geração da análise IA. Use se um jogo foi adiado."):
+        # Limpa os caches globais de todas as datas (st.cache_data.clear é o modo oficial)
         _agenda_do_dia_cached.clear()
         _gemini_do_dia_cached.clear()
-        # Limpa também os dados da sessão atual
-        for _k in list(st.session_state.keys()):
-            if _k.startswith("_auto_loaded_") or _k == "gemini_resposta":
-                st.session_state.pop(_k, None)
+        # Limpa banco.datas para remover agendas da sessão atual (evita servir dado stale)
+        banco.datas.clear()
+        # Limpa flags de sessão
+        st.session_state.pop("gemini_resposta", None)
+        st.session_state["banco"] = banco
         st.success("Cache limpo. Próxima carga buscará dados frescos da API.")
         st.rerun()
 
@@ -904,35 +906,25 @@ with tab_analise:
     cache_dia = banco.datas.get(data_str, {})
     agenda    = cache_dia.get("agenda", [])
 
-    # Auto-carrega da memória global se esta sessão ainda não tentou (0 créditos se já cacheado)
-    if not agenda and not st.session_state.get(f"_auto_loaded_{data_str}"):
-        st.session_state[f"_auto_loaded_{data_str}"] = True
-        try:
-            _auto = _agenda_do_dia_cached(dm, data_str)
-            if _auto:
-                banco.datas.setdefault(data_str, {})
-                banco.datas[data_str]["agenda"]   = _auto
-                banco.datas[data_str].setdefault("odds", {})
-                banco.datas[data_str].setdefault("previsoes", {})
-                cache_dia = banco.datas[data_str]
-                agenda = _auto
-        except Exception:
-            pass  # Cache miss + falha na API: o botão manual funciona como fallback
-
+    # O st.date_input é o mestre da consulta: cada data tem sua própria entrada no
+    # @st.cache_data (chave = data_str). O botão abaixo é a única porta de entrada —
+    # sem auto-load silencioso para evitar gastos de crédito ao navegar entre datas.
     col_a1, col_a2 = st.columns(2)
     with col_a1:
+        _tem_cache = bool(agenda)
         _btn_label = (
-            f"🔄 Recarregar Agenda ({data_str})" if agenda
+            f"🔄 Recarregar Agenda ({data_str})" if _tem_cache
             else f"📅 1. Carregar Agenda ({data_str})"
         )
         _btn_help = (
-            "Agenda já na memória — recarrega da API para obter jogos adiados/adicionados."
-            if agenda
-            else f"Custo: {CUSTO_ESTIMADO_FIXTURES_DIA} crédito"
+            "Agenda já em memória. 0 créditos se cache ativo, 1 crédito se expirado."
+            if _tem_cache
+            else f"Busca jogos do dia na API. Custo: {CUSTO_ESTIMADO_FIXTURES_DIA} crédito."
         )
         if st.button(_btn_label, use_container_width=True, help=_btn_help):
             try:
                 with st.spinner("Buscando agenda..."):
+                    # Usa cache global de 24h: 2ª chamada (qualquer device) retorna instantâneo
                     agenda = _agenda_do_dia_cached(dm, data_str)
                 banco.datas.setdefault(data_str, {})
                 banco.datas[data_str]["agenda"]    = agenda
@@ -948,7 +940,7 @@ with tab_analise:
                 st.error(f"Erro: {e}")
 
     if not agenda:
-        st.info("Clique em 'Carregar Agenda' para começar.")
+        st.info(f"Clique em 'Carregar Agenda' para carregar os jogos de {data_str}.")
         st.stop()
 
     # ── Separar calibrados / descartados ────────────────────────────
@@ -1071,7 +1063,7 @@ with tab_analise:
                 continue
             comp  = comparar_com_mercado(prob_modelo, odd_val,
                                          MARGEM_BOOKMAKER_DEFAULT, limite_div)
-            stake = calcular_stake_final(comp["kelly_fracao"], banca_atual,
+            stake = calcular_stake_final(comp.get("kelly_fracao", 0), banca_atual,
                                          piso_kelly, teto_pct)
             # Filtro de gatilho por mercado: EV_MIN + PROB_MIN + delta > 0 (Dossiê v8 Seção 5.1)
             if not (filtrar_gatilho(mercado, comp["ev_pct"], prob_modelo,
@@ -1083,7 +1075,7 @@ with tab_analise:
                 ev_pct        = comp["ev_pct"],
                 divergencia_pp= comp["divergencia_pp"],
                 prob_modelo   = prob_modelo,
-                kelly_fracao  = comp["kelly_fracao"],
+                kelly_fracao  = comp.get("kelly_fracao", 0),
                 odd           = odd_val,
                 cobertura_ok  = cobertura_ok,
             )
@@ -1100,7 +1092,7 @@ with tab_analise:
                 "prob_mercado":comp["prob_mercado_pct"],
                 "ev":          comp["ev_pct"],
                 "divergencia": comp["divergencia_pp"],
-                "kelly":       comp["kelly_fracao"],
+                "kelly":       comp.get("kelly_fracao", 0),
                 "stake":       stake,
                 "score":       score,
                 "cobertura_ok":cobertura_ok,
@@ -1242,7 +1234,7 @@ with tab_analise:
             return None
         comp  = comparar_com_mercado(prob_modelo_pct, odd_mercado,
                                      MARGEM_BOOKMAKER_DEFAULT, lim_div)
-        stake = calcular_stake_final(comp["kelly_fracao"], banca, piso, teto_pct)
+        stake = calcular_stake_final(comp.get("kelly_fracao", 0), banca, piso, teto_pct)
 
         aprovado = filtrar_gatilho(mercado, comp["ev_pct"], prob_modelo_pct,
                                    comp["divergencia_pp"], odd_mercado)
@@ -1269,7 +1261,7 @@ with tab_analise:
               </div>
               <div style='font-size:13px;color:#ccc;'>
                 Odd:<b>{odd_mercado:.2f}</b> | EV:{comp['ev_pct']:+.1f}% |
-                Kelly:{comp['kelly_fracao']*100:.1f}%
+                Kelly:{comp.get('kelly_fracao', 0)*100:.1f}%
               </div>
               <div style='font-size:12px;color:#17a2b8;margin-top:2px;'>
                 💵 {'R$ ' + str(stake) if stake > 0 else 'DESCARTAR'}
@@ -1351,7 +1343,7 @@ with tab_analise:
                 odd_atual = odds_j.get(mk_sel, 0)
                 prob_mod  = prev["mercados"][mk_sel]
                 comp      = comparar_com_mercado(prob_mod, odd_atual, MARGEM_BOOKMAKER_DEFAULT, limite_div)
-                stake_sug = calcular_stake_final(comp["kelly_fracao"], banca_atual, piso_kelly, teto_pct)
+                stake_sug = calcular_stake_final(comp.get("kelly_fracao", 0), banca_atual, piso_kelly, teto_pct)
 
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Odd", f"{odd_atual:.2f}")
@@ -1382,7 +1374,7 @@ with tab_analise:
                         "prob_mercado": round(comp["prob_mercado_pct"], 2),
                         "divergencia_pp": round(comp["divergencia_pp"], 2),
                         "ev":           round(comp["ev_pct"], 2),
-                        "kelly_frac":   round(comp["kelly_fracao"], 4),
+                        "kelly_frac":   round(comp.get("kelly_fracao", 0), 4),
                         "stake":        stake_input,
                         "status":       "Pendente",
                         "salvo_em":     dt.datetime.now().isoformat(),
