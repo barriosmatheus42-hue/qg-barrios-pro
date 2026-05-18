@@ -15,7 +15,9 @@ Stack: Streamlit, motor.py, dados.py
 from __future__ import annotations
 
 import datetime as dt
+import json
 from pathlib import Path
+import pandas as pd
 
 import streamlit as st
 
@@ -26,10 +28,15 @@ from motor import (
     filtrar_gatilho,
     MERCADOS_PRODUCAO,
     EV_MIN_POR_MERCADO,
+    GapConfig,
+    EvConfig,
+    filtrar_gap,
+    filtrar_ev_config,
 )
 from dados import (
     BancoQG,
     DadosManager,
+    ARQUIVO_BANCO_LOCAL,
     LIGAS_SUPORTADAS,
     LIGAS_TEMPORADA_ANO_ATUAL,
     INTERVALO_RECALIBRACAO_DIAS,
@@ -54,11 +61,17 @@ st.set_page_config(page_title="QG Barrios PRO V3", layout="wide", page_icon="�
 # 1. CONSTANTES DE NEGÓCIO
 # =========================================================================
 
-PISO_KELLY_PADRAO        = 2.0
+PISO_KELLY_PADRAO        = 1.0
 TETO_PCT_BANCA_PADRAO    = 0.10
-ODD_MIN_SAVE             = 1.50
+ODD_MIN_SAVE             = 1.70
 LIMITE_DIVERGENCIA_PP    = 20.0
 MARGEM_BOOKMAKER_DEFAULT = 1.05
+
+# Filtros P1+P2 — validados por backtest walk-forward (V4, 12 janelas)
+# GapConfig: sem gap para Over (D-C biasado já filtra), gap 0.5 para Under
+# EvConfig:  EV>=20% para Under elimina falsos positivos estruturais do D-C
+GAP_CONFIG_PROD = GapConfig(gap_over_min=0.0, gap_under_min=0.5)
+EV_CONFIG_PROD  = EvConfig(ev_min_over=5.0,  ev_min_under=20.0)
 
 # Ranking de qualidade — sem número fixo
 SCORE_MINIMO_RANKING = 35   # picks abaixo disso são filtrados mesmo com EV positivo
@@ -306,9 +319,67 @@ def _gemini_do_dia_cached(data_str: str, candidatos: list) -> str:
     return consultar_gemini(candidatos)
 
 
+def exibir_status_calibracao() -> None:
+    """
+    Lê o arquivo JSON local diretamente (nunca usa session_state nem banco da nuvem)
+    e renderiza a tabela canônica de status dos calibradores.
+
+    Chamada no início da seção de calibradores e novamente após st.rerun()
+    pós-treino, garantindo que a UI reflita sempre o estado real do disco.
+    """
+    _n_max = len(MERCADOS_PRODUCAO)
+    _params_disco: dict = {}
+    _arquivo = Path(ARQUIVO_BANCO_LOCAL)
+    if _arquivo.exists():
+        try:
+            with open(_arquivo, "r", encoding="utf-8") as _f:
+                _params_disco = json.load(_f).get("params_ligas", {})
+        except Exception:
+            pass
+
+    rows: list[dict] = []
+    n_completas = n_parciais = n_sem = n_sem_mle = 0
+    for _lid, _nome in LIGAS_SUPORTADAS.items():
+        _pd   = _params_disco.get(str(_lid), {})
+        _n_cal = len(_pd.get("calibradores", {}))
+        if not _pd:
+            _st = "❌ MLE ausente"
+            n_sem_mle += 1
+        elif _n_cal == _n_max:
+            _st = f"🟢 {_n_cal}/{_n_max} mercados"
+            n_completas += 1
+        elif _n_cal > 0:
+            _st = f"🟡 {_n_cal}/{_n_max} mercados"
+            n_parciais += 1
+        else:
+            _st = "⚪ Params OK — sem calibradores"
+            n_sem += 1
+        rows.append({"Liga": f"{_nome} (ID {_lid})", "Calibradores": _st})
+
+    partes = []
+    if n_completas: partes.append(f"🟢 {n_completas} completa(s)")
+    if n_parciais:  partes.append(f"🟡 {n_parciais} parcial(is)")
+    if n_sem:       partes.append(f"⚪ {n_sem} sem calibradores")
+    if n_sem_mle:   partes.append(f"❌ {n_sem_mle} sem MLE")
+    st.caption("  ·  ".join(partes) if partes else "Nenhuma liga carregada no disco.")
+    st.dataframe(rows, use_container_width=True, hide_index=True)
+
+
 # =========================================================================
 # 4. SIDEBAR — BANCA (FIX DO BUG DE ROI)
 # =========================================================================
+
+# ── Session state: Gestão de Risco (persiste entre abas e reloads) ──────────
+_risk_defaults = {
+    "risk_piso_kelly":   1.0,
+    "risk_odd_min":      1.70,
+    "risk_prob_min":     45.0,
+    "risk_teto_pct_pct": 10,
+    "risk_limite_div":   20,
+}
+for _rk, _rv in _risk_defaults.items():
+    if _rk not in st.session_state:
+        st.session_state[_rk] = _rv
 
 with st.sidebar:
     st.markdown("## 👑 QG Barrios PRO V3")
@@ -420,12 +491,12 @@ with st.sidebar:
 
     # ── Configurações Kelly ───────────────────────────────────────────
     with st.expander("⚙️ Gestão de Risco"):
-        piso_kelly   = st.number_input("Piso de stake (R$)", value=PISO_KELLY_PADRAO, step=0.5, min_value=0.5)
-        teto_pct     = st.slider("Teto % da banca", 5, 25, int(TETO_PCT_BANCA_PADRAO * 100)) / 100
-        odd_min_save = st.number_input("Odd mínima p/ salvar", value=ODD_MIN_SAVE, step=0.05, min_value=1.01)
-        # Teto em 20pp: acima disso o detector de anomalia é desligado efetivamente.
-        # 20pp é o limiar documentado no paper de Dixon-Coles e nos bugs do V6.1.
-        limite_div   = st.slider("Anomalia se divergência >", 10, 20, int(LIMITE_DIVERGENCIA_PP))
+        piso_kelly   = st.number_input("Piso de stake (R$)", min_value=0.5, step=0.5, key="risk_piso_kelly")
+        teto_pct     = st.slider("Teto % da banca", 5, 25, key="risk_teto_pct_pct") / 100
+        odd_min_save = st.number_input("Odd mínima p/ analisar", min_value=1.01, step=0.05, key="risk_odd_min")
+        prob_min     = st.number_input("Prob. mínima do modelo (%)", min_value=0.0, max_value=99.0, step=5.0, key="risk_prob_min")
+        # 20pp: limiar documentado no paper Dixon-Coles e nos bugs do V6.1.
+        limite_div   = st.slider("Anomalia se divergência >", 10, 20, key="risk_limite_div")
 
     st.divider()
 
@@ -825,21 +896,7 @@ with tab_calibracao:
         "Após treinar, cada previsão passa pela correção isotônica automaticamente."
     )
 
-    rows_cal_status = []
-    for _lid, _nome in LIGAS_SUPORTADAS.items():
-        _pd = banco.params_ligas.get(str(_lid), {})
-        _n_cal = len(_pd.get("calibradores", {}))
-        _n_max = len(MERCADOS_PRODUCAO)
-        if not _pd:
-            _st_cal = "❌ MLE ausente"
-        elif _n_cal == _n_max:
-            _st_cal = f"🟢 {_n_cal}/{_n_max} mercados"
-        elif _n_cal > 0:
-            _st_cal = f"🟡 {_n_cal}/{_n_max} mercados"
-        else:
-            _st_cal = "⚪ Params OK — sem calibradores"
-        rows_cal_status.append({"Liga": f"{_nome} (ID {_lid})", "Calibradores": _st_cal})
-    st.dataframe(rows_cal_status, use_container_width=True, hide_index=True)
+    exibir_status_calibracao()
 
     try:
         from treinar_calibradores import treinar_calibradores as _treinar_calibradores_fn
@@ -860,9 +917,10 @@ with tab_calibracao:
             with st.spinner("Treinando calibradores isotônicos..."):
                 try:
                     _rel_cal = _treinar_calibradores_fn(verbose=False, n_min_amostras=int(tc_min))
-                    st.session_state["relatorio_calibradores"] = _rel_cal
+                    # Recarrega banco do disco: dados.py injeta calibradores do JSON local
+                    # automaticamente (cloud não os armazena — local-only).
                     st.session_state["banco"] = dm.carregar_banco(força_recarregar=True)
-                    banco = st.session_state["banco"]
+                    st.session_state["relatorio_calibradores"] = _rel_cal
                 except FileNotFoundError as _e:
                     st.error(f"Arquivo não encontrado: {_e}")
                     _rel_cal = None
@@ -873,11 +931,11 @@ with tab_calibracao:
                     st.error(f"Erro ao treinar calibradores: {_e}")
                     _rel_cal = None
             if _rel_cal is not None:
-                st.rerun()
+                st.rerun()  # tabela de status relida com calibradores injetados
 
+        # Relatório detalhado da última sessão de treino (colapsado — tabela de status é a canônica)
         _rel_cal = st.session_state.get("relatorio_calibradores")
         if _rel_cal:
-            st.success(f"✅ Calibradores treinados para {len(_rel_cal)} liga(s).")
             _rows_rel = []
             for _ls, _mkts in sorted(_rel_cal.items(), key=lambda x: int(x[0])):
                 _nome_r = LIGAS_SUPORTADAS.get(int(_ls), f"Liga {_ls}")
@@ -893,7 +951,7 @@ with tab_calibracao:
                         "Viés (pp)":    f"{_icon} {'+' if _v >= 0 else ''}{_v:.1f}",
                         "Corr. ±(pp)":  f"±{_info['correcao_media_pp']:.1f}",
                     })
-            with st.expander("📊 Relatório detalhado por liga/mercado", expanded=True):
+            with st.expander(f"📊 Relatório do último treino ({len(_rel_cal)} liga(s))", expanded=False):
                 st.dataframe(_rows_rel, use_container_width=True, hide_index=True)
 
 
@@ -1061,13 +1119,18 @@ with tab_analise:
             odd_val     = odds_j.get(mercado, 0)
             if odd_val <= 1.0 or odd_val < odd_min_save:
                 continue
+            if prob_modelo < prob_min:
+                continue
             comp  = comparar_com_mercado(prob_modelo, odd_val,
                                          MARGEM_BOOKMAKER_DEFAULT, limite_div)
             stake = calcular_stake_final(comp.get("kelly_fracao", 0), banca_atual,
                                          piso_kelly, teto_pct)
-            # Filtro de gatilho por mercado: EV_MIN + PROB_MIN + delta > 0 (Dossiê v8 Seção 5.1)
+            # Filtro de gatilho: EV_MIN + PROB_MIN + delta > 0
+            xg_total_prev = prev.get("xg_total", 2.5)
             if not (filtrar_gatilho(mercado, comp["ev_pct"], prob_modelo,
                                     comp["divergencia_pp"], odd_val)
+                    and filtrar_gap(mercado, xg_total_prev, GAP_CONFIG_PROD)       # P1
+                    and filtrar_ev_config(mercado, comp["ev_pct"], EV_CONFIG_PROD) # EV override
                     and stake > 0 and not comp["anomalia"]):
                 continue
 
@@ -1121,49 +1184,52 @@ with tab_analise:
         )
 
         for i, p in enumerate(ranking, 1):
-            score     = p["score"]
-            # Cor por nível de score
-            if score >= 70:
-                cor, badge = "#28a745", "🟢 Alta"
-            elif score >= 50:
-                cor, badge = "#17a2b8", "🔵 Média"
-            else:
-                cor, badge = "#ffc107", "🟡 Marginal"
+            try:
+                score     = p["score"]
+                # Cor por nível de score
+                if score >= 70:
+                    cor, badge = "#28a745", "🟢 Alta"
+                elif score >= 50:
+                    cor, badge = "#17a2b8", "🔵 Média"
+                else:
+                    cor, badge = "#ffc107", "🟡 Marginal"
 
-            # Barra de score visual (█ preenchidos proporcionalmente)
-            barras  = int(score / 10)
-            bar_str = "█" * barras + "░" * (10 - barras)
+                # Barra de score visual (█ preenchidos proporcionalmente)
+                barras  = int(score / 10)
+                bar_str = "█" * barras + "░" * (10 - barras)
 
-            cob_icon = "✅" if p["cobertura_ok"] else "⚠️ dados parciais"
+                cob_icon = "✅" if p.get("cobertura_ok") else "⚠️ dados parciais"
 
-            st.markdown(
-                f"""<div style='border-left:4px solid {cor};padding:10px 14px;
-                              margin-bottom:10px;background:#0e1117;border-radius:4px;'>
-                  <div style='display:flex;justify-content:space-between;
-                              font-size:11px;color:#888;'>
-                    <span>#{i} · {p['liga']} · {cob_icon}</span>
-                    <span style='color:{cor};font-weight:bold;'>{badge} &nbsp;
-                      <span style='font-family:monospace;letter-spacing:1px;'>{bar_str}</span>
-                      &nbsp;{score:.0f}/100
-                    </span>
-                  </div>
-                  <div style='font-size:17px;font-weight:bold;color:white;margin:5px 0 3px;'>
-                    {p['jogo']}
-                  </div>
-                  <div style='font-size:13px;color:#ccc;'>
-                    <b>{p['mercado']}</b> &nbsp;·&nbsp;
-                    Odd <b>{p['odd']:.2f}</b> &nbsp;·&nbsp;
-                    Modelo <b>{p['prob_modelo']:.1f}%</b> vs Mercado {p['prob_mercado']:.1f}%
-                    &nbsp;·&nbsp; Δ <b>{p['divergencia']:+.1f}pp</b>
-                  </div>
-                  <div style='font-size:12px;color:#aaa;margin-top:2px;'>
-                    EV <span style='color:{cor};font-weight:bold;'>{p['ev']:+.1f}%</span>
-                    &nbsp;·&nbsp; Kelly {p['kelly']*100:.1f}%
-                    &nbsp;·&nbsp; 💵 Stake: <b>R$ {p['stake']:.2f}</b>
-                  </div>
-                </div>""",
-                unsafe_allow_html=True,
-            )
+                st.markdown(
+                    f"""<div style='border-left:4px solid {cor};padding:10px 14px;
+                                  margin-bottom:10px;background:#0e1117;border-radius:4px;'>
+                      <div style='display:flex;justify-content:space-between;
+                                  font-size:11px;color:#888;'>
+                        <span>#{i} · {p.get('liga','—')} · {cob_icon}</span>
+                        <span style='color:{cor};font-weight:bold;'>{badge} &nbsp;
+                          <span style='font-family:monospace;letter-spacing:1px;'>{bar_str}</span>
+                          &nbsp;{score:.0f}/100
+                        </span>
+                      </div>
+                      <div style='font-size:17px;font-weight:bold;color:white;margin:5px 0 3px;'>
+                        {p.get('jogo','—')}
+                      </div>
+                      <div style='font-size:13px;color:#ccc;'>
+                        <b>{p.get('mercado','—')}</b> &nbsp;·&nbsp;
+                        Odd <b>{p.get('odd',0):.2f}</b> &nbsp;·&nbsp;
+                        Modelo <b>{p.get('prob_modelo',0):.1f}%</b> vs Mercado {p.get('prob_mercado',0):.1f}%
+                        &nbsp;·&nbsp; Δ <b>{p.get('divergencia',0):+.1f}pp</b>
+                      </div>
+                      <div style='font-size:12px;color:#aaa;margin-top:2px;'>
+                        EV <span style='color:{cor};font-weight:bold;'>{p.get('ev',0):+.1f}%</span>
+                        &nbsp;·&nbsp; Kelly {p.get('kelly',0)*100:.1f}%
+                        &nbsp;·&nbsp; 💵 Stake: <b>R$ {p.get('stake',0):.2f}</b>
+                      </div>
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
+            except Exception:
+                continue
 
         # ── Consultora Gemini ────────────────────────────────────────
         st.markdown("#### 🤖 Consultora IA (Gemini)")
@@ -1211,6 +1277,124 @@ with tab_analise:
                     )
                 st.markdown("---")
                 st.markdown(_gemini_texto)
+
+        # ── Painel de Execução em Lote ───────────────────────────────────────
+        st.markdown("---")
+        st.markdown("#### 📥 Painel de Execução")
+        st.caption(
+            f"{len(ranking)} entrada(s) do ranking. "
+            "Score ≥ 90 pré-selecionado. Defina a stake, revise e confirme em um clique."
+        )
+
+        # Proteção de banca: < R$ 50 → stake padrão inicial travada em R$ 1,00
+        _banca_baixa  = banca_atual < 50.0
+        _stake_init   = 1.0 if _banca_baixa else 1.0   # ambos 1.0 — usuário ajusta
+
+        _col_sp1, _col_sp2 = st.columns([2, 6])
+        with _col_sp1:
+            _stake_padrao = st.number_input(
+                "💰 Stake Padrão (R$)",
+                value=_stake_init,
+                min_value=0.5,
+                step=0.5,
+                key="painel_stake_padrao",
+            )
+        with _col_sp2:
+            if _banca_baixa:
+                st.warning(
+                    f"⚠️ Banca baixa (R$ {banca_atual:.2f}) — "
+                    "stake padrão sugerida em R$ 1,00 para proteção."
+                )
+            else:
+                st.caption(
+                    "Altere a Stake Padrão para aplicar o mesmo valor em todas as linhas. "
+                    "Cada célula de stake pode ser editada individualmente na tabela."
+                )
+
+        # Ao mudar a stake padrão, reseta o estado do data_editor para que todas
+        # as linhas reinicializem com o novo valor (checkboxes também voltam ao padrão).
+        if st.session_state.get("_painel_stake_prev") != _stake_padrao:
+            st.session_state.pop("_painel_editor", None)
+            st.session_state["_painel_stake_prev"] = _stake_padrao
+
+        _df_painel = pd.DataFrame([
+            {
+                "✅":         p.get("score", 0) >= 90,
+                "Jogo":       p.get("jogo", "—"),
+                "Mercado":    p.get("mercado", "—"),
+                "Odd":        round(float(p.get("odd", 0)), 2),
+                "Score":      int(p.get("score", 0)),
+                "Stake (R$)": float(_stake_padrao),
+            }
+            for p in ranking
+        ])
+
+        _edited_painel = st.data_editor(
+            _df_painel,
+            column_config={
+                "✅":         st.column_config.CheckboxColumn(
+                    "✅", width="small",
+                    help="Marque para incluir no registro em lote"
+                ),
+                "Jogo":       st.column_config.TextColumn("Jogo", disabled=True, width="large"),
+                "Mercado":    st.column_config.TextColumn("Mercado", disabled=True, width="small"),
+                "Odd":        st.column_config.NumberColumn("Odd", disabled=True, format="%.2f", width="small"),
+                "Score":      st.column_config.NumberColumn("Score", disabled=True, width="small"),
+                "Stake (R$)": st.column_config.NumberColumn(
+                    "Stake (R$)", min_value=0.5, step=0.5, format="R$ %.2f", width="medium"
+                ),
+            },
+            hide_index=True,
+            use_container_width=True,
+            key="_painel_editor",
+        )
+
+        _sel_mask  = _edited_painel["✅"].fillna(False).astype(bool)
+        _n_sel     = int(_sel_mask.sum())
+        _tot_stake = float(_edited_painel.loc[_sel_mask, "Stake (R$)"].sum())
+
+        _col_info, _col_btn = st.columns([3, 2])
+        with _col_info:
+            st.caption(
+                f"**{_n_sel}** selecionada(s)  ·  "
+                f"Stake total: **R$ {_tot_stake:.2f}**  ·  "
+                f"Banca atual: R$ {banca_atual:.2f}"
+            )
+        with _col_btn:
+            if st.button(
+                f"📥 Confirmar e Registrar {_n_sel} Pick(s)" if _n_sel > 0
+                else "📥 Nenhuma pick selecionada",
+                type="primary",
+                use_container_width=True,
+                disabled=_n_sel == 0,
+                key="_btn_registrar_lote",
+            ):
+                _picks_novos = []
+                for _idx in _edited_painel[_sel_mask].index:
+                    _p   = ranking[_idx]
+                    _stk = float(_edited_painel.at[_idx, "Stake (R$)"])
+                    _picks_novos.append({
+                        "data":           data_str,
+                        "jogo":           _p.get("jogo", "—"),
+                        "liga_id":        _p.get("liga", ""),
+                        "fixture_id":     str(_p.get("fixture_id", "")),
+                        "mercado":        _p.get("mercado", "—"),
+                        "odd":            float(_p.get("odd", 0)),
+                        "prob_modelo":    round(float(_p.get("prob_modelo", 0)), 2),
+                        "prob_mercado":   round(float(_p.get("prob_mercado", 0)), 2),
+                        "divergencia_pp": round(float(_p.get("divergencia", 0)), 2),
+                        "ev":             round(float(_p.get("ev", 0)), 2),
+                        "kelly_frac":     round(float(_p.get("kelly", 0)), 4),
+                        "stake":          _stk,
+                        "status":         "Pendente",
+                        "salvo_em":       dt.datetime.now().isoformat(),
+                    })
+                banco.picks.extend(_picks_novos)
+                dm.salvar_banco(banco)
+                st.session_state["banco"] = banco
+                st.session_state.pop("_painel_editor", None)
+                st.success(f"✅ {len(_picks_novos)} pick(s) registrada(s) com sucesso!")
+                st.rerun()
 
         st.divider()
 
@@ -1282,12 +1466,13 @@ with tab_analise:
             )
             continue
 
-        hora      = j["fixture"]["date"][11:16]
-        liga_nome = j["league"]["name"]
-        flags_str = " | ".join(prev["flags"]) if prev.get("flags") else "—"
-        cobertura = "✅" if prev.get("cobertura_ok") else "⚠️ dados insuficientes (usando média)"
+        try:
+          hora      = j["fixture"]["date"][11:16]
+          liga_nome = j["league"]["name"]
+          flags_str = " | ".join(prev["flags"]) if prev.get("flags") else "—"
+          cobertura = "✅" if prev.get("cobertura_ok") else "⚠️ dados insuficientes (usando média)"
 
-        with st.container():
+          with st.container():
             st.markdown(
                 f"""<div style='background:#0e1117;padding:10px;border-radius:6px;border:1px solid #333;'>
                   <div style='display:flex;justify-content:space-between;color:#888;font-size:11px;'>
@@ -1347,18 +1532,18 @@ with tab_analise:
 
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Odd", f"{odd_atual:.2f}")
-                c2.metric("EV", f"{comp['ev_pct']:+.1f}%")
+                c2.metric("EV", f"{comp.get('ev_pct', 0):+.1f}%")
                 c3.metric("Stake sugerida", f"R$ {stake_sug:.2f}" if stake_sug > 0 else "DESCARTAR")
 
                 stake_input = st.number_input("Stake final (R$)", value=stake_sug,
                                               step=0.5, min_value=0.0, key=f"stk_{f_id}")
-                bloqueado   = odd_atual < odd_min_save or comp["anomalia"] or stake_input <= 0
+                bloqueado   = odd_atual < odd_min_save or comp.get("anomalia", True) or stake_input <= 0
 
                 if bloqueado:
                     motivos = []
-                    if odd_atual < odd_min_save:   motivos.append(f"odd {odd_atual:.2f} < {odd_min_save}")
-                    if comp["anomalia"]:            motivos.append(f"anomalia (Δ {comp['divergencia_pp']:+.1f}pp)")
-                    if stake_input <= 0:            motivos.append("stake zero")
+                    if odd_atual < odd_min_save:         motivos.append(f"odd {odd_atual:.2f} < {odd_min_save}")
+                    if comp.get("anomalia"):             motivos.append(f"anomalia (Δ {comp.get('divergencia_pp', 0):+.1f}pp)")
+                    if stake_input <= 0:                 motivos.append("stake zero")
                     st.warning("⚠️ Save bloqueado: " + " | ".join(motivos))
 
                 if st.button("💾 Salvar pick", disabled=bloqueado,
@@ -1371,9 +1556,9 @@ with tab_analise:
                         "mercado":      mk_sel,
                         "odd":          odd_atual,
                         "prob_modelo":  round(prob_mod, 2),
-                        "prob_mercado": round(comp["prob_mercado_pct"], 2),
-                        "divergencia_pp": round(comp["divergencia_pp"], 2),
-                        "ev":           round(comp["ev_pct"], 2),
+                        "prob_mercado": round(comp.get("prob_mercado_pct", 0), 2),
+                        "divergencia_pp": round(comp.get("divergencia_pp", 0), 2),
+                        "ev":           round(comp.get("ev_pct", 0), 2),
                         "kelly_frac":   round(comp.get("kelly_fracao", 0), 4),
                         "stake":        stake_input,
                         "status":       "Pendente",
@@ -1382,6 +1567,10 @@ with tab_analise:
                     dm.salvar_banco(banco)
                     st.success("Pick salva! ✅")
                     st.rerun()
+
+        except Exception as _e:
+            st.warning(f"⚠️ Erro ao renderizar jogo {f_id}: {_e}")
+            continue
 
 
 # =========================================================================
