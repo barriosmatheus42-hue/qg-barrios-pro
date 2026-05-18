@@ -762,16 +762,14 @@ def prever_jogo(
     M = matriz_placar(lam, mu, params.rho, max_gols=10)
     mercados = derivar_mercados(M, lam, mu)
 
-    # Calibração isotônica (Dossiê v8 — Passo 4).
-    # Aplica MarketCalibrator em cada mercado que possui calibrador treinado.
-    # Mercados sem calibrador (AH, PE, 1X2, exóticos) ficam com prob bruta.
-    # Fallback implícito: calibrar() retorna prob_bruta_pct se _iso=None ou n<30.
+    # TESTE A — calibrador desativado: motor retorna probs RAW do D-C/Poisson.
+    # Para reativar, descomente o bloco abaixo e remova esta linha de comentário.
     calibracao_aplicada = False
-    if params.calibradores:
-        for mercado, cal in params.calibradores.items():
-            if mercado in mercados:
-                mercados[mercado] = cal.calibrar(mercados[mercado])
-        calibracao_aplicada = True
+    # if params.calibradores:
+    #     for mercado, cal in params.calibradores.items():
+    #         if mercado in mercados:
+    #             mercados[mercado] = cal.calibrar(mercados[mercado])
+    #     calibracao_aplicada = True
 
     return {
         "home_id":            home_id,
@@ -1225,6 +1223,70 @@ def _self_test() -> None:
     print("\n" + "=" * 70)
     print("TODOS OS TESTES PASSARAM")
     print("=" * 70)
+
+
+# =========================================================================
+# FILTROS P1+P2 — portáveis para app_v3.py e backtest.py
+# =========================================================================
+
+from dataclasses import dataclass as _dataclass
+
+
+@_dataclass
+class GapConfig:
+    """Distância mínima de lambda+mu ao limiar 2.5 para cada mercado.
+
+    gap_over_min=0.0  → aceita qualquer Over onde D-C prevê lambda+mu > 2.5
+    gap_under_min=0.5 → exige lambda+mu < 2.0 para Under (validado V4)
+    """
+    gap_over_min:  float = 0.0
+    gap_under_min: float = 0.5
+
+    def to_dict(self) -> dict:
+        return {"gap_over_min": self.gap_over_min, "gap_under_min": self.gap_under_min}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "GapConfig":
+        return cls(**d)
+
+
+@_dataclass
+class EvConfig:
+    """Limiares de EV mínimo por tipo de mercado — sobrepostos ao filtrar_gatilho.
+
+    ev_min_over=5.0   → default do motor (inalterado)
+    ev_min_under=20.0 → elevado pelo backtest V4 para eliminar Unders ruidosos
+    """
+    ev_min_over:  float = 5.0
+    ev_min_under: float = 20.0
+
+    def to_dict(self) -> dict:
+        return {"ev_min_over": self.ev_min_over, "ev_min_under": self.ev_min_under}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "EvConfig":
+        return cls(**d)
+
+
+def filtrar_gap(mercado: str, xg_total: float, cfg: GapConfig) -> bool:
+    """Filtro P1: rejeita picks onde lambda+mu está na zona de incerteza do limiar 2.5.
+
+    xg_total = lambda + mu da previsão D-C (já disponível em prev['xg_total']).
+    """
+    if mercado == "UNDER_25":
+        return xg_total < (2.5 - cfg.gap_under_min)
+    if mercado == "OVER_25":
+        return xg_total > (2.5 + cfg.gap_over_min)
+    return True
+
+
+def filtrar_ev_config(mercado: str, ev_pct: float, cfg: EvConfig) -> bool:
+    """Filtro auxiliar: aplica limiares de EvConfig acima do filtrar_gatilho base."""
+    if "OVER" in mercado:
+        return ev_pct >= cfg.ev_min_over
+    if "UNDER" in mercado:
+        return ev_pct >= cfg.ev_min_under
+    return True
 
 
 if __name__ == "__main__":
