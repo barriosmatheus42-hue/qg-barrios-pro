@@ -28,6 +28,10 @@ from motor import (
     filtrar_gatilho,
     MERCADOS_PRODUCAO,
     EV_MIN_POR_MERCADO,
+    GapConfig,
+    EvConfig,
+    filtrar_gap,
+    filtrar_ev_config,
 )
 from dados import (
     BancoQG,
@@ -62,6 +66,12 @@ TETO_PCT_BANCA_PADRAO    = 0.10
 ODD_MIN_SAVE             = 1.70
 LIMITE_DIVERGENCIA_PP    = 20.0
 MARGEM_BOOKMAKER_DEFAULT = 1.05
+
+# Filtros P1+P2 — validados por backtest walk-forward (V4, 12 janelas)
+# GapConfig: sem gap para Over (D-C biasado já filtra), gap 0.5 para Under
+# EvConfig:  EV>=20% para Under elimina falsos positivos estruturais do D-C
+GAP_CONFIG_PROD = GapConfig(gap_over_min=0.0, gap_under_min=0.5)
+EV_CONFIG_PROD  = EvConfig(ev_min_over=5.0,  ev_min_under=20.0)
 
 # Ranking de qualidade — sem número fixo
 SCORE_MINIMO_RANKING = 35   # picks abaixo disso são filtrados mesmo com EV positivo
@@ -1115,9 +1125,12 @@ with tab_analise:
                                          MARGEM_BOOKMAKER_DEFAULT, limite_div)
             stake = calcular_stake_final(comp.get("kelly_fracao", 0), banca_atual,
                                          piso_kelly, teto_pct)
-            # Filtro de gatilho por mercado: EV_MIN + PROB_MIN + delta > 0 (Dossiê v8 Seção 5.1)
+            # Filtro de gatilho: EV_MIN + PROB_MIN + delta > 0
+            xg_total_prev = prev.get("xg_total", 2.5)
             if not (filtrar_gatilho(mercado, comp["ev_pct"], prob_modelo,
                                     comp["divergencia_pp"], odd_val)
+                    and filtrar_gap(mercado, xg_total_prev, GAP_CONFIG_PROD)       # P1
+                    and filtrar_ev_config(mercado, comp["ev_pct"], EV_CONFIG_PROD) # EV override
                     and stake > 0 and not comp["anomalia"]):
                 continue
 
