@@ -1,0 +1,50 @@
+# Dados das ligas (carregados via API)
+*.csv
+*.xlsx
+*.xls
+
+# Banco calibrado local (recriado pelo app)
+banco_barrios.json
+banco_barrios_pro.json
+
+# Chaves de API — NUNCA commitar
+.streamlit/secrets.toml
+
+# Versões antigas do app
+app_v2.py
+app_v3.py
+
+# Arquivos de laboratório/backtest (não vão para produção)
+backtest.py
+backtest_1x2.py
+gemini_filter.py
+simulador.py
+enriched_builder.py
+treinar_calibradores.py
+teste_dados.py
+dados_jogos.csv
+resultado_*.csv
+validacao_*.csv
+backtest_*.txt
+backtest_*.csv
+dossie_*.md
+AUTOPSIA_*.md
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Memória do Claude
+.claude/
+
+# Dados extras
+data/
+ligas sql/
