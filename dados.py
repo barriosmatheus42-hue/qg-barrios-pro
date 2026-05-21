@@ -181,6 +181,7 @@ LIGAS_MIN_JOGOS: dict[int, int] = {
     73:  15,   # Copa do Brasil
     137: 15,   # Coppa Italia
     529: 15,   # DFB Pokal
+    556: 15,   # Copa del Rey
     1:   10,   # Copa do Mundo
     9:   10,   # Copa América
     6:   12,   # UEFA Nations League
@@ -194,7 +195,7 @@ LIGAS_MIN_JOGOS: dict[int, int] = {
 # min_aparicoes_time por liga (override do padrão de 3).
 # Copas e competições de seleções aceitam times/seleções com menos aparições.
 LIGAS_MIN_APARICOES: dict[int, int] = {
-    45: 2, 48: 2, 66: 2, 73: 2, 137: 2, 529: 2,  # copas nacionais
+    45: 2, 48: 2, 66: 2, 73: 2, 137: 2, 529: 2, 556: 2,  # copas nacionais
     1: 2, 6: 2, 9: 2, 29: 2, 30: 2, 31: 2, 32: 2, 34: 2,  # seleções
 }
 
@@ -313,7 +314,12 @@ class ApiSportsClient:
              dict {team_id: "Nome do Time"} para exibição na auditoria)
         """
         self.trava_saldo(CUSTO_ESTIMADO_HISTORICO_LIGA, saldo_minimo=SALDO_MIN_PARA_CALIBRACAO)
-        params = {"league": league_id, "season": season, "status": "FT"}
+        # Sem filtro status=FT na API — aceita também AET (extra time) e PEN (pênaltis).
+        # Copas eliminatórias têm muitos jogos que terminam em prorrogação/pênaltis;
+        # filtrar só por FT descarta a maioria dos jogos decisivos.
+        # O filtro local abaixo aceita todos os resultados definitivos.
+        _STATUS_FINALIZADOS = {"FT", "AET", "PEN", "AWD", "WO"}
+        params = {"league": league_id, "season": season}
         try:
             res = requests.get(f"{BASE_URL}/fixtures", headers=self.headers, params=params, timeout=TIMEOUT_API)
             data = res.json()
@@ -331,6 +337,9 @@ class ApiSportsClient:
         nomes: dict[int, str] = {}
         for j in jogos:
             try:
+                _st = j.get("fixture", {}).get("status", {}).get("short", "")
+                if _st not in _STATUS_FINALIZADOS:
+                    continue  # ignora jogos futuros, suspensos, cancelados, etc.
                 gh = j["goals"]["home"]
                 ga = j["goals"]["away"]
                 if gh is None or ga is None:

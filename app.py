@@ -798,7 +798,10 @@ with tab_calibracao:
         elif not erros and not timeouts:
             st.info("Nenhuma ação executada.")
 
-        st.session_state["banco"] = dm.banco_em_memoria()
+        try:
+            st.session_state["banco"] = dm.banco_em_memoria()
+        except Exception:
+            st.session_state["banco"] = dm.carregar_banco(força_recarregar=True)
         st.rerun()
 
     # ── Calibrar ligas em lote ────────────────────────────────────────
@@ -956,7 +959,10 @@ with tab_calibracao:
             if not _timeouts_lote and not _erros_lote:
                 st.success(f"✅ {_total_lote} liga(s) calibrada(s) com sucesso!")
 
-            st.session_state["banco"] = dm.banco_em_memoria()
+            try:
+                st.session_state["banco"] = dm.banco_em_memoria()
+            except Exception:
+                st.session_state["banco"] = dm.carregar_banco(força_recarregar=True)
             st.rerun()
 
 
