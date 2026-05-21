@@ -64,6 +64,12 @@ LIGAS_SUPORTADAS = {
     135: "Serie A",
     78:  "Bundesliga",
     61:  "Ligue 1",
+    # ── Segundas Divisões Europa ──────────────────────────────────────
+    40:  "Championship (Inglaterra)",
+    79:  "2. Bundesliga",
+    136: "Serie B (Itália)",
+    141: "Segunda División (Espanha)",
+    62:  "Ligue 2 (França)",
     # ── Copas Europeias ───────────────────────────────────────────────
     2:   "Champions League",
     3:   "Europa League",
@@ -82,6 +88,10 @@ LIGAS_SUPORTADAS = {
     144: "Belgian Pro League",
     103: "Eliteserien (Noruega)",
     113: "Allsvenskan (Suécia)",
+    119: "Superliga (Dinamarca)",
+    197: "Super League (Grécia)",
+    218: "Bundesliga (Áustria)",
+    207: "Super League (Suíça)",
     # ── Brasil ────────────────────────────────────────────────────────
     71:  "Brasileirão Série A",
     72:  "Brasileirão Série B",
@@ -93,9 +103,14 @@ LIGAS_SUPORTADAS = {
     128: "Liga Argentina",
     253: "MLS",
     262: "Liga MX",
+    239: "Primera A (Colômbia)",
+    265: "Primera División (Chile)",
+    268: "Primera División (Uruguai)",
     # ── Oriente Médio / Ásia ──────────────────────────────────────────
     307: "Saudi Pro League",
     98:  "J1 League (Japão)",
+    292: "K League 1 (Coreia do Sul)",
+    169: "Super League (China)",
     # ── Copa do Mundo / Eliminatórias ─────────────────────────────────
     1:   "Copa do Mundo 2026",
     9:   "Copa América",
@@ -120,9 +135,15 @@ LIGAS_TEMPORADA_ANO_ATUAL = {
     128,  # Liga Argentina
     253,  # MLS
     262,  # Liga MX
+    239,  # Primera A (Colômbia)
+    265,  # Primera División (Chile)
+    268,  # Primera División (Uruguai)
     98,   # J1 League (Japão)
+    292,  # K League 1 (Coreia do Sul)
+    169,  # Super League (China)
     103,  # Eliteserien (Noruega) — liga de verão, inicia em abril
     113,  # Allsvenskan (Suécia)  — liga de verão, inicia em abril
+    119,  # Superliga (Dinamarca) — liga de verão, inicia em março
 }
 
 # Competições de seleções: usam calibrar_copa_mundo() com decay agressivo e

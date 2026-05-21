@@ -593,10 +593,24 @@ with tab_calibracao:
         saldo_ok = custo <= saldo - SALDO_MINIMO_EMERGENCIA
 
         if n_total == 0:
+            # Conta ligas que precisam de calibração (velhas ou nunca calibradas)
+            _status_ligas = banco.status_ligas() if hasattr(banco, "status_ligas") else {}
+            _n_velhas    = sum(1 for lid in LIGAS_SUPORTADAS if banco.params_ligas.get(str(lid)) is not None
+                               and (dt.datetime.now() - dt.datetime.fromisoformat(
+                                   banco.params_ligas[str(lid)].get("calibrado_em", "2000-01-01")
+                               )).days > INTERVALO_RECALIBRACAO_DIAS)
+            _n_nunca     = sum(1 for lid in LIGAS_SUPORTADAS if banco.params_ligas.get(str(lid)) is None)
+            _msg_extra   = ""
+            if _n_velhas:
+                _msg_extra += f" · **{_n_velhas} liga(s) com calibração vencida** (amarelo)."
+            if _n_nunca:
+                _msg_extra += f" · **{_n_nunca} liga(s) nunca calibradas** (vermelho) — sem fixtures na API ainda ou aguardando calibração."
             st.success(
-                "✅ **Cache 100% atualizado.** Nenhum fixture novo para baixar. "
-                "Pode avançar para calibração diretamente."
+                "✅ **Cache de fixtures atualizado** — nenhum jogo novo para baixar."
+                + (_msg_extra or " Todas as ligas estão calibradas e em dia.")
             )
+            if _n_velhas or _n_nunca:
+                st.info("💡 Use o botão **Passo 2 — Calibrar** abaixo para atualizar as ligas em amarelo/vermelho usando os dados já em cache.")
         elif saldo_ok:
             st.warning(
                 f"📊 **{n_total} jogos novos detectados** · "
