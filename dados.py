@@ -668,20 +668,26 @@ class DadosManager:
         # 2. Nuvem (autoritativa para picks/banca)
         banco_nuvem = self.jsonbin.ler()
 
-        # 3. Mescla: nuvem manda em picks/banca/depositos/params_ligas; local manda em datas
+        # 3. Mescla: nuvem manda em picks/banca/depositos; local manda em params_ligas/datas
         banco = BancoQG()
         banco.picks = banco_nuvem.get("picks", banco_local.get("picks", []))
         banco.banca_inicial = float(banco_nuvem.get("banca_inicial", banco_local.get("banca_inicial", 30.0)))
         banco.depositos = banco_nuvem.get("depositos", banco_local.get("depositos", []))
-        banco.params_ligas = banco_nuvem.get("params_ligas", banco_local.get("params_ligas", {}))
-        # Calibradores são local-only: grandes demais para JSONBin e regeneráveis via
-        # treinar_calibradores.py. A nuvem nunca os armazena; injeta do JSON local
-        # em cada liga conhecida para que as previsões e a UI os enxerguem sempre.
+        # params_ligas: local sobrescreve nuvem por liga — calibrar_liga escreve em disco
+        # ANTES de tentar o JSONBin, então local é sempre a cópia mais fresca após qualquer
+        # calibração. A nuvem fornece params de sessões anteriores (Streamlit Cloud perde
+        # o arquivo local a cada redeploy); o merge garante que nenhuma liga é perdida E
+        # que o timestamp exibido na UI sempre reflete a última calibração real.
         _params_local_raw = banco_local.get("params_ligas", {})
+        _params_nuvem_raw = banco_nuvem.get("params_ligas", {})
+        banco.params_ligas = {**_params_nuvem_raw, **_params_local_raw}
+        # Calibradores são local-only (JSONBin nunca os armazena); injeta apenas nas ligas
+        # cujos params vieram exclusivamente da nuvem (sem cópia local com calibradores).
         for _lid_str, _params_dict in banco.params_ligas.items():
-            _cals = _params_local_raw.get(_lid_str, {}).get("calibradores", {})
-            if _cals:
-                _params_dict["calibradores"] = _cals
+            if not _params_dict.get("calibradores"):
+                _cals = _params_local_raw.get(_lid_str, {}).get("calibradores", {})
+                if _cals:
+                    _params_dict["calibradores"] = _cals
         banco.datas = banco_local.get("datas", {})                      # cache do dia fica local
         banco.historico_ligas = banco_local.get("historico_ligas", {}) # xG cache — local apenas
 
@@ -938,6 +944,19 @@ class DadosManager:
             season_anterior  = None
             seasons_label    = [season_principal]
             log.info(f"Calibrando liga {league_id} (season {season_principal}) via MLE...")
+
+        # Full Fetch bootstrap: liga europeia com cache vazio → busca também season anterior
+        # para garantir volume mínimo de treino na primeira calibração. Após o bootstrap,
+        # o cache terá registros e esta condição deixa de ser verdadeira (sem custo extra).
+        if not usar_ano_atual and season_anterior is None:
+            _hist_check = banco.historico_ligas.get(chave, {"registros": []})
+            if not _hist_check.get("registros"):
+                season_anterior = season_principal - 1
+                seasons_label   = [season_anterior, season_principal]
+                log.info(
+                    f"Liga {league_id}: cache vazio → Full Fetch seasons "
+                    f"{season_anterior}+{season_principal}"
+                )
 
         # Delta Fetch: busca xG apenas para fixtures novos (cache local) — Dossiê v8 Seção 3.1
         df, nomes = self._obter_historico_com_delta_xg(league_id, season_principal, season_anterior)
