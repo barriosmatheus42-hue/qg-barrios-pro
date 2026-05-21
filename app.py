@@ -613,12 +613,6 @@ with tab_calibracao:
             else:
                 _aguardando.append(_lid)
 
-        st.session_state["delta_cats"] = {
-            "inativas":   _inativas,
-            "com_novos":  _com_novos,
-            "aguardando": _aguardando,
-        }
-
         # ── Mensagem de resumo ──────────────────────────────────────────
         if _com_novos:
             if saldo_ok:
@@ -710,20 +704,37 @@ with tab_calibracao:
                 else "Sem créditos suficientes ou apenas ligas aguardando início do torneio."
             ),
         ):
+            st.session_state["delta_snapshot"] = preview
             st.session_state["delta_confirmado"] = True
             st.session_state.pop("delta_preview", None)
+            st.session_state.pop("delta_cats", None)
             st.rerun()
 
     # ── Executa calibração após confirmação ───────────────────────────
     if st.session_state.get("delta_confirmado"):
         st.session_state.pop("delta_confirmado", None)
-        cats      = st.session_state.pop("delta_cats", {})
-        inativas  = cats.get("inativas",   [])
-        com_novos = cats.get("com_novos",  [])
-        aguardando = cats.get("aguardando", [])
+        snapshot  = st.session_state.pop("delta_snapshot", {})
 
-        # Fallback: session reiniciada entre Passo 1 e 2 → recalibra tudo
-        if not inativas and not com_novos:
+        # Re-deriva categorias a partir do snapshot completo (evita race de session_state)
+        inativas:  list[int] = []
+        com_novos: list[int] = []
+        aguardando: list[int] = []
+        for _li in snapshot.get("ligas", []):
+            _lid = _li["league_id"]
+            _nn  = _li["n_novos_liga"]
+            _pd  = banco.params_ligas.get(str(_lid), {})
+            _tem_cal = bool(_pd.get("calibrado_em"))
+            if _nn > 0:
+                com_novos.append(_lid)
+            elif _tem_cal:
+                inativas.append(_lid)
+            else:
+                # "Nunca calibrada" + 0 API games → tenta Full Fetch
+                # (dados.py fará bootstrap season + season-1; falha graciosamente se vazio)
+                com_novos.append(_lid)
+
+        # Fallback: snapshot perdido (session reiniciada entre Passo 1 e 2) → recalibra tudo
+        if not snapshot.get("ligas"):
             com_novos = list(LIGAS_SUPORTADAS.keys())
 
         total_ops    = len(inativas) + len(com_novos)
@@ -787,7 +798,7 @@ with tab_calibracao:
         elif not erros and not timeouts:
             st.info("Nenhuma ação executada.")
 
-        st.session_state["banco"] = dm.carregar_banco(força_recarregar=True)
+        st.session_state["banco"] = dm.banco_em_memoria()
         st.rerun()
 
     # ── Calibrar ligas em lote ────────────────────────────────────────
@@ -945,7 +956,7 @@ with tab_calibracao:
             if not _timeouts_lote and not _erros_lote:
                 st.success(f"✅ {_total_lote} liga(s) calibrada(s) com sucesso!")
 
-            st.session_state["banco"] = dm.carregar_banco(força_recarregar=True)
+            st.session_state["banco"] = dm.banco_em_memoria()
             st.rerun()
 
 

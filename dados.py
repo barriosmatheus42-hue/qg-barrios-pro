@@ -1109,10 +1109,9 @@ class DadosManager:
         banco = self.carregar_banco()
         chave = str(league_id)
         params_d = banco.params_ligas.get(chave)
-        if not params_d or not params_d.get("times"):
+        if not params_d or not params_d.get("calibrado_em"):
             raise ValueError(
-                f"Liga {league_id} nunca foi calibrada — impossível renovar "
-                "timestamp sem modelo D-C treinado."
+                f"Liga {league_id} nunca foi calibrada — sem timestamp para renovar."
             )
         params_d["calibrado_em"] = dt.datetime.now().isoformat()
         banco.params_ligas[chave] = params_d
@@ -1121,6 +1120,13 @@ class DadosManager:
             f"Liga {league_id} ({LIGAS_SUPORTADAS.get(league_id, '?')}): "
             "timestamp renovado — liga inativa (0 jogos novos)."
         )
+
+    def banco_em_memoria(self) -> BancoQG:
+        """Retorna banco em memória sem re-consultar JSONBin.
+        Sempre fresco após calibração ou tocar_timestamp_liga."""
+        if self._banco is None:
+            return self.carregar_banco()
+        return self._banco
 
     def calibrar_liga_avulsa(self, league_id: int, season: int) -> ParametrosLiga:
         """
