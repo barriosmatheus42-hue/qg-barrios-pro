@@ -82,6 +82,9 @@ _EV_MIN: dict   = {"HOME": 10.0, "DRAW": 28.0, "AWAY": 7.0,  "1X": 8.0,  "X2": 8
 _EV_MAX: dict   = {"HOME": 15.0, "DRAW": 80.0, "AWAY": 22.0, "1X": 18.0, "X2": 18.0, "12": 18.0}
 _PROB_MIN: dict = {"HOME": 45.0, "DRAW": 22.0, "AWAY": 28.0, "1X": 65.0, "X2": 65.0, "12": 65.0}
 _ODD_MIN: dict  = {"HOME": 1.80, "DRAW": 2.80, "AWAY": 1.60, "1X": 1.25, "X2": 1.25, "12": 1.25}
+# Teto de odd por mercado — controla variância sem cortar EV. DRAW=6.50 elimina bets
+# tipo "loteria" (hit rate ~14%) onde o D-C está no limite de calibração confiável.
+_ODD_MAX: dict  = {"HOME": 3.50, "DRAW": 6.50, "AWAY": 5.00, "1X": 2.50, "X2": 2.50, "12": 2.50}
 
 # Ranking de qualidade — sem número fixo
 SCORE_MINIMO_RANKING = 35   # picks abaixo disso são filtrados mesmo com EV positivo
@@ -457,7 +460,7 @@ with st.sidebar:
     with st.expander("⚙️ Gestão de Risco"):
         piso_kelly   = st.number_input("Piso de stake (R$)", min_value=0.5, step=0.5, key="risk_piso_kelly")
         teto_pct     = st.slider("Teto % da banca", 5, 25, key="risk_teto_pct_pct") / 100
-        odd_min_save = st.number_input("Odd mínima p/ analisar", min_value=1.01, step=0.05, key="risk_odd_min")
+        odd_min_save = st.number_input("Odd mínima global (Gols + Resultados)", min_value=1.01, step=0.05, key="risk_odd_min")
         prob_min     = st.number_input("Prob. mínima do modelo (%)", min_value=0.0, max_value=99.0, step=5.0, key="risk_prob_min")
         # 20pp: limiar documentado no paper Dixon-Coles e nos bugs do V6.1.
         limite_div   = st.slider("Anomalia se divergência >", 10, 20, key="risk_limite_div")
@@ -1674,11 +1677,13 @@ with tab_analise:
                     ev_min  = _EV_MIN[mercado]
                     ev_max  = _EV_MAX[mercado]
                     prob_mn = _PROB_MIN[mercado]
-                    odd_mn  = _ODD_MIN[mercado]
+                    # Piso efetivo: máximo entre o mínimo do backtest e o slider global
+                    eff_odd_mn = max(_ODD_MIN[mercado], odd_min_save)
+                    odd_mx     = _ODD_MAX[mercado]
 
                     if not (ev_min <= ev <= ev_max
                             and prob_pct >= prob_mn
-                            and odd_mkt >= odd_mn):
+                            and eff_odd_mn <= odd_mkt <= odd_mx):
                         continue
 
                     stake_mo = calcular_stake_final(
