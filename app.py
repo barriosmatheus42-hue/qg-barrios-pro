@@ -591,89 +591,123 @@ with tab_calibracao:
     # ── Exibe preview (se calculado) ──────────────────────────────────
     preview = st.session_state.get("delta_preview")
     if preview:
-        n_total = preview["n_novos_total"]
-        custo   = preview["custo_estimado_creditos"]
+        custo    = preview["custo_estimado_creditos"]
         saldo_ok = custo <= saldo - SALDO_MINIMO_EMERGENCIA
 
-        if n_total == 0:
-            # Conta ligas que precisam de calibração (velhas ou nunca calibradas)
-            _status_ligas = banco.status_ligas() if hasattr(banco, "status_ligas") else {}
-            _n_velhas    = sum(1 for lid in LIGAS_SUPORTADAS if banco.params_ligas.get(str(lid)) is not None
-                               and (dt.datetime.now() - dt.datetime.fromisoformat(
-                                   banco.params_ligas[str(lid)].get("calibrado_em", "2000-01-01")
-                               )).days > INTERVALO_RECALIBRACAO_DIAS)
-            _n_nunca     = sum(1 for lid in LIGAS_SUPORTADAS if banco.params_ligas.get(str(lid)) is None)
-            _msg_extra   = ""
-            if _n_velhas:
-                _msg_extra += f" · **{_n_velhas} liga(s) com calibração vencida** (amarelo)."
-            if _n_nunca:
-                _msg_extra += f" · **{_n_nunca} liga(s) nunca calibradas** (vermelho) — sem fixtures na API ainda ou aguardando calibração."
-            st.success(
-                "✅ **Cache de fixtures atualizado** — nenhum jogo novo para baixar."
-                + (_msg_extra or " Todas as ligas estão calibradas e em dia.")
-            )
-            if _n_velhas or _n_nunca:
-                st.info("💡 Use o botão **Passo 2 — Calibrar** abaixo para atualizar as ligas em amarelo/vermelho usando os dados já em cache.")
-        elif saldo_ok:
-            st.warning(
-                f"📊 **{n_total} jogos novos detectados** · "
-                f"Custo estimado de xG: **{custo} créditos** · "
-                f"Saldo disponível: {saldo} créditos"
-            )
-        else:
-            st.error(
-                f"🔴 **Saldo insuficiente.** São necessários {custo + SALDO_MINIMO_EMERGENCIA} "
-                f"créditos ({custo} xG + {SALDO_MINIMO_EMERGENCIA} buffer), "
-                f"mas o saldo é {saldo}. Faça bootstrap parcial ou aguarde renovação."
-            )
+        # Categoriza cada liga em 3 grupos baseado no resultado do delta:
+        #   inativas  — calibradas + 0 novos → renova timestamp grátis
+        #   com_novos — tem jogos novos → recalibra via MLE (gasta créditos)
+        #   aguardando — nunca calibradas + 0 API → torneio ainda não iniciou
+        _inativas:   list[int] = []
+        _com_novos:  list[int] = []
+        _aguardando: list[int] = []
+        for _li in preview["ligas"]:
+            _lid = _li["league_id"]
+            _nn  = _li["n_novos_liga"]
+            _pd  = banco.params_ligas.get(str(_lid), {})
+            _tem = bool(_pd.get("times")) and _pd.get("n_jogos_calibracao", 0) > 0
+            if _nn > 0:
+                _com_novos.append(_lid)
+            elif _tem:
+                _inativas.append(_lid)
+            else:
+                _aguardando.append(_lid)
 
-        # Tabela de detalhes por liga
+        st.session_state["delta_cats"] = {
+            "inativas":   _inativas,
+            "com_novos":  _com_novos,
+            "aguardando": _aguardando,
+        }
+
+        # ── Mensagem de resumo ──────────────────────────────────────────
+        if _com_novos:
+            if saldo_ok:
+                st.warning(
+                    f"📊 **{len(_com_novos)} liga(s) com jogos novos** — "
+                    f"custo xG: **{custo} créditos** · saldo: {saldo} créditos"
+                    + (f" · {len(_inativas)} liga(s) inativas serão marcadas grátis" if _inativas else "")
+                )
+            else:
+                st.error(
+                    f"🔴 Saldo insuficiente. Necessários {custo + SALDO_MINIMO_EMERGENCIA} "
+                    f"({custo} xG + {SALDO_MINIMO_EMERGENCIA} buffer), saldo={saldo}."
+                )
+        else:
+            _partes_msg = []
+            if _inativas:
+                _partes_msg.append(
+                    f"**{len(_inativas)} liga(s) inativas** (entre fases — serão marcadas como ✅ Frescas grátis)"
+                )
+            if _aguardando:
+                _partes_msg.append(
+                    f"**{len(_aguardando)} liga(s) aguardando início do torneio** (sem dados na API)"
+                )
+            st.success(
+                "✅ **Cache de fixtures em dia** — nenhum jogo novo para baixar. "
+                + (" · ".join(_partes_msg) if _partes_msg else "Todas as ligas estão atualizadas.")
+            )
+            if _inativas:
+                st.info(
+                    f"💡 Clique em Passo 2 para marcar {len(_inativas)} liga(s) inativa(s) "
+                    "como Frescas sem gastar créditos de xG."
+                )
+
+        # ── Tabela de detalhes por liga ────────────────────────────────
         rows_delta = []
         for liga_info in preview["ligas"]:
-            n_novos_l = liga_info["n_novos_liga"]
-            n_cache_l = liga_info.get("n_cache_liga", -1)
-            n_api_l   = liga_info.get("n_api_liga",   -1)
-            _nunca_cal = banco.params_ligas.get(str(liga_info["league_id"])) is None
-            if n_novos_l == 0 and n_cache_l == 0 and n_api_l == 0 and _nunca_cal:
-                st_icon = "⚠️ sem dados API"   # liga sem fixtures — pode não ter iniciado
-            elif n_novos_l == 0:
-                st_icon = "✅"
-            elif n_novos_l > 150:
-                st_icon = "🔴 bootstrap"
+            _lid  = liga_info["league_id"]
+            _nn   = liga_info["n_novos_liga"]
+            if _lid in _inativas:
+                _acao = "⏸️ inativa"
+            elif _lid in _aguardando:
+                _acao = "⚠️ aguardando"
+            elif _nn > 150:
+                _acao = "🔴 bootstrap"
+            elif _nn > 0:
+                _acao = "🟡 atualizar"
             else:
-                st_icon = "🟡"
-            season_detalhe = " | ".join(
-                f"s{s['season']}: +{s['n_novos']} ({s['n_cache']} cache)"
-                if s.get("erro") is None
-                else f"s{s['season']}: ERRO"
-                for s in liga_info["seasons"]
-            )
+                _acao = "✅"
             rows_delta.append({
-                "Liga":              liga_info["nome"],
-                "Novos fixtures":    n_novos_l,
-                "Créditos xG":       n_novos_l * CUSTO_ESTIMADO_XG_FIXTURE,
-                "Detalhe seasons":   season_detalhe,
-                "Status":            st_icon,
+                "Liga":           liga_info["nome"],
+                "Novos fixtures": _nn,
+                "Créditos xG":    _nn * CUSTO_ESTIMADO_XG_FIXTURE,
+                "Seasons":        " | ".join(
+                    f"s{s['season']}: +{s['n_novos']} ({s['n_cache']} cache)"
+                    if s.get("erro") is None else f"s{s['season']}: ERRO"
+                    for s in liga_info["seasons"]
+                ),
+                "Ação": _acao,
             })
 
         with st.expander("📋 Ver detalhes por liga"):
             st.dataframe(rows_delta, use_container_width=True, hide_index=True)
 
         # ── FASE 2: botão de confirmação ──────────────────────────────
-        btn_confirma_label = (
-            f"🚀 Calibrar TODAS (cache ok — 0 créditos de xG)"
-            if n_total == 0
-            else f"✅ Passo 2 — Confirmar Download de xG ({custo} créditos) e Calibrar TODAS"
-        )
+        _pode_tocar    = bool(_inativas)
+        _pode_calibrar = bool(_com_novos) and saldo_ok
+        _alguma_acao   = _pode_tocar or _pode_calibrar
+
+        if _pode_calibrar and _pode_tocar:
+            _btn_lbl = (
+                f"✅ Passo 2 — Baixar xG ({custo} créditos) + "
+                f"marcar {len(_inativas)} inativa(s) como Frescas"
+            )
+        elif _pode_calibrar:
+            _btn_lbl = f"✅ Passo 2 — Confirmar Download de xG ({custo} créditos) e Calibrar"
+        elif _pode_tocar:
+            _btn_lbl = f"🟢 Passo 2 — Marcar {len(_inativas)} liga(s) inativa(s) como Frescas (0 créditos)"
+        else:
+            _btn_lbl = "⚠️ Nenhuma ação disponível"
+
         if st.button(
-            btn_confirma_label,
+            _btn_lbl,
             type="primary",
             use_container_width=True,
-            disabled=(not saldo_ok and n_total > 0),
+            disabled=not _alguma_acao,
             help=(
-                "Executa o Delta Fetch e recalibra via MLE."
-                if saldo_ok or n_total == 0
-                else f"Saldo insuficiente: {saldo} < {custo + SALDO_MINIMO_EMERGENCIA} necessários."
+                "Renova timestamps de ligas inativas (grátis) e recalibra ligas com novos jogos."
+                if _alguma_acao
+                else "Sem créditos suficientes ou apenas ligas aguardando início do torneio."
             ),
         ):
             st.session_state["delta_confirmado"] = True
@@ -683,13 +717,39 @@ with tab_calibracao:
     # ── Executa calibração após confirmação ───────────────────────────
     if st.session_state.get("delta_confirmado"):
         st.session_state.pop("delta_confirmado", None)
+        cats      = st.session_state.pop("delta_cats", {})
+        inativas  = cats.get("inativas",   [])
+        com_novos = cats.get("com_novos",  [])
+        aguardando = cats.get("aguardando", [])
+
+        # Fallback: session reiniciada entre Passo 1 e 2 → recalibra tudo
+        if not inativas and not com_novos:
+            com_novos = list(LIGAS_SUPORTADAS.keys())
+
+        total_ops    = len(inativas) + len(com_novos)
         progress_bar = st.progress(0)
         status_box   = st.empty()
-        erros, timeouts = [], []
-        total = _n_ligas
+        erros: list[str] = []
+        timeouts: list[str] = []
+        tocadas = 0
+        op_idx  = 0
 
-        for i, (lid, nome) in enumerate(LIGAS_SUPORTADAS.items()):
-            status_box.info(f"[{i+1}/{total}] Calibrando **{nome}**…")
+        # Passo 2a: renova timestamps das ligas inativas (sem MLE, sem créditos)
+        for lid in inativas:
+            nome = LIGAS_SUPORTADAS.get(lid, f"Liga {lid}")
+            status_box.info(f"[{op_idx+1}/{total_ops}] ⏸️ Renovando timestamp: **{nome}**…")
+            try:
+                dm.tocar_timestamp_liga(lid)
+                tocadas += 1
+            except Exception as e:
+                erros.append(f"**{nome}** (touch): {e}")
+            op_idx += 1
+            progress_bar.progress(op_idx / max(total_ops, 1))
+
+        # Passo 2b: recalibra ligas com jogos novos (MLE completo)
+        for lid in com_novos:
+            nome = LIGAS_SUPORTADAS.get(lid, f"Liga {lid}")
+            status_box.info(f"[{op_idx+1}/{total_ops}] ⚙️ Calibrando **{nome}**…")
             try:
                 dm.obter_params_liga(lid, season, forcar_recalibracao=True)
             except CreditosInsuficientesError as e:
@@ -699,18 +759,33 @@ with tab_calibracao:
                 timeouts.append(nome)
             except Exception as e:
                 erros.append(f"**{nome}**: {e}")
-            progress_bar.progress((i + 1) / total)
+            op_idx += 1
+            progress_bar.progress(op_idx / max(total_ops, 1))
 
         status_box.empty()
+
+        # Relatório final
+        _erros_cal  = [e for e in erros if "(touch)" not in e]
+        _n_ok_cal   = len(com_novos) - len(timeouts) - len(_erros_cal)
+        _partes_rel = []
+        if tocadas:
+            _partes_rel.append(f"{tocadas} liga(s) inativa(s) marcadas como Frescas")
+        if _n_ok_cal > 0:
+            _partes_rel.append(f"{_n_ok_cal} liga(s) recalibrada(s) com sucesso")
+        if aguardando:
+            _partes_rel.append(f"{len(aguardando)} liga(s) aguardando início do torneio")
+
         if timeouts:
             st.warning(
                 f"⏱️ {len(timeouts)} liga(s) com timeout (MLE > {TIMEOUT_CALIBRACAO_SEGUNDOS}s):\n"
                 + "\n".join(f"• {n}" for n in timeouts)
             )
         if erros:
-            st.warning("⚠️ Ligas com falha:\n" + "\n".join(f"• {e}" for e in erros))
-        if not timeouts and not erros:
-            st.success("✅ Todas as ligas calibradas com sucesso!")
+            st.warning("⚠️ Falhas:\n" + "\n".join(f"• {e}" for e in erros))
+        if _partes_rel:
+            st.success("✅ " + " · ".join(_partes_rel) + ".")
+        elif not erros and not timeouts:
+            st.info("Nenhuma ação executada.")
 
         st.session_state["banco"] = dm.carregar_banco(força_recarregar=True)
         st.rerun()

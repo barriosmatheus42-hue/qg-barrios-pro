@@ -1096,6 +1096,32 @@ class DadosManager:
             "ligas":                   resultado_ligas,
         }
 
+    def tocar_timestamp_liga(self, league_id: int) -> None:
+        """
+        Renova calibrado_em para agora sem re-executar MLE.
+
+        Usado quando uma liga 'Velha' não tem jogos novos — ela está inativa
+        entre fases do torneio, não desatualizada. O modelo D-C permanece
+        válido; só o timestamp de controle é atualizado para evitar alarme
+        falso de desatualização na UI. Lança ValueError se a liga nunca foi
+        calibrada (sem modelo disponível para renovar).
+        """
+        banco = self.carregar_banco()
+        chave = str(league_id)
+        params_d = banco.params_ligas.get(chave)
+        if not params_d or not params_d.get("times"):
+            raise ValueError(
+                f"Liga {league_id} nunca foi calibrada — impossível renovar "
+                "timestamp sem modelo D-C treinado."
+            )
+        params_d["calibrado_em"] = dt.datetime.now().isoformat()
+        banco.params_ligas[chave] = params_d
+        self.salvar_banco(banco)
+        log.info(
+            f"Liga {league_id} ({LIGAS_SUPORTADAS.get(league_id, '?')}): "
+            "timestamp renovado — liga inativa (0 jogos novos)."
+        )
+
     def calibrar_liga_avulsa(self, league_id: int, season: int) -> ParametrosLiga:
         """
         Fallback: calibra qualquer liga (mesmo fora de LIGAS_SUPORTADAS) sob demanda.
