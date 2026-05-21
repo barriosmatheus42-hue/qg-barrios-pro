@@ -523,8 +523,10 @@ tab_analise, tab_calibracao, tab_tracker, tab_auditoria = st.tabs([
 # =========================================================================
 
 with tab_calibracao:
-    st.markdown("### Status das ligas")
+    _n_ligas        = len(LIGAS_SUPORTADAS)   # fonte única — atualiza sozinho com a lista
     _custo_por_liga = CUSTO_ESTIMADO_HISTORICO_LIGA + CUSTO_ESTIMADO_XG_LIGA
+
+    st.markdown(f"### Status das ligas ({_n_ligas} configuradas)")
     st.caption(
         f"Calibração manual: clique 'Calibrar TODAS' segunda e quinta. "
         f"Custo estimado por liga: ~{_custo_por_liga} créditos "
@@ -535,7 +537,8 @@ with tab_calibracao:
     rows_status = []
     for league_id, nome in LIGAS_SUPORTADAS.items():
         params_d = banco.params_ligas.get(str(league_id), {})
-        if not params_d:
+        _tem_times = bool(params_d.get("times")) and params_d.get("n_jogos_calibracao", 0) > 0
+        if not params_d or not _tem_times:
             status, n_times, n_jogos = "❌ Nunca calibrada", 0, 0
         else:
             try:
@@ -543,7 +546,7 @@ with tab_calibracao:
                 dias = (dt.datetime.now() - data_cal).days
                 status = f"🟡 Velha ({dias}d)" if dias >= INTERVALO_RECALIBRACAO_DIAS else f"🟢 Fresca ({dias}d)"
             except Exception:
-                status = "⚠️ Cache inválido"
+                status = "❌ Nunca calibrada"
             n_times = len(params_d.get("times", {}))
             n_jogos = params_d.get("n_jogos_calibracao", 0)
         rows_status.append({"Liga": f"{nome} (ID {league_id})", "Status": status,
@@ -551,9 +554,9 @@ with tab_calibracao:
 
     st.dataframe(rows_status, use_container_width=True, hide_index=True)
 
-    custo_total = len(LIGAS_SUPORTADAS) * (CUSTO_ESTIMADO_HISTORICO_LIGA + CUSTO_ESTIMADO_XG_LIGA)
+    custo_total = _n_ligas * _custo_por_liga
     st.info(
-        f"Custo estimado para calibrar todas as {len(LIGAS_SUPORTADAS)} ligas: "
+        f"Custo estimado para calibrar todas as {_n_ligas} ligas: "
         f"~{custo_total} créditos (inclui xG via /fixtures/statistics, peso={PESO_XG_PRODUCAO})."
     )
 
@@ -561,19 +564,19 @@ with tab_calibracao:
     st.markdown("#### 🔄 Calibração com Delta Fetch")
     st.caption(
         "**Passo 1** analisa quantos jogos novos existem desde o último download "
-        f"(custo: ~{len(LIGAS_SUPORTADAS) * 2} créditos para as listas). "
+        f"(custo: ~{_n_ligas * 2} créditos para as listas). "
         "**Passo 2** confirma o download de xG e executa o MLE. "
         "Nenhum crédito de xG é gasto antes da sua confirmação."
     )
 
     # ── FASE 1: botão de análise ──────────────────────────────────────
     if st.button(
-        f"🔍 Passo 1 — Analisar Custo de Download ({len(LIGAS_SUPORTADAS)} ligas)",
+        f"🔍 Passo 1 — Analisar Custo de Download ({_n_ligas} ligas)",
         use_container_width=True,
     ):
         with st.spinner(
-            f"Consultando listas de fixtures para {len(LIGAS_SUPORTADAS)} ligas "
-            f"(~{len(LIGAS_SUPORTADAS) * 2} créditos)…"
+            f"Consultando listas de fixtures para {_n_ligas} ligas "
+            f"(~{_n_ligas * 2} créditos)…"
         ):
             try:
                 preview = dm.calcular_custo_delta(season=season)
@@ -628,7 +631,12 @@ with tab_calibracao:
         rows_delta = []
         for liga_info in preview["ligas"]:
             n_novos_l = liga_info["n_novos_liga"]
-            if n_novos_l == 0:
+            n_cache_l = liga_info.get("n_cache_liga", -1)
+            n_api_l   = liga_info.get("n_api_liga",   -1)
+            _nunca_cal = banco.params_ligas.get(str(liga_info["league_id"])) is None
+            if n_novos_l == 0 and n_cache_l == 0 and n_api_l == 0 and _nunca_cal:
+                st_icon = "⚠️ sem dados API"   # liga sem fixtures — pode não ter iniciado
+            elif n_novos_l == 0:
                 st_icon = "✅"
             elif n_novos_l > 150:
                 st_icon = "🔴 bootstrap"
@@ -678,7 +686,7 @@ with tab_calibracao:
         progress_bar = st.progress(0)
         status_box   = st.empty()
         erros, timeouts = [], []
-        total = len(LIGAS_SUPORTADAS)
+        total = _n_ligas
 
         for i, (lid, nome) in enumerate(LIGAS_SUPORTADAS.items()):
             status_box.info(f"[{i+1}/{total}] Calibrando **{nome}**…")

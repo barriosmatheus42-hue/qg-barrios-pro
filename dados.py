@@ -80,18 +80,23 @@ LIGAS_SUPORTADAS = {
     66:  "Coupe de France",
     45:  "FA Cup",
     48:  "League Cup (EFL)",
-    # ── Outras Europeias ──────────────────────────────────────────────
+    # ── Outras Europeias (inverno) ────────────────────────────────────
     88:  "Eredivisie",
     94:  "Primeira Liga",
     203: "Süper Lig",
     179: "Scottish Premiership",
     144: "Belgian Pro League",
-    103: "Eliteserien (Noruega)",
-    113: "Allsvenskan (Suécia)",
-    119: "Superliga (Dinamarca)",
+    106: "Ekstraklasa (Polônia)",
     197: "Super League (Grécia)",
     218: "Bundesliga (Áustria)",
     207: "Super League (Suíça)",
+    210: "HNL (Croácia)",
+    # ── Europeias de verão (ano-calendário) ───────────────────────────
+    103: "Eliteserien (Noruega)",
+    113: "Allsvenskan (Suécia)",
+    119: "Superliga (Dinamarca)",
+    244: "Veikkausliiga (Finlândia)",
+    164: "Úrvalsdeild (Islândia)",
     # ── Brasil ────────────────────────────────────────────────────────
     71:  "Brasileirão Série A",
     72:  "Brasileirão Série B",
@@ -106,7 +111,10 @@ LIGAS_SUPORTADAS = {
     239: "Primera A (Colômbia)",
     265: "Primera División (Chile)",
     268: "Primera División (Uruguai)",
-    # ── Oriente Médio / Ásia ──────────────────────────────────────────
+    240: "Liga Pro (Equador)",
+    281: "Liga 1 (Peru)",
+    # ── Oceania / Oriente Médio / Ásia ───────────────────────────────
+    188: "A-League (Austrália)",
     307: "Saudi Pro League",
     98:  "J1 League (Japão)",
     292: "K League 1 (Coreia do Sul)",
@@ -138,12 +146,16 @@ LIGAS_TEMPORADA_ANO_ATUAL = {
     239,  # Primera A (Colômbia)
     265,  # Primera División (Chile)
     268,  # Primera División (Uruguai)
+    240,  # Liga Pro (Equador)
+    281,  # Liga 1 (Peru)
     98,   # J1 League (Japão)
     292,  # K League 1 (Coreia do Sul)
     169,  # Super League (China)
-    103,  # Eliteserien (Noruega) — liga de verão, inicia em abril
-    113,  # Allsvenskan (Suécia)  — liga de verão, inicia em abril
-    119,  # Superliga (Dinamarca) — liga de verão, inicia em março
+    103,  # Eliteserien (Noruega)  — verão europeu, inicia em abril
+    113,  # Allsvenskan (Suécia)   — verão europeu, inicia em abril
+    119,  # Superliga (Dinamarca)  — verão europeu, inicia em março
+    244,  # Veikkausliiga (Finlândia) — verão europeu, inicia em abril
+    164,  # Úrvalsdeild (Islândia)    — verão europeu, inicia em maio
 }
 
 # Competições de seleções: usam calibrar_copa_mundo() com decay agressivo e
@@ -1047,10 +1059,14 @@ class DadosManager:
                         "erro":    str(e),
                     })
 
+            n_cache_liga = sum(s.get("n_cache", 0) for s in detalhes_seasons if s.get("erro") is None)
+            n_api_liga   = sum(s.get("n_api",   0) for s in detalhes_seasons if s.get("erro") is None)
             resultado_ligas.append({
                 "league_id":    league_id,
                 "nome":         LIGAS_SUPORTADAS.get(league_id, f"Liga {league_id}"),
                 "n_novos_liga": n_novos_liga,
+                "n_cache_liga": n_cache_liga,
+                "n_api_liga":   n_api_liga,
                 "seasons":      detalhes_seasons,
             })
             n_novos_total += n_novos_liga
