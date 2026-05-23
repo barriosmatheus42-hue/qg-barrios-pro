@@ -90,6 +90,11 @@ class MarketCalibrator:
         self._X:         list  = []
         self._Y:         list  = []
         self._iso:       object = None   # IsotonicRegression | None
+        # Breakpoints compactos extraídos da isotônica após treino.
+        # Permitem calibrar() via np.interp sem depender de internals do sklearn.
+        # São os únicos dados enviados ao JSONBin (payload ~20x menor que X/Y brutos).
+        self._x_thresh:  list  = []
+        self._y_thresh:  list  = []
 
     # ── Treinamento ──────────────────────────────────────────────────
     def treinar(self, probs_brutas_frac: list, resultados: list) -> None:
@@ -111,6 +116,12 @@ class MarketCalibrator:
         iso.fit(self._X, self._Y)
         self._iso = iso
         self.n_amostras = len(self._X)
+        # Extrai breakpoints compactos para serialização eficiente
+        try:
+            self._x_thresh = [round(float(x), 6) for x in iso.X_thresholds_]
+            self._y_thresh = [round(float(y), 6) for y in iso.y_thresholds_]
+        except Exception:
+            pass
 
     # ── Inferência ───────────────────────────────────────────────────
     def calibrar(self, prob_bruta_pct: float) -> float:
@@ -118,37 +129,68 @@ class MarketCalibrator:
         Retorna probabilidade calibrada em porcentagem.
 
         Recebe prob em % (convenção do sistema), converte internamente para
-        fração, aplica IsotonicRegression, devolve em %. Se calibrador não
-        estiver treinado, devolve prob_bruta_pct sem alteração.
+        fração, aplica IsotonicRegression (ou np.interp nos breakpoints quando
+        carregado do JSONBin em forma compacta), devolve em %.
+        Se calibrador não estiver treinado, devolve prob_bruta_pct sem alteração.
         """
-        if self._iso is None or self.n_amostras < 30:
+        if self.n_amostras < 30:
             return prob_bruta_pct
         p_frac = float(np.clip(prob_bruta_pct / 100.0, 0.0, 1.0))
-        p_cal  = float(self._iso.predict([p_frac])[0])
-        return float(np.clip(p_cal, 0.0, 1.0)) * 100.0
+        if self._iso is not None:
+            p_cal = float(self._iso.predict([p_frac])[0])
+            return float(np.clip(p_cal, 0.0, 1.0)) * 100.0
+        # Fallback compacto: interp nos breakpoints (carregado do JSONBin sem X/Y brutos)
+        if self._x_thresh:
+            p_cal = float(np.interp(p_frac, self._x_thresh, self._y_thresh))
+            return float(np.clip(p_cal, 0.0, 1.0)) * 100.0
+        return prob_bruta_pct
 
     # ── Serialização ─────────────────────────────────────────────────
     def to_dict(self) -> dict:
-        return {
+        d: dict = {
             "mercado":    self.mercado,
             "n_amostras": self.n_amostras,
             "X":          self._X,
             "Y":          self._Y,
         }
+        # Inclui breakpoints compactos se disponíveis (presentes após treino ou
+        # após carregar de forma compacta). Esses campos são os únicos enviados
+        # ao JSONBin em salvar_banco(); X/Y ficam apenas no arquivo local.
+        if self._x_thresh:
+            d["x_thresh"] = self._x_thresh
+            d["y_thresh"] = self._y_thresh
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "MarketCalibrator":
         obj = cls(mercado=d["mercado"])
-        X = d.get("X", [])
-        Y = d.get("Y", [])
-        n = d.get("n_amostras", len(X))
-        if _SKLEARN_OK and n >= 30 and X and Y:
+        n = d.get("n_amostras", 0)
+        obj.n_amostras = n
+        if n < 30:
+            return obj
+
+        x_thresh = d.get("x_thresh", [])
+        y_thresh = d.get("y_thresh", [])
+        X        = d.get("X", [])
+        Y        = d.get("Y", [])
+
+        if x_thresh and y_thresh:
+            # Forma compacta (JSONBin ou arquivo local atualizado):
+            # guarda breakpoints e usa np.interp em calibrar() — sem refit.
+            obj._x_thresh = [float(x) for x in x_thresh]
+            obj._y_thresh = [float(y) for y in y_thresh]
+        elif X and Y and _SKLEARN_OK:
+            # Forma legada (arquivo local antigo sem breakpoints): re-ajusta iso.
             obj._X = [float(x) for x in X]
             obj._Y = [int(y)   for y in Y]
-            iso = _IsotonicRegression(out_of_bounds="clip")
-            iso.fit(obj._X, obj._Y)
-            obj._iso = iso
-            obj.n_amostras = n
+            try:
+                iso = _IsotonicRegression(out_of_bounds="clip")
+                iso.fit(obj._X, obj._Y)
+                obj._iso = iso
+                obj._x_thresh = [round(float(x), 6) for x in iso.X_thresholds_]
+                obj._y_thresh = [round(float(y), 6) for y in iso.y_thresholds_]
+            except Exception:
+                pass
         return obj
 
     def __repr__(self) -> str:

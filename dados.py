@@ -690,14 +690,9 @@ class DadosManager:
         # que o timestamp exibido na UI sempre reflete a última calibração real.
         _params_local_raw = banco_local.get("params_ligas", {})
         _params_nuvem_raw = banco_nuvem.get("params_ligas", {})
+        # Local sobrescreve nuvem liga a liga — local tem X/Y brutos + breakpoints,
+        # nuvem tem apenas breakpoints. Em ambos os casos from_dict() sabe reconstruir.
         banco.params_ligas = {**_params_nuvem_raw, **_params_local_raw}
-        # Calibradores são local-only (JSONBin nunca os armazena); injeta apenas nas ligas
-        # cujos params vieram exclusivamente da nuvem (sem cópia local com calibradores).
-        for _lid_str, _params_dict in banco.params_ligas.items():
-            if not _params_dict.get("calibradores"):
-                _cals = _params_local_raw.get(_lid_str, {}).get("calibradores", {})
-                if _cals:
-                    _params_dict["calibradores"] = _cals
         banco.datas = banco_local.get("datas", {})                      # cache do dia fica local
         banco.historico_ligas = banco_local.get("historico_ligas", {}) # xG cache — local apenas
 
@@ -713,14 +708,26 @@ class DadosManager:
         # Local (append-only merge — nunca sobrescreve dados históricos)
         self._merge_salvar_local(b)
 
-        # Nuvem — sem `datas` (quota) e sem calibradores (arrays X/Y são grandes demais;
-        # comment line 693 já declara local-only, mas o código não implementava isso).
-        # Calibradores ficam apenas no arquivo local; ao carregar do JSONBin,
-        # carregar_banco() injeta os calibradores do arquivo local (lines 695-699).
+        # Nuvem — sem `datas` (quota). Calibradores em forma compacta: apenas
+        # breakpoints x_thresh/y_thresh (~10–50 pontos por mercado), sem os arrays
+        # X/Y brutos (400+ pontos). Payload ~20x menor → JSONBin sempre aceita.
+        # carregar_banco() reconstrói calibrar() via np.interp nos breakpoints.
         params_nuvem: dict = {}
         for lid_str, params_d in (b.params_ligas or {}).items():
-            params_nuvem[lid_str] = {k: v for k, v in params_d.items()
-                                     if k != "calibradores"}
+            p = dict(params_d)
+            if p.get("calibradores"):
+                cals_compact: dict = {}
+                for mercado, cal_d in p["calibradores"].items():
+                    if not isinstance(cal_d, dict):
+                        continue
+                    cals_compact[mercado] = {
+                        "mercado":    cal_d.get("mercado", mercado),
+                        "n_amostras": cal_d.get("n_amostras", 0),
+                        "x_thresh":   cal_d.get("x_thresh", []),
+                        "y_thresh":   cal_d.get("y_thresh", []),
+                    }
+                p["calibradores"] = cals_compact
+            params_nuvem[lid_str] = p
 
         nuvem = {
             "picks":         b.picks,
