@@ -1813,60 +1813,53 @@ with tab_analise:
 
                     cob_icon  = "✅" if p.get("cobertura_ok") else "⚠️ dados parciais"
                     cal_icon  = " · 🔴 cal. marginal (<40j)" if p.get("cal_marginal") else ""
-                    heur_adj  = p.get("heur_adj", 0.0)
-                    heur_nota = p.get("heur_nota", "✅ Contexto OK")
-                    # Pré-computa o bloco HTML da nota fora do f-string do card
-                    # para evitar que erros de parsing engulam silenciosamente a linha
-                    if heur_adj > 0:
-                        _nota_div = (
-                            "<div style='margin-top:8px;padding:6px 10px;border-radius:4px;"
-                            "background:#0d2115;border:1px solid #28a745;"
-                            "font-size:12px;font-weight:700;color:#28a745;'>"
-                            + heur_nota + "</div>"
-                        )
-                    elif heur_adj < 0:
-                        _nota_div = (
-                            "<div style='margin-top:8px;padding:6px 10px;border-radius:4px;"
-                            "background:#231a06;border:1px solid #f0ad4e;"
-                            "font-size:12px;font-weight:700;color:#f0ad4e;'>"
-                            + heur_nota + "</div>"
-                        )
-                    else:
-                        _nota_div = (
-                            "<div style='margin-top:5px;font-size:10px;color:#555;'>"
-                            + heur_nota + "</div>"
-                        )
 
                     st.markdown(
-                        "<div style='border-left:4px solid " + cor + ";padding:10px 14px;"
-                        "margin-bottom:10px;background:#0e1117;border-radius:4px;'>"
-                        "<div style='display:flex;justify-content:space-between;"
-                        "font-size:11px;color:#888;'>"
-                        "<span>#" + str(i) + " · " + p.get('liga', '—') + " · " + cob_icon + cal_icon + "</span>"
-                        "<span style='color:" + cor + ";font-weight:bold;'>" + badge + " &nbsp;"
-                        "<span style='font-family:monospace;letter-spacing:1px;'>" + bar_str + "</span>"
-                        "&nbsp;" + f"{score:.0f}" + "/100</span>"
-                        "</div>"
-                        "<div style='font-size:17px;font-weight:bold;color:white;margin:5px 0 3px;'>"
-                        + p.get('jogo', '—') +
-                        "</div>"
-                        "<div style='font-size:13px;color:#ccc;'>"
-                        "<b>" + p.get('mercado', '—') + "</b> &nbsp;·&nbsp; "
-                        "Odd <b>" + f"{p.get('odd',0):.2f}" + "</b> &nbsp;·&nbsp; "
-                        "Modelo <b>" + f"{p.get('prob_modelo',0):.1f}" + "%</b>"
-                        " vs Mercado " + f"{p.get('prob_mercado',0):.1f}" + "% &nbsp;·&nbsp; "
-                        "Δ <b>" + f"{p.get('divergencia',0):+.1f}" + "pp</b>"
-                        "</div>"
-                        "<div style='font-size:12px;color:#aaa;margin-top:2px;'>"
-                        "EV <span style='color:" + cor + ";font-weight:bold;'>"
-                        + f"{p.get('ev',0):+.1f}" + "%</span> &nbsp;·&nbsp; "
-                        "Kelly " + f"{p.get('kelly',0)*100:.1f}" + "% &nbsp;·&nbsp; "
-                        "💵 Stake: <b>R$ " + f"{p.get('stake',0):.2f}" + "</b>"
-                        "</div>"
-                        + _nota_div +
-                        "</div>",
+                        f"<div style='border-left:4px solid {cor};padding:10px 14px;"
+                        f"margin-bottom:4px;background:#0e1117;border-radius:4px;'>"
+                        f"<div style='display:flex;justify-content:space-between;"
+                        f"font-size:11px;color:#888;'>"
+                        f"<span>#{i} · {p.get('liga', '—')} · {cob_icon}{cal_icon}</span>"
+                        f"<span style='color:{cor};font-weight:bold;'>{badge} &nbsp;"
+                        f"<span style='font-family:monospace;letter-spacing:1px;'>{bar_str}</span>"
+                        f"&nbsp;{score:.0f}/100</span>"
+                        f"</div>"
+                        f"<div style='font-size:17px;font-weight:bold;color:white;margin:5px 0 3px;'>"
+                        f"{p.get('jogo', '—')}"
+                        f"</div>"
+                        f"<div style='font-size:13px;color:#ccc;'>"
+                        f"<b>{p.get('mercado', '—')}</b> &nbsp;·&nbsp; "
+                        f"Odd <b>{p.get('odd', 0):.2f}</b> &nbsp;·&nbsp; "
+                        f"Modelo <b>{p.get('prob_modelo', 0):.1f}%</b>"
+                        f" vs Mercado {p.get('prob_mercado', 0):.1f}% &nbsp;·&nbsp; "
+                        f"Δ <b>{p.get('divergencia', 0):+.1f}pp</b>"
+                        f"</div>"
+                        f"<div style='font-size:12px;color:#aaa;margin-top:2px;'>"
+                        f"EV <span style='color:{cor};font-weight:bold;'>{p.get('ev', 0):+.1f}%</span> &nbsp;·&nbsp; "
+                        f"Kelly {p.get('kelly', 0)*100:.1f}% &nbsp;·&nbsp; "
+                        f"💵 Stake: <b>R$ {p.get('stake', 0):.2f}</b>"
+                        f"</div>"
+                        f"</div>",
                         unsafe_allow_html=True,
                     )
+                    _hadj  = p.get("heur_adj",  0.0)
+                    _hnota = p.get("heur_nota", "✅ Contexto OK")
+                    if _hadj > 0:
+                        st.markdown(
+                            f"<div style='border-left:4px solid #28a745;padding:5px 14px;"
+                            f"margin-bottom:10px;background:#0d2115;"
+                            f"font-size:12px;font-weight:700;color:#28a745;'>{_hnota}</div>",
+                            unsafe_allow_html=True,
+                        )
+                    elif _hadj < 0:
+                        st.markdown(
+                            f"<div style='border-left:4px solid #f0ad4e;padding:5px 14px;"
+                            f"margin-bottom:10px;background:#231a06;"
+                            f"font-size:12px;font-weight:700;color:#f0ad4e;'>{_hnota}</div>",
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.caption(f"🔬 {_hnota}")
                 except Exception:
                     continue
 
@@ -2368,57 +2361,52 @@ with tab_analise:
                         str(next((j["league"]["id"] for j in jogos_com_odds
                                   if str(j["fixture"]["id"]) == p["fixture_id"]), 0)), {}
                     ).get("calibradores", {}).get("1X2_HOME") else ""
-                    _h_adj  = p.get("heur_adj", 0.0)
-                    _h_nota = p.get("heur_nota", "✅ Contexto OK")
                     cob_ico = "✅" if p.get("cobertura_ok") else "⚠️"
-                    if _h_adj > 0:
-                        _nota_div_mo = (
-                            "<div style='margin-top:8px;padding:6px 10px;border-radius:4px;"
-                            "background:#0d2115;border:1px solid #28a745;"
-                            "font-size:12px;font-weight:700;color:#28a745;'>"
-                            + _h_nota + "</div>"
-                        )
-                    elif _h_adj < 0:
-                        _nota_div_mo = (
-                            "<div style='margin-top:8px;padding:6px 10px;border-radius:4px;"
-                            "background:#231a06;border:1px solid #f0ad4e;"
-                            "font-size:12px;font-weight:700;color:#f0ad4e;'>"
-                            + _h_nota + "</div>"
-                        )
-                    else:
-                        _nota_div_mo = (
-                            "<div style='margin-top:5px;font-size:10px;color:#555;'>"
-                            + _h_nota + "</div>"
-                        )
 
                     st.markdown(
-                        "<div style='border-left:4px solid " + cor + ";padding:10px 14px;"
-                        "margin-bottom:8px;background:#0e1117;border-radius:4px;'>"
-                        "<div style='display:flex;justify-content:space-between;"
-                        "font-size:11px;color:#888;'>"
-                        "<span>#" + str(i) + " · " + p.get('liga', '—') + " · " + cob_ico + cal_badge + "</span>"
-                        "<span style='color:" + cor + ";font-weight:bold;'>"
-                        + mkt + " &nbsp;·&nbsp; OR: " + f"{p.get('overround',1.0):.3f}" + "</span>"
-                        "</div>"
-                        "<div style='font-size:17px;font-weight:bold;color:white;margin:5px 0 3px;'>"
-                        + p.get('jogo', '—') +
-                        "</div>"
-                        "<div style='font-size:13px;color:#ccc;'>"
-                        "Odd <b>" + f"{p.get('odd',0):.2f}" + "</b> &nbsp;·&nbsp; "
-                        "Modelo <b>" + f"{p.get('prob_modelo',0):.1f}" + "%</b>"
-                        " vs Mercado " + f"{p.get('prob_mercado',0):.1f}" + "% &nbsp;·&nbsp; "
-                        "Delta <b>" + f"{p.get('divergencia',0):+.1f}" + "pp</b>"
-                        "</div>"
-                        "<div style='font-size:12px;color:#aaa;margin-top:2px;'>"
-                        "EV <span style='color:" + cor + ";font-weight:bold;'>"
-                        + f"{p.get('ev',0):+.1f}" + "%</span> &nbsp;·&nbsp; "
-                        "Kelly " + f"{p.get('kelly',0)*100:.1f}" + "% &nbsp;·&nbsp; "
-                        "Stake: <b>R$ " + f"{p.get('stake',0):.2f}" + "</b>"
-                        "</div>"
-                        + _nota_div_mo +
-                        "</div>",
+                        f"<div style='border-left:4px solid {cor};padding:10px 14px;"
+                        f"margin-bottom:4px;background:#0e1117;border-radius:4px;'>"
+                        f"<div style='display:flex;justify-content:space-between;"
+                        f"font-size:11px;color:#888;'>"
+                        f"<span>#{i} · {p.get('liga', '—')} · {cob_ico}{cal_badge}</span>"
+                        f"<span style='color:{cor};font-weight:bold;'>"
+                        f"{mkt} &nbsp;·&nbsp; OR: {p.get('overround', 1.0):.3f}</span>"
+                        f"</div>"
+                        f"<div style='font-size:17px;font-weight:bold;color:white;margin:5px 0 3px;'>"
+                        f"{p.get('jogo', '—')}"
+                        f"</div>"
+                        f"<div style='font-size:13px;color:#ccc;'>"
+                        f"Odd <b>{p.get('odd', 0):.2f}</b> &nbsp;·&nbsp; "
+                        f"Modelo <b>{p.get('prob_modelo', 0):.1f}%</b>"
+                        f" vs Mercado {p.get('prob_mercado', 0):.1f}% &nbsp;·&nbsp; "
+                        f"Delta <b>{p.get('divergencia', 0):+.1f}pp</b>"
+                        f"</div>"
+                        f"<div style='font-size:12px;color:#aaa;margin-top:2px;'>"
+                        f"EV <span style='color:{cor};font-weight:bold;'>{p.get('ev', 0):+.1f}%</span> &nbsp;·&nbsp; "
+                        f"Kelly {p.get('kelly', 0)*100:.1f}% &nbsp;·&nbsp; "
+                        f"Stake: <b>R$ {p.get('stake', 0):.2f}</b>"
+                        f"</div>"
+                        f"</div>",
                         unsafe_allow_html=True,
                     )
+                    _hadj_mo  = p.get("heur_adj",  0.0)
+                    _hnota_mo = p.get("heur_nota", "✅ Contexto OK")
+                    if _hadj_mo > 0:
+                        st.markdown(
+                            f"<div style='border-left:4px solid #28a745;padding:5px 14px;"
+                            f"margin-bottom:10px;background:#0d2115;"
+                            f"font-size:12px;font-weight:700;color:#28a745;'>{_hnota_mo}</div>",
+                            unsafe_allow_html=True,
+                        )
+                    elif _hadj_mo < 0:
+                        st.markdown(
+                            f"<div style='border-left:4px solid #f0ad4e;padding:5px 14px;"
+                            f"margin-bottom:10px;background:#231a06;"
+                            f"font-size:12px;font-weight:700;color:#f0ad4e;'>{_hnota_mo}</div>",
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.caption(f"🔬 {_hnota_mo}")
 
                 # ── Painel de Execução 1X2 ──────────────────────────────────
                 st.markdown("---")
