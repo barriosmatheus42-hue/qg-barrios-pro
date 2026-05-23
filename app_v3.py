@@ -243,71 +243,206 @@ def avaliar_heuristicas(
     xg_lam: float,
     xg_mu: float,
     xg_total: float,
+    ctx: dict | None = None,
 ) -> tuple[float, str]:
     """
-    Camada contextual leve usando apenas λ/μ do D-C — sem chamadas de API extras.
+    Matriz de bônus/penalidade contextual usando λ/μ do D-C e parâmetros internos do modelo.
 
-    Valida se o contexto esperado de gols sustenta o mercado proposto.
-    Penalidades são negativas (ajuste no score); nota explica o motivo.
+    Retorna (ajuste_pts, nota) onde ajuste_pts pode ser positivo (bônus) ou negativo (penalidade).
+    ctx esperado: alpha_h, beta_h, alpha_a, beta_a, n_jogos_h, n_jogos_a, rho, media_liga_gols.
 
-    Regras implementadas:
-      H1 AWAY  — visitante estruturalmente fraco vs mandante (λ/μ alto)
-      H2 BTTS_YES — visitante com baixo potencial ofensivo (μ baixo)
-      H3 BTTS_NO  — ambos os times com alto potencial ofensivo
-      H4 DRAW  — desequilíbrio extremo de forças (λ/μ fora de [0.40, 2.80])
-      H5 UNDER_25 — xG total na zona cinzenta perto do limiar
-      H6 OVER_25  — xG total apenas marginalmente acima do limiar
+    Regras sem ctx (H1-H6): baseadas somente em λ/μ (sempre disponíveis).
+    Regras com ctx (HC1-HC10): usam parâmetros D-C do modelo calibrado.
     """
-    penalty = 0.0
+    adj = 0.0
     notas: list[str] = []
-
     ratio = xg_lam / max(xg_mu, 0.01)
 
-    # H1: AWAY com mandante muito superior
+    # ── H1: AWAY com mandante muito superior ──────────────────────────
     if mercado == "AWAY":
         if ratio > 3.0:
-            penalty -= 15.0
+            adj -= 15.0
             notas.append(f"Mandante com domínio severo (λ/μ={ratio:.1f})")
         elif ratio > 2.2:
-            penalty -= 8.0
+            adj -= 8.0
             notas.append(f"Mandante superior (λ/μ={ratio:.1f})")
 
-    # H2: BTTS_YES com visitante pouco ofensivo
+    # ── H2: BTTS_YES com visitante pouco ofensivo ─────────────────────
     if mercado == "BTTS_YES":
         if xg_mu < 0.70:
-            penalty -= 12.0
+            adj -= 12.0
             notas.append(f"Visitante com μ={xg_mu:.2f} — baixo potencial de marcar")
         elif xg_mu < 0.90:
-            penalty -= 6.0
+            adj -= 6.0
             notas.append(f"Visitante abaixo da média ofensiva (μ={xg_mu:.2f})")
 
-    # H3: BTTS_NO com ambos atacando
+    # ── H3: BTTS_NO com ambos atacando ───────────────────────────────
     if mercado == "BTTS_NO":
         if xg_lam > 1.55 and xg_mu > 1.05:
-            penalty -= 10.0
+            adj -= 10.0
             notas.append(f"Ambos ofensivos (λ={xg_lam:.2f}, μ={xg_mu:.2f}) — BTTS_NO fragilizado")
 
-    # H4: DRAW com desequilíbrio extremo
+    # ── H4: DRAW com desequilíbrio extremo ───────────────────────────
     if mercado == "DRAW":
         if ratio > 3.0 or ratio < 0.33:
-            penalty -= 18.0
+            adj -= 18.0
             notas.append(f"Desequilíbrio extremo (λ/μ={ratio:.1f}) — empate improvável")
         elif ratio > 2.2 or ratio < 0.45:
-            penalty -= 9.0
+            adj -= 9.0
             notas.append(f"Desequilíbrio acentuado (λ/μ={ratio:.1f})")
 
-    # H5: UNDER_25 na zona cinzenta (λ+μ entre 1.85 e 2.00)
+    # ── H5: UNDER_25 na zona cinzenta ────────────────────────────────
     if mercado == "UNDER_25" and 1.85 <= xg_total < 2.00:
-        penalty -= 6.0
+        adj -= 6.0
         notas.append(f"xG total próximo do limiar (λ+μ={xg_total:.2f})")
 
-    # H6: OVER_25 com margem estreita acima do limiar
+    # ── H6: OVER_25 com margem estreita ──────────────────────────────
     if mercado == "OVER_25" and 2.50 < xg_total <= 2.68:
-        penalty -= 6.0
+        adj -= 6.0
         notas.append(f"xG total marginalmente acima do limiar (λ+μ={xg_total:.2f})")
 
-    nota_final = " · ".join(notas) if notas else "✅ Contexto OK"
-    return penalty, nota_final
+    # ── Regras com ctx (parâmetros D-C internos) ──────────────────────
+    if ctx:
+        alpha_h   = float(ctx.get("alpha_h",   1.0))
+        beta_h    = float(ctx.get("beta_h",    1.0))
+        alpha_a   = float(ctx.get("alpha_a",   1.0))
+        beta_a    = float(ctx.get("beta_a",    1.0))
+        n_jogos_h = int(ctx.get("n_jogos_h",   0))
+        n_jogos_a = int(ctx.get("n_jogos_a",   0))
+        rho       = float(ctx.get("rho",       -0.05))
+        media     = float(ctx.get("media_liga_gols", 2.5))
+
+        cbi       = min(xg_lam, xg_mu) / max(xg_lam, xg_mu, 0.01)
+        force_h   = alpha_h / max(beta_a, 0.01)
+        force_a   = alpha_a / max(beta_h, 0.01)
+        fortress_h = alpha_h > 1.10 and beta_h < 0.90
+        fragil_h   = alpha_h < 0.90 and beta_h > 1.10
+        lethal_a   = alpha_a > 1.10 and beta_a < 0.90
+
+        # HC1: HOME ─ Fortaleza do mandante
+        if mercado == "HOME":
+            if fortress_h:
+                adj += 8.0
+                notas.append(f"Fortaleza do mandante (αH={alpha_h:.2f}, βH={beta_h:.2f})")
+            if force_h > 1.50 and force_a < 0.80:
+                adj += 6.0
+                notas.append(f"Superioridade estrutural (fH={force_h:.2f} vs fA={force_a:.2f})")
+            if n_jogos_h < 12:
+                adj -= 8.0
+                notas.append(f"Mandante com poucos jogos ({n_jogos_h}j) — incerteza alta")
+
+        # HC2: AWAY ─ Visitante letal
+        if mercado == "AWAY":
+            if lethal_a and fragil_h:
+                adj += 10.0
+                notas.append(f"Visitante letal vs mandante frágil (αA={alpha_a:.2f}, βH={beta_h:.2f})")
+            elif force_a > force_h * 1.25:
+                adj += 5.0
+                notas.append(f"Visitante com vantagem estrutural (fA={force_a:.2f})")
+
+        # HC3: DRAW ─ Liga propensa ao empate + equilíbrio
+        if mercado == "DRAW":
+            if rho < -0.10:
+                adj += 7.0
+                notas.append(f"Liga propensa ao empate (ρ={rho:.3f})")
+            if cbi > 0.80:
+                adj += 8.0
+                notas.append(f"Jogo equilibrado (CBI={cbi:.2f})")
+
+        # HC4: BTTS_YES ─ Contexto ofensivo mútuo
+        if mercado == "BTTS_YES":
+            if alpha_a > 0.95 and beta_h > 1.05:
+                adj += 8.0
+                notas.append(f"Visitante ataca bem vs defesa fraca do mandante (αA={alpha_a:.2f}, βH={beta_h:.2f})")
+            if alpha_h > 0.95 and beta_a > 1.05:
+                adj += 5.0
+                notas.append(f"Mandante também ataca bem vs fraca defesa visitante (αH={alpha_h:.2f})")
+
+        # HC5: BTTS_NO ─ Contexto defensivo dominante
+        if mercado == "BTTS_NO":
+            if fortress_h and alpha_a < 0.90:
+                adj += 10.0
+                notas.append(f"Fortaleza em casa vs visitante sem gol (αA={alpha_a:.2f})")
+            if beta_h < 0.85 and beta_a < 0.85:
+                adj += 8.0
+                notas.append(f"Ambas as defesas sólidas (βH={beta_h:.2f}, βA={beta_a:.2f})")
+
+        # HC6: OVER_25 ─ Liga goleadora vs propensa ao empate
+        if mercado == "OVER_25":
+            if media > 2.80:
+                adj += 6.0
+                notas.append(f"Liga goleadora (méd={media:.2f} gols/j)")
+            if rho < -0.12:
+                adj -= 6.0
+                notas.append(f"Liga com tendência ao empate baixo (ρ={rho:.3f}) — penaliza Over")
+
+        # HC7: UNDER_25 ─ Liga defensiva + defesas sólidas
+        if mercado == "UNDER_25":
+            if rho < -0.10:
+                adj += 7.0
+                notas.append(f"Liga propensa ao empate baixo (ρ={rho:.3f})")
+            if media < 2.40:
+                adj += 6.0
+                notas.append(f"Liga defensiva (méd={media:.2f} gols/j)")
+            if beta_h < 0.90 and beta_a < 0.90:
+                adj += 5.0
+                notas.append(f"Ambas as defesas sólidas (βH={beta_h:.2f}, βA={beta_a:.2f})")
+            if n_jogos_h < 12 or n_jogos_a < 12:
+                adj -= 4.0
+                notas.append(f"Time com poucos jogos (H={n_jogos_h}j, A={n_jogos_a}j)")
+
+        # HC8: 1X ─ Mando Invicto vs Ameaça Visitante
+        if mercado == "1X":
+            if fortress_h:
+                adj += 12.0
+                notas.append(f"Mando Invicto: mandante dominante (αH={alpha_h:.2f}, βH={beta_h:.2f})")
+            if rho < -0.08:
+                adj += 5.0
+                notas.append(f"Liga propensa ao empate reforça 1X (ρ={rho:.3f})")
+            if force_a > force_h * 1.25:
+                adj -= 10.0
+                notas.append(f"Visitante estruturalmente superior ameaça 1X (fA={force_a:.2f})")
+            elif lethal_a and not fortress_h:
+                adj -= 8.0
+                notas.append(f"Visitante letal vs mandante sem fortaleza (αA={alpha_a:.2f})")
+
+        # HC9: X2 ─ Zebra Descarada vs Dupla Chance Ilusória
+        if mercado == "X2":
+            if fragil_h and lethal_a:
+                adj += 12.0
+                notas.append(f"Zebra Descarada: casa frágil vs visitante letal (αA={alpha_a:.2f}, βH={beta_h:.2f})")
+            elif alpha_a > 1.10:
+                adj += 5.0
+                notas.append(f"Visitante com forte ataque (αA={alpha_a:.2f})")
+            if fortress_h and xg_lam > 1.60:
+                adj -= 15.0
+                notas.append(f"Dupla Chance Ilusória: mandante domina (αH={alpha_h:.2f}, λ={xg_lam:.2f})")
+            elif force_h > 1.50:
+                adj -= 10.0
+                notas.append(f"Mandante com vantagem estrutural contradiz X2 (fH={force_h:.2f})")
+
+        # HC10: 12 ─ Decisão Direta vs Empate Provável
+        if mercado == "12":
+            if cbi < 0.50:
+                adj += 8.0
+                notas.append(f"Resultado decisivo esperado (CBI={cbi:.2f})")
+            if force_h > 1.30 or force_a > 1.30:
+                adj += 5.0
+                notas.append(f"Existe favorito claro (fMax={max(force_h, force_a):.2f})")
+            if cbi > 0.80 and rho < -0.10:
+                adj -= 12.0
+                notas.append(f"Empate provável: equilíbrio em liga ρ-negativa (CBI={cbi:.2f}, ρ={rho:.3f})")
+            elif fortress_h and xg_mu < 0.85:
+                adj -= 8.0
+                notas.append(f"Mandante domina, visitante sem gol — 12 perde sentido (μ={xg_mu:.2f})")
+
+    if adj > 0:
+        nota_final = f"⬆️ +{adj:.0f}pts: " + " · ".join(notas) if notas else f"⬆️ +{adj:.0f}pts"
+    elif adj < 0:
+        nota_final = f"⬇️ {adj:.0f}pts: " + " · ".join(notas) if notas else f"⬇️ {adj:.0f}pts"
+    else:
+        nota_final = "✅ Contexto OK"
+    return adj, nota_final
 
 
 def consultar_gemini(picks_aprovados: list[dict]) -> str:
@@ -1247,6 +1382,19 @@ with tab_analise:
             previsoes[f_id] = {k: prev.get(k) for k in
                                ("lambda", "mu", "xg_total", "mercados", "flags",
                                 "cobertura_ok", "erro")}
+        # dc_ctx sempre recalculado dos params atuais (nunca fica stale por recalibração)
+        h_data = params.times.get(h_id, {})
+        a_data = params.times.get(a_id, {})
+        previsoes[f_id]["dc_ctx"] = {
+            "alpha_h":        h_data.get("alpha",  1.0),
+            "beta_h":         h_data.get("beta",   1.0),
+            "alpha_a":        a_data.get("alpha",  1.0),
+            "beta_a":         a_data.get("beta",   1.0),
+            "n_jogos_h":      h_data.get("n_jogos", 0),
+            "n_jogos_a":      a_data.get("n_jogos", 0),
+            "rho":            params.rho,
+            "media_liga_gols": params.media_liga_gols,
+        }
     banco.datas[data_str]["previsoes"] = previsoes
     dm.salvar_banco(banco)
 
@@ -1313,14 +1461,15 @@ with tab_analise:
                     cobertura_ok  = cobertura_ok,
                 )
 
-                # Camada heurística contextual (λ/μ do D-C como proxy de força relativa)
-                heur_penalty, heur_nota = avaliar_heuristicas(
+                # Camada heurística contextual — λ/μ + parâmetros D-C internos
+                heur_adj, heur_nota = avaliar_heuristicas(
                     mercado,
                     xg_lam   = float(prev.get("lambda") or 1.3),
                     xg_mu    = float(prev.get("mu")     or 1.0),
                     xg_total = xg_total_prev,
+                    ctx      = prev.get("dc_ctx"),
                 )
-                score = round(max(0.0, score + heur_penalty), 1)
+                score = round(max(0.0, score + heur_adj), 1)
 
                 if score < SCORE_MINIMO_RANKING:
                     continue
@@ -1340,6 +1489,7 @@ with tab_analise:
                     "score":        score,
                     "cobertura_ok": cobertura_ok,
                     "cal_marginal": _cal_marginal,
+                    "heur_adj":     heur_adj,
                     "heur_nota":    heur_nota,
                 })
 
@@ -1382,9 +1532,11 @@ with tab_analise:
 
                     cob_icon  = "✅" if p.get("cobertura_ok") else "⚠️ dados parciais"
                     cal_icon  = " · 🔴 cal. marginal (<40j)" if p.get("cal_marginal") else ""
+                    heur_adj  = p.get("heur_adj", 0.0)
                     heur_nota = p.get("heur_nota", "✅ Contexto OK")
-                    heur_cor  = "#aaa" if heur_nota.startswith("✅") else "#f0ad4e"
-                    heur_icon = "" if heur_nota.startswith("✅") else "🔍 "
+                    heur_cor  = ("#28a745" if heur_adj > 0
+                                 else "#f0ad4e" if heur_adj < 0
+                                 else "#aaa")
 
                     st.markdown(
                         f"""<div style='border-left:4px solid {cor};padding:10px 14px;
@@ -1412,7 +1564,7 @@ with tab_analise:
                             &nbsp;·&nbsp; 💵 Stake: <b>R$ {p.get('stake',0):.2f}</b>
                           </div>
                           <div style='font-size:11px;color:{heur_cor};margin-top:3px;'>
-                            {heur_icon}{heur_nota}
+                            {heur_nota}
                           </div>
                         </div>""",
                         unsafe_allow_html=True,
@@ -1862,6 +2014,14 @@ with tab_analise:
                     if stake_mo <= 0:
                         continue
 
+                    heur_adj_mo, heur_nota_mo = avaliar_heuristicas(
+                        mercado,
+                        xg_lam   = float(prev.get("lambda") or 1.3),
+                        xg_mu    = float(prev.get("mu")     or 1.0),
+                        xg_total = float(prev.get("xg_total") or 2.3),
+                        ctx      = prev.get("dc_ctx"),
+                    )
+
                     candidatos_mo.append({
                         "fixture_id":   f_id,
                         "jogo":         jogo_nome,
@@ -1876,6 +2036,8 @@ with tab_analise:
                         "stake":        stake_mo,
                         "cobertura_ok": cobertura_ok,
                         "overround":    round(overround, 4),
+                        "heur_adj":     heur_adj_mo,
+                        "heur_nota":    heur_nota_mo,
                     })
 
             # Deduplicação: um mercado por jogo (maior EV dentro da faixa aprovada)
@@ -1908,6 +2070,11 @@ with tab_analise:
                         str(next((j["league"]["id"] for j in jogos_com_odds
                                   if str(j["fixture"]["id"]) == p["fixture_id"]), 0)), {}
                     ).get("calibradores", {}).get("1X2_HOME") else ""
+                    _h_adj  = p.get("heur_adj", 0.0)
+                    _h_nota = p.get("heur_nota", "✅ Contexto OK")
+                    _h_cor  = ("#28a745" if _h_adj > 0
+                               else "#f0ad4e" if _h_adj < 0
+                               else "#aaa")
 
                     st.markdown(
                         f"""<div style='border-left:4px solid {cor};padding:10px 14px;
@@ -1932,6 +2099,9 @@ with tab_analise:
                             EV <span style='color:{cor};font-weight:bold;'>{p.get('ev',0):+.1f}%</span>
                             &nbsp;·&nbsp; Kelly {p.get('kelly',0)*100:.1f}%
                             &nbsp;·&nbsp; Stake: <b>R$ {p.get('stake',0):.2f}</b>
+                          </div>
+                          <div style='font-size:11px;color:{_h_cor};margin-top:3px;'>
+                            {_h_nota}
                           </div>
                         </div>""",
                         unsafe_allow_html=True,
