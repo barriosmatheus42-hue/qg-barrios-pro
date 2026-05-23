@@ -1815,39 +1815,56 @@ with tab_analise:
                     cal_icon  = " · 🔴 cal. marginal (<40j)" if p.get("cal_marginal") else ""
                     heur_adj  = p.get("heur_adj", 0.0)
                     heur_nota = p.get("heur_nota", "✅ Contexto OK")
-                    heur_cor  = ("#28a745" if heur_adj > 0
-                                 else "#f0ad4e" if heur_adj < 0
-                                 else "#aaa")
+                    # Pré-computa o bloco HTML da nota fora do f-string do card
+                    # para evitar que erros de parsing engulam silenciosamente a linha
+                    if heur_adj > 0:
+                        _nota_div = (
+                            "<div style='margin-top:8px;padding:6px 10px;border-radius:4px;"
+                            "background:#0d2115;border:1px solid #28a745;"
+                            "font-size:12px;font-weight:700;color:#28a745;'>"
+                            + heur_nota + "</div>"
+                        )
+                    elif heur_adj < 0:
+                        _nota_div = (
+                            "<div style='margin-top:8px;padding:6px 10px;border-radius:4px;"
+                            "background:#231a06;border:1px solid #f0ad4e;"
+                            "font-size:12px;font-weight:700;color:#f0ad4e;'>"
+                            + heur_nota + "</div>"
+                        )
+                    else:
+                        _nota_div = (
+                            "<div style='margin-top:5px;font-size:10px;color:#555;'>"
+                            + heur_nota + "</div>"
+                        )
 
                     st.markdown(
-                        f"""<div style='border-left:4px solid {cor};padding:10px 14px;
-                                      margin-bottom:10px;background:#0e1117;border-radius:4px;'>
-                          <div style='display:flex;justify-content:space-between;
-                                      font-size:11px;color:#888;'>
-                            <span>#{i} · {p.get('liga','—')} · {cob_icon}{cal_icon}</span>
-                            <span style='color:{cor};font-weight:bold;'>{badge} &nbsp;
-                              <span style='font-family:monospace;letter-spacing:1px;'>{bar_str}</span>
-                              &nbsp;{score:.0f}/100
-                            </span>
-                          </div>
-                          <div style='font-size:17px;font-weight:bold;color:white;margin:5px 0 3px;'>
-                            {p.get('jogo','—')}
-                          </div>
-                          <div style='font-size:13px;color:#ccc;'>
-                            <b>{p.get('mercado','—')}</b> &nbsp;·&nbsp;
-                            Odd <b>{p.get('odd',0):.2f}</b> &nbsp;·&nbsp;
-                            Modelo <b>{p.get('prob_modelo',0):.1f}%</b> vs Mercado {p.get('prob_mercado',0):.1f}%
-                            &nbsp;·&nbsp; Δ <b>{p.get('divergencia',0):+.1f}pp</b>
-                          </div>
-                          <div style='font-size:12px;color:#aaa;margin-top:2px;'>
-                            EV <span style='color:{cor};font-weight:bold;'>{p.get('ev',0):+.1f}%</span>
-                            &nbsp;·&nbsp; Kelly {p.get('kelly',0)*100:.1f}%
-                            &nbsp;·&nbsp; 💵 Stake: <b>R$ {p.get('stake',0):.2f}</b>
-                          </div>
-                          <div style='font-size:11px;color:{heur_cor};margin-top:3px;'>
-                            {heur_nota}
-                          </div>
-                        </div>""",
+                        "<div style='border-left:4px solid " + cor + ";padding:10px 14px;"
+                        "margin-bottom:10px;background:#0e1117;border-radius:4px;'>"
+                        "<div style='display:flex;justify-content:space-between;"
+                        "font-size:11px;color:#888;'>"
+                        "<span>#" + str(i) + " · " + p.get('liga', '—') + " · " + cob_icon + cal_icon + "</span>"
+                        "<span style='color:" + cor + ";font-weight:bold;'>" + badge + " &nbsp;"
+                        "<span style='font-family:monospace;letter-spacing:1px;'>" + bar_str + "</span>"
+                        "&nbsp;" + f"{score:.0f}" + "/100</span>"
+                        "</div>"
+                        "<div style='font-size:17px;font-weight:bold;color:white;margin:5px 0 3px;'>"
+                        + p.get('jogo', '—') +
+                        "</div>"
+                        "<div style='font-size:13px;color:#ccc;'>"
+                        "<b>" + p.get('mercado', '—') + "</b> &nbsp;·&nbsp; "
+                        "Odd <b>" + f"{p.get('odd',0):.2f}" + "</b> &nbsp;·&nbsp; "
+                        "Modelo <b>" + f"{p.get('prob_modelo',0):.1f}" + "%</b>"
+                        " vs Mercado " + f"{p.get('prob_mercado',0):.1f}" + "% &nbsp;·&nbsp; "
+                        "Δ <b>" + f"{p.get('divergencia',0):+.1f}" + "pp</b>"
+                        "</div>"
+                        "<div style='font-size:12px;color:#aaa;margin-top:2px;'>"
+                        "EV <span style='color:" + cor + ";font-weight:bold;'>"
+                        + f"{p.get('ev',0):+.1f}" + "%</span> &nbsp;·&nbsp; "
+                        "Kelly " + f"{p.get('kelly',0)*100:.1f}" + "% &nbsp;·&nbsp; "
+                        "💵 Stake: <b>R$ " + f"{p.get('stake',0):.2f}" + "</b>"
+                        "</div>"
+                        + _nota_div +
+                        "</div>",
                         unsafe_allow_html=True,
                     )
                 except Exception:
@@ -2353,38 +2370,53 @@ with tab_analise:
                     ).get("calibradores", {}).get("1X2_HOME") else ""
                     _h_adj  = p.get("heur_adj", 0.0)
                     _h_nota = p.get("heur_nota", "✅ Contexto OK")
-                    _h_cor  = ("#28a745" if _h_adj > 0
-                               else "#f0ad4e" if _h_adj < 0
-                               else "#aaa")
+                    cob_ico = "✅" if p.get("cobertura_ok") else "⚠️"
+                    if _h_adj > 0:
+                        _nota_div_mo = (
+                            "<div style='margin-top:8px;padding:6px 10px;border-radius:4px;"
+                            "background:#0d2115;border:1px solid #28a745;"
+                            "font-size:12px;font-weight:700;color:#28a745;'>"
+                            + _h_nota + "</div>"
+                        )
+                    elif _h_adj < 0:
+                        _nota_div_mo = (
+                            "<div style='margin-top:8px;padding:6px 10px;border-radius:4px;"
+                            "background:#231a06;border:1px solid #f0ad4e;"
+                            "font-size:12px;font-weight:700;color:#f0ad4e;'>"
+                            + _h_nota + "</div>"
+                        )
+                    else:
+                        _nota_div_mo = (
+                            "<div style='margin-top:5px;font-size:10px;color:#555;'>"
+                            + _h_nota + "</div>"
+                        )
 
                     st.markdown(
-                        f"""<div style='border-left:4px solid {cor};padding:10px 14px;
-                                      margin-bottom:8px;background:#0e1117;border-radius:4px;'>
-                          <div style='display:flex;justify-content:space-between;
-                                      font-size:11px;color:#888;'>
-                            <span>#{i} · {p.get('liga','—')} · {'✅' if p.get('cobertura_ok') else '⚠️'}{cal_badge}</span>
-                            <span style='color:{cor};font-weight:bold;'>
-                              {mkt} &nbsp;·&nbsp; OR: {p.get('overround',1.0):.3f}
-                            </span>
-                          </div>
-                          <div style='font-size:17px;font-weight:bold;color:white;margin:5px 0 3px;'>
-                            {p.get('jogo','—')}
-                          </div>
-                          <div style='font-size:13px;color:#ccc;'>
-                            Odd <b>{p.get('odd',0):.2f}</b> &nbsp;·&nbsp;
-                            Modelo <b>{p.get('prob_modelo',0):.1f}%</b>
-                            vs Mercado {p.get('prob_mercado',0):.1f}%
-                            &nbsp;·&nbsp; Delta <b>{p.get('divergencia',0):+.1f}pp</b>
-                          </div>
-                          <div style='font-size:12px;color:#aaa;margin-top:2px;'>
-                            EV <span style='color:{cor};font-weight:bold;'>{p.get('ev',0):+.1f}%</span>
-                            &nbsp;·&nbsp; Kelly {p.get('kelly',0)*100:.1f}%
-                            &nbsp;·&nbsp; Stake: <b>R$ {p.get('stake',0):.2f}</b>
-                          </div>
-                          <div style='font-size:11px;color:{_h_cor};margin-top:3px;'>
-                            {_h_nota}
-                          </div>
-                        </div>""",
+                        "<div style='border-left:4px solid " + cor + ";padding:10px 14px;"
+                        "margin-bottom:8px;background:#0e1117;border-radius:4px;'>"
+                        "<div style='display:flex;justify-content:space-between;"
+                        "font-size:11px;color:#888;'>"
+                        "<span>#" + str(i) + " · " + p.get('liga', '—') + " · " + cob_ico + cal_badge + "</span>"
+                        "<span style='color:" + cor + ";font-weight:bold;'>"
+                        + mkt + " &nbsp;·&nbsp; OR: " + f"{p.get('overround',1.0):.3f}" + "</span>"
+                        "</div>"
+                        "<div style='font-size:17px;font-weight:bold;color:white;margin:5px 0 3px;'>"
+                        + p.get('jogo', '—') +
+                        "</div>"
+                        "<div style='font-size:13px;color:#ccc;'>"
+                        "Odd <b>" + f"{p.get('odd',0):.2f}" + "</b> &nbsp;·&nbsp; "
+                        "Modelo <b>" + f"{p.get('prob_modelo',0):.1f}" + "%</b>"
+                        " vs Mercado " + f"{p.get('prob_mercado',0):.1f}" + "% &nbsp;·&nbsp; "
+                        "Delta <b>" + f"{p.get('divergencia',0):+.1f}" + "pp</b>"
+                        "</div>"
+                        "<div style='font-size:12px;color:#aaa;margin-top:2px;'>"
+                        "EV <span style='color:" + cor + ";font-weight:bold;'>"
+                        + f"{p.get('ev',0):+.1f}" + "%</span> &nbsp;·&nbsp; "
+                        "Kelly " + f"{p.get('kelly',0)*100:.1f}" + "% &nbsp;·&nbsp; "
+                        "Stake: <b>R$ " + f"{p.get('stake',0):.2f}" + "</b>"
+                        "</div>"
+                        + _nota_div_mo +
+                        "</div>",
                         unsafe_allow_html=True,
                     )
 
