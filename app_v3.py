@@ -246,13 +246,17 @@ def avaliar_heuristicas(
     ctx: dict | None = None,
 ) -> tuple[float, str]:
     """
-    Matriz de bônus/penalidade contextual usando λ/μ do D-C e parâmetros internos do modelo.
+    Matriz de bônus/penalidade contextual usando λ/μ do D-C e dados do historico_ligas.
 
     Retorna (ajuste_pts, nota) onde ajuste_pts pode ser positivo (bônus) ou negativo (penalidade).
-    ctx esperado: alpha_h, beta_h, alpha_a, beta_a, n_jogos_h, n_jogos_a, rho, media_liga_gols.
+    ctx esperado (D-C): alpha_h, beta_h, alpha_a, beta_a, n_jogos_h, n_jogos_a, rho, media_liga_gols.
+    ctx esperado (forma): h/a_wins/losses/draws_last5, h/a_gf/ga_last5, h/a_n_last5,
+                          h/a_win_streak, h/a_sem_marcar, h_cs_streak_casa,
+                          h2h_h_wins, h2h_a_wins, h2h_total.
 
-    Regras sem ctx (H1-H6): baseadas somente em λ/μ (sempre disponíveis).
-    Regras com ctx (HC1-HC10): usam parâmetros D-C do modelo calibrado.
+    Regras sem ctx (H1-H6)  : baseadas somente em λ/μ.
+    Regras com ctx (HC1-HC10): parâmetros D-C internos (alpha/beta/rho).
+    Regras com ctx (HC11-HC17): forma recente + H2H do historico_ligas (0 créditos extras).
     """
     adj = 0.0
     notas: list[str] = []
@@ -436,6 +440,130 @@ def avaliar_heuristicas(
                 adj -= 8.0
                 notas.append(f"Mandante domina, visitante sem gol — 12 perde sentido (μ={xg_mu:.2f})")
 
+        # ── Forma recente + H2H (historico_ligas — 0 créditos extras) ───────
+        h_win_streak     = int(ctx.get("h_win_streak",     0))
+        a_win_streak     = int(ctx.get("a_win_streak",     0))
+        h_losses_last5   = int(ctx.get("h_losses_last5",   0))
+        a_losses_last5   = int(ctx.get("a_losses_last5",   0))
+        h_wins_last5     = int(ctx.get("h_wins_last5",     0))
+        a_wins_last5     = int(ctx.get("a_wins_last5",     0))
+        h_draws_last5    = int(ctx.get("h_draws_last5",    0))
+        a_draws_last5    = int(ctx.get("a_draws_last5",    0))
+        h_gf_last5       = int(ctx.get("h_gf_last5",       0))
+        a_gf_last5       = int(ctx.get("a_gf_last5",       0))
+        h_n_last5        = int(ctx.get("h_n_last5",        0))
+        a_n_last5        = int(ctx.get("a_n_last5",        0))
+        h_sem_marcar     = int(ctx.get("h_sem_marcar",     0))
+        a_sem_marcar     = int(ctx.get("a_sem_marcar",     0))
+        h_cs_streak_casa = int(ctx.get("h_cs_streak_casa", 0))
+        h2h_h_wins       = int(ctx.get("h2h_h_wins",       0))
+        h2h_a_wins       = int(ctx.get("h2h_a_wins",       0))
+        h2h_total        = int(ctx.get("h2h_total",        0))
+        tem_forma = h_n_last5 >= 3 and a_n_last5 >= 3
+        tem_h2h   = h2h_total >= 5
+
+        # HC11: Cavalo Cansado — modelo favorece mandante mas forma recente contradiz
+        if tem_forma and mercado in ("HOME", "1X"):
+            if ratio > 1.20 and h_losses_last5 >= 3:
+                adj -= 15.0
+                notas.append(f"Cavalo Cansado: favorito em queda ({h_losses_last5}D em {h_n_last5}j)")
+            elif ratio > 1.20 and h_losses_last5 >= 2 and h_wins_last5 == 0:
+                adj -= 8.0
+                notas.append(f"Mandante favorito sem vencer (0V/{h_losses_last5}D em {h_n_last5}j)")
+
+        # HC12: Rolo Compressor — sequência ativa de vitórias
+        if tem_forma:
+            if h_win_streak >= 4:
+                if mercado == "HOME":
+                    adj += 12.0
+                    notas.append(f"Rolo Compressor: mandante em {h_win_streak} vitórias seguidas")
+                elif mercado == "1X":
+                    adj += 8.0
+                    notas.append(f"Mandante em {h_win_streak} vit. seguidas reforça 1X")
+                elif mercado in ("AWAY", "X2"):
+                    adj -= 10.0
+                    notas.append(f"Mandante em {h_win_streak} vit. seguidas contradiz {mercado}")
+                elif mercado in ("UNDER_25", "BTTS_NO"):
+                    adj += 5.0
+                    notas.append(f"Mandante dominante ({h_win_streak} vit. seg.) apoia Under/BTTS_NO")
+            if a_win_streak >= 4:
+                if mercado == "AWAY":
+                    adj += 12.0
+                    notas.append(f"Rolo Compressor visitante: {a_win_streak} vitórias seguidas")
+                elif mercado == "X2":
+                    adj += 8.0
+                    notas.append(f"Visitante em {a_win_streak} vit. seguidas reforça X2")
+                elif mercado in ("HOME", "1X"):
+                    adj -= 8.0
+                    notas.append(f"Visitante em {a_win_streak} vit. seguidas enfraquece {mercado}")
+
+        # HC13: Freguesia Histórica — H2H com dominância clara (mín. 5 confrontos)
+        if tem_h2h:
+            h2h_h_pct = h2h_h_wins / h2h_total
+            h2h_a_pct = h2h_a_wins / h2h_total
+            if h2h_h_pct >= 0.70:
+                if mercado == "HOME":
+                    adj += 10.0
+                    notas.append(f"Freguesia Histórica: mandante domina H2H ({h2h_h_wins}V/{h2h_total}j)")
+                elif mercado == "1X":
+                    adj += 6.0
+                    notas.append(f"H2H favorece mandante ({h2h_h_wins}/{h2h_total} vitórias)")
+                elif mercado in ("AWAY", "X2"):
+                    adj -= 10.0
+                    notas.append(f"H2H desfavorável ao visitante: mandante venceu {h2h_h_wins}/{h2h_total}")
+            elif h2h_a_pct >= 0.70:
+                if mercado == "AWAY":
+                    adj += 10.0
+                    notas.append(f"Freguesia Histórica: visitante domina H2H ({h2h_a_wins}V/{h2h_total}j)")
+                elif mercado == "X2":
+                    adj += 6.0
+                    notas.append(f"H2H favorece visitante ({h2h_a_wins}/{h2h_total} vitórias)")
+                elif mercado in ("HOME", "1X"):
+                    adj -= 10.0
+                    notas.append(f"H2H desfavorável ao mandante: visitante venceu {h2h_a_wins}/{h2h_total}")
+
+        # HC14: Ataque Inoperante — seca de gols mina Over/BTTS_YES
+        if tem_forma and mercado in ("OVER_25", "BTTS_YES"):
+            if h_sem_marcar >= 3:
+                adj -= 12.0
+                notas.append(f"Ataque inoperante: mandante sem marcar há {h_sem_marcar}j")
+            elif h_sem_marcar == 2:
+                adj -= 5.0
+                notas.append(f"Mandante sem marcar nos últimos {h_sem_marcar} jogos")
+            if a_sem_marcar >= 3:
+                adj -= 12.0
+                notas.append(f"Ataque inoperante: visitante sem marcar há {a_sem_marcar}j")
+            elif a_sem_marcar == 2:
+                adj -= 5.0
+                notas.append(f"Visitante sem marcar nos últimos {a_sem_marcar} jogos")
+
+        # HC15: Muralha em Casa — clean sheets em casa favorece Under/BTTS_NO
+        if tem_forma and mercado in ("UNDER_25", "BTTS_NO"):
+            if h_cs_streak_casa >= 3:
+                adj += 10.0
+                notas.append(f"Muralha em Casa: {h_cs_streak_casa} clean sheets seguidas do mandante")
+            elif h_cs_streak_casa == 2:
+                adj += 5.0
+                notas.append(f"Mandante com {h_cs_streak_casa} clean sheets em casa recentes")
+
+        # HC16: Forma Goleadora — ambos marcando bem favorece Over/BTTS_YES
+        if tem_forma and mercado in ("OVER_25", "BTTS_YES"):
+            if h_gf_last5 >= 4 and a_gf_last5 >= 4:
+                adj += 8.0
+                notas.append(f"Forma goleadora: H {h_gf_last5}gols, A {a_gf_last5}gols em {h_n_last5}j")
+            elif h_gf_last5 >= 3 and a_gf_last5 >= 3:
+                adj += 4.0
+                notas.append(f"Ambos marcando bem (H={h_gf_last5}, A={a_gf_last5} gols em {h_n_last5}j)")
+
+        # HC17: Empate Recorrente — histórico de empates recentes corrobora DRAW
+        if tem_forma and mercado == "DRAW":
+            if h_draws_last5 >= 2 and a_draws_last5 >= 2:
+                adj += 6.0
+                notas.append(f"Empate recorrente: H {h_draws_last5}E, A {a_draws_last5}E em {h_n_last5}j")
+            elif h_draws_last5 + a_draws_last5 >= 5:
+                adj += 4.0
+                notas.append(f"Times propensos ao empate (H={h_draws_last5}, A={a_draws_last5} em {h_n_last5}j)")
+
     if adj > 0:
         nota_final = f"⬆️ +{adj:.0f}pts: " + " · ".join(notas) if notas else f"⬆️ +{adj:.0f}pts"
     elif adj < 0:
@@ -443,6 +571,139 @@ def avaliar_heuristicas(
     else:
         nota_final = "✅ Contexto OK"
     return adj, nota_final
+
+
+def extrair_forma_times(
+    df_liga: "pd.DataFrame",
+    home_id: int,
+    away_id: int,
+    n_forma: int = 5,
+) -> dict:
+    """
+    Extrai métricas de forma recente e H2H do historico_ligas local (0 créditos extras).
+
+    df_liga : DataFrame ordenado por 'date' com colunas home_id, away_id, home_goals, away_goals.
+    Retorna dict com chaves h_* / a_* (por time) e h2h_* (confronto direto).
+    Todos os campos retornam 0 quando há dados insuficientes ou em caso de erro.
+    """
+    _vazio: dict = {
+        "h_wins_last5":     0, "h_losses_last5":   0, "h_draws_last5":    0,
+        "h_gf_last5":       0, "h_ga_last5":       0, "h_n_last5":        0,
+        "a_wins_last5":     0, "a_losses_last5":   0, "a_draws_last5":    0,
+        "a_gf_last5":       0, "a_ga_last5":       0, "a_n_last5":        0,
+        "h_win_streak":     0, "a_win_streak":     0,
+        "h_sem_marcar":     0, "a_sem_marcar":     0,
+        "h_cs_streak_casa": 0,
+        "h2h_h_wins":       0, "h2h_a_wins":       0,
+        "h2h_draws":        0, "h2h_total":        0,
+    }
+    try:
+        if df_liga is None or df_liga.empty:
+            return _vazio
+        needed = {"home_id", "away_id", "home_goals", "away_goals"}
+        if not needed.issubset(df_liga.columns):
+            return _vazio
+
+        df = df_liga.copy()
+        df["home_goals"] = pd.to_numeric(df["home_goals"], errors="coerce").fillna(0).astype(int)
+        df["away_goals"] = pd.to_numeric(df["away_goals"], errors="coerce").fillna(0).astype(int)
+        if "date" in df.columns:
+            df = df.sort_values("date").reset_index(drop=True)
+
+        def _jogos_time(tid: int) -> pd.DataFrame:
+            cols_base = ["date"] if "date" in df.columns else []
+            home = df[df["home_id"] == tid][cols_base + ["home_goals", "away_goals"]].copy()
+            home = home.rename(columns={"home_goals": "gf", "away_goals": "ga"})
+            away = df[df["away_id"] == tid][cols_base + ["away_goals", "home_goals"]].copy()
+            away = away.rename(columns={"away_goals": "gf", "home_goals": "ga"})
+            todos = pd.concat([home, away], ignore_index=True)
+            if "date" in todos.columns:
+                todos = todos.sort_values("date").reset_index(drop=True)
+            todos["res"] = todos.apply(
+                lambda r: "W" if r["gf"] > r["ga"] else ("L" if r["gf"] < r["ga"] else "D"),
+                axis=1,
+            )
+            return todos
+
+        def _ultimos(jg: pd.DataFrame, n: int) -> dict:
+            last = jg.tail(n)
+            if last.empty:
+                return {"W": 0, "L": 0, "D": 0, "gf": 0, "ga": 0, "n": 0}
+            vc = last["res"].value_counts()
+            return {
+                "W": int(vc.get("W", 0)), "L": int(vc.get("L", 0)), "D": int(vc.get("D", 0)),
+                "gf": int(last["gf"].sum()), "ga": int(last["ga"].sum()), "n": len(last),
+            }
+
+        def _streak_vit(jg: pd.DataFrame) -> int:
+            seq = list(jg["res"].tail(10))[::-1]
+            s = 0
+            for r in seq:
+                if r == "W": s += 1
+                else: break
+            return s
+
+        def _streak_sem_gol(jg: pd.DataFrame) -> int:
+            seq = list(jg["gf"].tail(10))[::-1]
+            s = 0
+            for g in seq:
+                if int(g) == 0: s += 1
+                else: break
+            return s
+
+        def _cs_casa(tid: int) -> int:
+            hg = df[df["home_id"] == tid]
+            if "date" in hg.columns:
+                hg = hg.sort_values("date")
+            seq = list(hg["away_goals"].fillna(0).astype(int).tail(10))[::-1]
+            s = 0
+            for g in seq:
+                if g == 0: s += 1
+                else: break
+            return s
+
+        # H2H: últimos 10 confrontos diretos (home ou away) entre os dois times
+        mask_h2h = (
+            ((df["home_id"] == home_id) & (df["away_id"] == away_id)) |
+            ((df["home_id"] == away_id) & (df["away_id"] == home_id))
+        )
+        h2h = df[mask_h2h].tail(10)
+        h2h_total = len(h2h)
+        h2h_h = h2h_a = 0
+        if h2h_total > 0:
+            h2h_h = int(
+                ((h2h["home_id"] == home_id) & (h2h["home_goals"] > h2h["away_goals"])).sum() +
+                ((h2h["away_id"] == home_id) & (h2h["away_goals"] > h2h["home_goals"])).sum()
+            )
+            h2h_a = int(
+                ((h2h["home_id"] == away_id) & (h2h["home_goals"] > h2h["away_goals"])).sum() +
+                ((h2h["away_id"] == away_id) & (h2h["away_goals"] > h2h["home_goals"])).sum()
+            )
+
+        dh = _jogos_time(home_id)
+        da = _jogos_time(away_id)
+        uh = _ultimos(dh, n_forma)
+        ua = _ultimos(da, n_forma)
+
+        return {
+            "h_wins_last5":     uh["W"],    "h_losses_last5":   uh["L"],
+            "h_draws_last5":    uh["D"],    "h_gf_last5":       uh["gf"],
+            "h_ga_last5":       uh["ga"],   "h_n_last5":        uh["n"],
+            "a_wins_last5":     ua["W"],    "a_losses_last5":   ua["L"],
+            "a_draws_last5":    ua["D"],    "a_gf_last5":       ua["gf"],
+            "a_ga_last5":       ua["ga"],   "a_n_last5":        ua["n"],
+            "h_win_streak":     _streak_vit(dh),
+            "a_win_streak":     _streak_vit(da),
+            "h_sem_marcar":     _streak_sem_gol(dh),
+            "a_sem_marcar":     _streak_sem_gol(da),
+            "h_cs_streak_casa": _cs_casa(home_id),
+            "h2h_h_wins":       h2h_h,
+            "h2h_a_wins":       h2h_a,
+            "h2h_draws":        h2h_total - h2h_h - h2h_a,
+            "h2h_total":        h2h_total,
+        }
+    except Exception:
+        return _vazio
 
 
 def consultar_gemini(picks_aprovados: list[dict]) -> str:
@@ -1371,6 +1632,21 @@ with tab_analise:
     jogos_com_odds = [j for j in calibrados if str(j["fixture"]["id"]) in odds_cache]
     previsoes      = cache_dia.get("previsoes", {})
 
+    # Pré-compila DataFrames de historico por liga — 0 créditos, uma vez por liga
+    _forma_dfs: dict[int, pd.DataFrame] = {}
+    for _j_tmp in jogos_com_odds:
+        _lid_tmp = _j_tmp["league"]["id"]
+        if _lid_tmp not in _forma_dfs:
+            _reg = banco.historico_ligas.get(str(_lid_tmp), {}).get("registros", [])
+            if _reg:
+                _df_tmp = pd.DataFrame(_reg)
+                if "date" in _df_tmp.columns:
+                    _df_tmp["date"] = pd.to_datetime(_df_tmp["date"], errors="coerce")
+                    _df_tmp = _df_tmp.sort_values("date").reset_index(drop=True)
+                _forma_dfs[_lid_tmp] = _df_tmp
+            else:
+                _forma_dfs[_lid_tmp] = pd.DataFrame()
+
     for j in jogos_com_odds:
         f_id   = str(j["fixture"]["id"])
         l_id   = j["league"]["id"]
@@ -1385,16 +1661,21 @@ with tab_analise:
         # dc_ctx sempre recalculado dos params atuais (nunca fica stale por recalibração)
         h_data = params.times.get(h_id, {})
         a_data = params.times.get(a_id, {})
-        previsoes[f_id]["dc_ctx"] = {
-            "alpha_h":        h_data.get("alpha",  1.0),
-            "beta_h":         h_data.get("beta",   1.0),
-            "alpha_a":        a_data.get("alpha",  1.0),
-            "beta_a":         a_data.get("beta",   1.0),
-            "n_jogos_h":      h_data.get("n_jogos", 0),
-            "n_jogos_a":      a_data.get("n_jogos", 0),
-            "rho":            params.rho,
+        dc_ctx: dict = {
+            "alpha_h":         h_data.get("alpha",  1.0),
+            "beta_h":          h_data.get("beta",   1.0),
+            "alpha_a":         a_data.get("alpha",  1.0),
+            "beta_a":          a_data.get("beta",   1.0),
+            "n_jogos_h":       h_data.get("n_jogos", 0),
+            "n_jogos_a":       a_data.get("n_jogos", 0),
+            "rho":             params.rho,
             "media_liga_gols": params.media_liga_gols,
         }
+        # Forma recente + H2H: extraídos do cache local — 0 créditos extras
+        dc_ctx.update(
+            extrair_forma_times(_forma_dfs.get(l_id, pd.DataFrame()), h_id, a_id)
+        )
+        previsoes[f_id]["dc_ctx"] = dc_ctx
     banco.datas[data_str]["previsoes"] = previsoes
     dm.salvar_banco(banco)
 
