@@ -87,7 +87,7 @@ _ODD_MIN: dict  = {"HOME": 1.80, "DRAW": 2.80, "AWAY": 1.60, "1X": 1.25, "X2": 1
 _ODD_MAX: dict  = {"HOME": 3.50, "DRAW": 6.50, "AWAY": 5.00, "1X": 2.50, "X2": 2.50, "12": 2.50}
 
 # Ranking de qualidade — sem número fixo
-SCORE_MINIMO_RANKING = 35   # picks abaixo disso são filtrados mesmo com EV positivo
+SCORE_MINIMO_RANKING = 60   # limiar de qualidade mínima; 35-59 = marginal, geralmente ruído
 # Pesos do score composto (devem somar 1.0)
 PESO_EV          = 0.35
 PESO_DIVERGENCIA = 0.30
@@ -338,11 +338,12 @@ def _gemini_do_dia_cached(data_str: str, candidatos: list) -> str:
 
 # ── Session state: Gestão de Risco (persiste entre abas e reloads) ──────────
 _risk_defaults = {
-    "risk_piso_kelly":   1.0,
-    "risk_odd_min":      1.70,
-    "risk_prob_min":     45.0,
-    "risk_teto_pct_pct": 10,
-    "risk_limite_div":   20,
+    "risk_piso_kelly":        1.0,
+    "risk_odd_min":           1.70,
+    "risk_prob_min":          45.0,
+    "risk_teto_pct_pct":      10,
+    "risk_limite_div":        20,
+    "risk_ligas_bloqueadas":  [],   # lista de league_ids excluídos do scanner
 }
 for _rk, _rv in _risk_defaults.items():
     if _rk not in st.session_state:
@@ -464,6 +465,14 @@ with st.sidebar:
         prob_min     = st.number_input("Prob. mínima do modelo (%)", min_value=0.0, max_value=99.0, step=5.0, key="risk_prob_min")
         # 20pp: limiar documentado no paper Dixon-Coles e nos bugs do V6.1.
         limite_div   = st.slider("Anomalia se divergência >", 10, 20, key="risk_limite_div")
+        st.divider()
+        st.caption("**🚫 Bloquear ligas do scanner** — picks dessas ligas são suprimidos em Gols e Resultados.")
+        ligas_bloqueadas_sel = st.multiselect(
+            "Ligas bloqueadas",
+            options=list(LIGAS_SUPORTADAS.keys()),
+            format_func=lambda x: LIGAS_SUPORTADAS[x],
+            key="risk_ligas_bloqueadas",
+        )
 
     st.divider()
 
@@ -552,8 +561,16 @@ with tab_calibracao:
                 status = "❌ Nunca calibrada"
             n_times = len(params_d.get("times", {}))
             n_jogos = params_d.get("n_jogos_calibracao", 0)
+        if n_jogos >= 80:
+            qualidade = "✅ Boa"
+        elif n_jogos >= 40:
+            qualidade = "🟡 Mínima"
+        elif n_jogos > 0:
+            qualidade = "🔴 Marginal"
+        else:
+            qualidade = "❌ —"
         rows_status.append({"Liga": f"{nome} (ID {league_id})", "Status": status,
-                             "Times": n_times, "Jogos usados": n_jogos})
+                             "Times": n_times, "Jogos": n_jogos, "Qualidade": qualidade})
 
     st.dataframe(rows_status, use_container_width=True, hide_index=True)
 
@@ -1125,8 +1142,12 @@ with tab_analise:
             "UNDER_15", "UNDER_25", "UNDER_35",
             "BTTS_YES", "BTTS_NO",
         ]
+        _ligas_bloq = set(st.session_state.get("risk_ligas_bloqueadas", []))
         for j in jogos_com_odds:
             f_id   = str(j["fixture"]["id"])
+            l_id_j = j["league"]["id"]
+            if l_id_j in _ligas_bloq:
+                continue
             prev   = previsoes[f_id]
             if prev.get("erro"):
                 continue
@@ -1134,6 +1155,9 @@ with tab_analise:
             cobertura_ok = prev.get("cobertura_ok", False)
             jogo_nome    = f"{j['teams']['home']['name']} v {j['teams']['away']['name']}"
             liga_nome_j  = j["league"]["name"]
+            # Penalidade adicional se a liga tem poucos dados de calibração
+            _n_jogos_liga = banco.params_ligas.get(str(l_id_j), {}).get("n_jogos_calibracao", 0)
+            _cal_marginal = _n_jogos_liga < 40
 
             for mercado in MERCADOS_VARREDURA:
                 prob_modelo = prev["mercados"].get(mercado, 0)
@@ -1163,23 +1187,28 @@ with tab_analise:
                     odd           = odd_val,
                     cobertura_ok  = cobertura_ok,
                 )
+                # Penalidade extra se liga tem dados insuficientes para calibração confiável
+                if _cal_marginal:
+                    score *= 0.80
+                    score  = round(score, 1)
                 if score < SCORE_MINIMO_RANKING:
                     continue
 
                 candidatos.append({
-                    "fixture_id":  f_id,
-                    "jogo":        jogo_nome,
-                    "liga":        liga_nome_j,
-                    "mercado":     mercado,
-                    "odd":         odd_val,
-                    "prob_modelo": prob_modelo,
-                    "prob_mercado":comp["prob_mercado_pct"],
-                    "ev":          comp["ev_pct"],
-                    "divergencia": comp["divergencia_pp"],
-                    "kelly":       comp.get("kelly_fracao", 0),
-                    "stake":       stake,
-                    "score":       score,
-                    "cobertura_ok":cobertura_ok,
+                    "fixture_id":   f_id,
+                    "jogo":         jogo_nome,
+                    "liga":         liga_nome_j,
+                    "mercado":      mercado,
+                    "odd":          odd_val,
+                    "prob_modelo":  prob_modelo,
+                    "prob_mercado": comp["prob_mercado_pct"],
+                    "ev":           comp["ev_pct"],
+                    "divergencia":  comp["divergencia_pp"],
+                    "kelly":        comp.get("kelly_fracao", 0),
+                    "stake":        stake,
+                    "score":        score,
+                    "cobertura_ok": cobertura_ok,
+                    "cal_marginal": _cal_marginal,
                 })
 
         # 2. Deduplicação por jogo: mantém apenas o mercado de maior score por fixture
@@ -1220,13 +1249,14 @@ with tab_analise:
                     bar_str = "█" * barras + "░" * (10 - barras)
 
                     cob_icon = "✅" if p.get("cobertura_ok") else "⚠️ dados parciais"
+                    cal_icon = " · 🔴 cal. marginal (<40j)" if p.get("cal_marginal") else ""
 
                     st.markdown(
                         f"""<div style='border-left:4px solid {cor};padding:10px 14px;
                                       margin-bottom:10px;background:#0e1117;border-radius:4px;'>
                           <div style='display:flex;justify-content:space-between;
                                       font-size:11px;color:#888;'>
-                            <span>#{i} · {p.get('liga','—')} · {cob_icon}</span>
+                            <span>#{i} · {p.get('liga','—')} · {cob_icon}{cal_icon}</span>
                             <span style='color:{cor};font-weight:bold;'>{badge} &nbsp;
                               <span style='font-family:monospace;letter-spacing:1px;'>{bar_str}</span>
                               &nbsp;{score:.0f}/100
@@ -1625,6 +1655,9 @@ with tab_analise:
 
             for j in jogos_com_odds:
                 f_id   = str(j["fixture"]["id"])
+                l_id   = j["league"]["id"]
+                if l_id in _ligas_bloq:
+                    continue
                 prev   = previsoes[f_id]
                 if prev.get("erro"):
                     continue
@@ -1632,7 +1665,6 @@ with tab_analise:
                 cobertura_ok  = prev.get("cobertura_ok", False)
                 jogo_nome     = f"{j['teams']['home']['name']} v {j['teams']['away']['name']}"
                 liga_nome_j   = j["league"]["name"]
-                l_id          = j["league"]["id"]
 
                 odd_h = float(odds_j.get("HOME", 0) or 0)
                 odd_d = float(odds_j.get("DRAW", 0) or 0)
