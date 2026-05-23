@@ -12,7 +12,6 @@ banco_barrios_pro.json
 
 # Versões antigas do app
 app_v2.py
-app_v3.py
 
 # Arquivos de laboratório/backtest (não vão para produção)
 backtest.py
