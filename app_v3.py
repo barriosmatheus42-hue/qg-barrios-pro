@@ -1580,7 +1580,14 @@ with tab_analise:
                     try:
                         with st.spinner(f"Calibrando {l_nome} (ID {l_id})..."):
                             dm.calibrar_liga_avulsa(l_id, season)
-                        st.success(f"{l_nome} calibrada! Recarregando...")
+                        if dm.ultimo_save_jsonbin_ok:
+                            st.success(f"{l_nome} calibrada e salva na nuvem! Recarregando...")
+                        else:
+                            st.warning(
+                                f"⚠️ {l_nome} calibrada mas **falhou ao salvar no JSONBin**. "
+                                "Os params estão no arquivo local — serão perdidos no próximo restart. "
+                                "Verifique a quota do JSONBin ou tente novamente."
+                            )
                         st.session_state["banco"] = dm.carregar_banco(força_recarregar=True)
                         st.rerun()
                     except TimeoutError as e:

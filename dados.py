@@ -655,6 +655,7 @@ class DadosManager:
         self.jsonbin = JSONBinClient(jsonbin_key, jsonbin_id)
         self.dir = Path(diretorio_local)
         self._banco: Optional[BancoQG] = None
+        self.ultimo_save_jsonbin_ok: bool = True  # False quando JSONBin rejeita o payload
 
     # ----------------------------------------------------------------
     # Banco completo
@@ -703,8 +704,8 @@ class DadosManager:
         self._banco = banco
         return banco
 
-    def salvar_banco(self, banco: Optional[BancoQG] = None) -> None:
-        """Persiste banco em ambos (nuvem + local)."""
+    def salvar_banco(self, banco: Optional[BancoQG] = None) -> bool:
+        """Persiste banco em ambos (nuvem + local). Retorna True se JSONBin OK."""
         b = banco or self._banco
         if b is None:
             raise RuntimeError("Nenhum banco carregado para salvar")
@@ -712,15 +713,31 @@ class DadosManager:
         # Local (append-only merge — nunca sobrescreve dados históricos)
         self._merge_salvar_local(b)
 
-        # Nuvem (sem `datas` para não estourar quota do JSONBin)
+        # Nuvem — sem `datas` (quota) e sem calibradores (arrays X/Y são grandes demais;
+        # comment line 693 já declara local-only, mas o código não implementava isso).
+        # Calibradores ficam apenas no arquivo local; ao carregar do JSONBin,
+        # carregar_banco() injeta os calibradores do arquivo local (lines 695-699).
+        params_nuvem: dict = {}
+        for lid_str, params_d in (b.params_ligas or {}).items():
+            params_nuvem[lid_str] = {k: v for k, v in params_d.items()
+                                     if k != "calibradores"}
+
         nuvem = {
-            "picks": b.picks,
+            "picks":         b.picks,
             "banca_inicial": b.banca_inicial,
-            "depositos": b.depositos,
-            "params_ligas": b.params_ligas,
+            "depositos":     b.depositos,
+            "params_ligas":  params_nuvem,
         }
-        self.jsonbin.escrever(nuvem)
+        ok = self.jsonbin.escrever(nuvem)
+        self.ultimo_save_jsonbin_ok = ok
+        if not ok:
+            log.error(
+                "CRÍTICO — falha ao salvar params_ligas no JSONBin. "
+                "Params calibrados NÃO foram persistidos na nuvem e serão "
+                "perdidos no próximo restart do Streamlit Cloud."
+            )
         self._banco = b
+        return ok
 
     # ----------------------------------------------------------------
     # CALIBRAÇÃO (MLE full — sem incremental)
