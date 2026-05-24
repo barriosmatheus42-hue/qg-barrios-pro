@@ -443,6 +443,105 @@ class ApiSportsClient:
         return xg_map.get(home_team_id), xg_map.get(away_team_id)
 
     # ----------------------------------------------------------------
+    # Endpoint: xG + estatísticas de scout via /fixtures/statistics
+    # ----------------------------------------------------------------
+    def buscar_stats_fixture(
+        self,
+        fixture_id: int,
+        home_team_id: int,
+        away_team_id: int,
+    ) -> dict:
+        """
+        Busca xG + estatísticas de scout via /fixtures/statistics.
+        Substitui buscar_xg_fixture — extrai mais campos sem custo adicional.
+        NÃO chama trava_saldo — o caller faz o check único antes do loop.
+
+        Retorna dict com xg_home, xg_away e stats de scout por time (h_/a_).
+        Qualquer campo indisponível retorna None.
+        """
+        _none = {
+            "xg_home": None, "xg_away": None,
+            "h_shots_on": None, "h_shots_total": None,
+            "h_possession": None, "h_corners": None,
+            "h_yellows": None, "h_saves": None, "h_fouls": None,
+            "a_shots_on": None, "a_shots_total": None,
+            "a_possession": None, "a_corners": None,
+            "a_yellows": None, "a_saves": None, "a_fouls": None,
+        }
+        try:
+            res = requests.get(
+                f"{BASE_URL}/fixtures/statistics",
+                headers=self.headers,
+                params={"fixture": fixture_id},
+                timeout=TIMEOUT_API,
+            )
+            data = res.json()
+        except requests.RequestException as e:
+            log.debug(f"Falha de rede em buscar_stats_fixture({fixture_id}): {e}")
+            return _none
+
+        response = data.get("response", [])
+        if not response:
+            return _none
+
+        def _parse(stats_list: list) -> dict:
+            d: dict = {}
+            for s in stats_list:
+                t = s.get("type", "")
+                v = s.get("value")
+                if v is None:
+                    continue
+                try:
+                    if t == "Expected Goals":
+                        d["xg"] = float(v)
+                    elif t == "Shots on Goal":
+                        d["shots_on"] = int(v)
+                    elif t == "Total Shots":
+                        d["shots_total"] = int(v)
+                    elif t == "Ball Possession":
+                        d["possession"] = float(str(v).replace("%", "").strip())
+                    elif t == "Corner Kicks":
+                        d["corners"] = int(v)
+                    elif t == "Yellow Cards":
+                        d["yellows"] = int(v)
+                    elif t == "Goalkeeper Saves":
+                        d["saves"] = int(v)
+                    elif t == "Fouls":
+                        d["fouls"] = int(v)
+                except (TypeError, ValueError):
+                    pass
+            return d
+
+        team_stats: dict = {}
+        for entry in response:
+            tid = entry.get("team", {}).get("id")
+            if tid is None:
+                continue
+            team_stats[tid] = _parse(entry.get("statistics", []))
+
+        h = team_stats.get(home_team_id, {})
+        a = team_stats.get(away_team_id, {})
+
+        return {
+            "xg_home":       h.get("xg"),
+            "xg_away":       a.get("xg"),
+            "h_shots_on":    h.get("shots_on"),
+            "h_shots_total": h.get("shots_total"),
+            "h_possession":  h.get("possession"),
+            "h_corners":     h.get("corners"),
+            "h_yellows":     h.get("yellows"),
+            "h_saves":       h.get("saves"),
+            "h_fouls":       h.get("fouls"),
+            "a_shots_on":    a.get("shots_on"),
+            "a_shots_total": a.get("shots_total"),
+            "a_possession":  a.get("possession"),
+            "a_corners":     a.get("corners"),
+            "a_yellows":     a.get("yellows"),
+            "a_saves":       a.get("saves"),
+            "a_fouls":       a.get("fouls"),
+        }
+
+    # ----------------------------------------------------------------
     # Endpoint: odds de um jogo
     # ----------------------------------------------------------------
     def buscar_odds_jogo(self, fixture_id: int) -> dict:
@@ -881,31 +980,34 @@ class DadosManager:
                 continue
 
             n_novos = len(df_novos)
-            log.info(f"Liga {league_id} s{season}: {n_novos} fixtures novos — buscando xG.")
+            log.info(f"Liga {league_id} s{season}: {n_novos} fixtures novos — buscando xG + scout stats.")
 
             # Verifica créditos antes do loop de xG
             custo_xg = n_novos * CUSTO_ESTIMADO_XG_FIXTURE
-            xg_home_list: list = []
-            xg_away_list: list = []
+            stats_list: list[dict] = []
             try:
                 self.api.trava_saldo(custo_xg, saldo_minimo=SALDO_MIN_PARA_CALIBRACAO)
                 for _, row in df_novos.iterrows():
-                    xg_h, xg_a = self.api.buscar_xg_fixture(
+                    s = self.api.buscar_stats_fixture(
                         int(row["fixture_id"]), int(row["home_id"]), int(row["away_id"])
                     )
-                    xg_home_list.append(xg_h)
-                    xg_away_list.append(xg_a)
+                    stats_list.append(s)
             except CreditosInsuficientesError as e:
                 log.warning(
                     f"Liga {league_id} s{season}: créditos insuficientes para xG "
-                    f"({custo_xg} necessários — {e}). Fixtures entram no cache sem xG."
+                    f"({custo_xg} necessários — {e}). Fixtures entram no cache sem xG/scout."
                 )
-                xg_home_list = [None] * n_novos
-                xg_away_list = [None] * n_novos
+                stats_list = [{}] * n_novos
 
             df_novos = df_novos.copy()
-            df_novos["xg_home"] = xg_home_list
-            df_novos["xg_away"] = xg_away_list
+            for col in [
+                "xg_home", "xg_away",
+                "h_shots_on", "h_shots_total", "h_possession", "h_corners",
+                "h_yellows", "h_saves", "h_fouls",
+                "a_shots_on", "a_shots_total", "a_possession", "a_corners",
+                "a_yellows", "a_saves", "a_fouls",
+            ]:
+                df_novos[col] = [s.get(col) for s in stats_list]
             df_novos["season_year"] = season
 
             novos = df_novos.to_dict("records")

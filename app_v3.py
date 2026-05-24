@@ -615,6 +615,100 @@ def avaliar_heuristicas(
                     adj -= 8.0
                     notas.append(f"Visitante sem marcar há {a_sem}j — fragiliza BTTS_YES/AWAY")
 
+    # ═══════════════════════════════════════════════════════════
+    # SCOUT LAYER — Heurísticas Avançadas (dados de /fixtures/statistics)
+    # Ativa apenas quando historico_ligas tem stats de scout disponíveis
+    # ═══════════════════════════════════════════════════════════
+    if ctx:
+        h_sog   = ctx.get("h_shots_on_avg")    # shots on goal / game
+        a_sog   = ctx.get("a_shots_on_avg")
+        h_shots = ctx.get("h_shots_total_avg")  # total shots / game
+        a_shots = ctx.get("a_shots_total_avg")
+        h_poss  = ctx.get("h_possession_avg")   # possession %
+        a_poss  = ctx.get("a_possession_avg")
+        h_corn  = ctx.get("h_corners_avg")
+        a_corn  = ctx.get("a_corners_avg")
+        h_yell  = ctx.get("h_yellows_avg")
+        a_yell  = ctx.get("a_yellows_avg")
+        h_spg   = ctx.get("h_shots_per_goal")   # shots needed per goal
+        a_spg   = ctx.get("a_shots_per_goal")
+
+        tem_scout = h_sog is not None and a_sog is not None
+
+        if tem_scout:
+            # HSC1: Eficiência Ofensiva Oculta
+            # D-C pode subestimar jogos onde ambos batem muito no alvo
+            if h_sog >= 5.0 and a_sog >= 5.0:
+                if mercado in ("OVER_25", "BTTS_YES"):
+                    adj += 10.0
+                    notas.append(f"Scout: alta produção no alvo (H={h_sog:.1f}, A={a_sog:.1f} sog/j) — Over/BTTS favorecido")
+                elif mercado in ("UNDER_25", "BTTS_NO"):
+                    adj -= 8.0
+                    notas.append(f"Scout: ambos criam muito (H={h_sog:.1f}, A={a_sog:.1f} sog/j) — Under/BTTS_NO fragilizado")
+
+            # HSC2: Mira Ruim — Ineficiência Ofensiva
+            if h_spg is not None and a_spg is not None:
+                if h_spg >= 15.0 and a_spg >= 15.0:
+                    if mercado in ("UNDER_25", "BTTS_NO"):
+                        adj += 8.0
+                        notas.append(f"Scout: ambos ineficientes ({h_spg:.0f}/{a_spg:.0f} chutes/gol) — Under/BTTS_NO seguro")
+                    elif mercado in ("OVER_25", "BTTS_YES"):
+                        adj -= 6.0
+                        notas.append(f"Scout: baixa conversão ofensiva ({h_spg:.0f}/{a_spg:.0f} ch/gol) — Over penalizado")
+                elif h_spg is not None and h_spg >= 15.0 and mercado in ("HOME",):
+                    adj -= 5.0
+                    notas.append(f"Scout: mandante ineficiente ({h_spg:.0f} ch/gol) — HOME penalizado")
+
+            # HSC3: Dominância Territorial — Posse Alta com D-C confirmando
+            if h_poss is not None and a_poss is not None:
+                if h_poss >= 58.0 and mercado in ("HOME", "1X"):
+                    adj += 12.0
+                    notas.append(f"Scout: dominância territorial do mandante ({h_poss:.0f}% posse) — HOME/1X reforçado")
+                elif a_poss >= 58.0 and mercado in ("AWAY", "X2"):
+                    adj += 12.0
+                    notas.append(f"Scout: dominância territorial do visitante ({a_poss:.0f}% posse) — AWAY/X2 reforçado")
+                elif h_poss >= 58.0 and mercado in ("AWAY", "X2"):
+                    adj -= 8.0
+                    notas.append(f"Scout: mandante domina posse ({h_poss:.0f}%) — AWAY/X2 fragilizado")
+                elif a_poss >= 58.0 and mercado in ("HOME", "1X"):
+                    adj -= 8.0
+                    notas.append(f"Scout: visitante domina posse ({a_poss:.0f}%) — HOME/1X fragilizado")
+
+            # HSC4: Pressão por Escanteios — Território de Gol
+            if h_corn is not None and a_corn is not None:
+                if h_corn >= 6.0 and a_corn >= 6.0 and mercado in ("OVER_25", "BTTS_YES"):
+                    adj += 6.0
+                    notas.append(f"Scout: alta pressão territorial (H={h_corn:.1f}, A={a_corn:.1f} escanteios/j)")
+                elif h_corn >= 7.0 and mercado in ("HOME", "1X"):
+                    adj += 6.0
+                    notas.append(f"Scout: mandante cria muita pressão ({h_corn:.1f} escanteios/j)")
+
+            # HSC5: Jogo Truncado — Cartões Travam o Ritmo
+            if h_yell is not None and a_yell is not None:
+                if h_yell >= 2.5 and a_yell >= 2.5:
+                    if mercado in ("UNDER_25", "DRAW"):
+                        adj += 5.0
+                        notas.append(f"Scout: jogo físico e truncado (H={h_yell:.1f}, A={a_yell:.1f} cartões/j) — ritmo reduzido")
+                    elif mercado in ("OVER_25",):
+                        adj -= 4.0
+                        notas.append(f"Scout: jogo truncado ({h_yell:.1f}+{a_yell:.1f} cartões) — fluidity reduzida")
+
+            # HSC6: Equilíbrio de Posse — Sinal de Empate Estatístico
+            if h_poss is not None and a_poss is not None:
+                if 45.0 <= h_poss <= 55.0 and 45.0 <= a_poss <= 55.0:
+                    if mercado in ("DRAW", "1X", "X2"):
+                        adj += 6.0
+                        notas.append(f"Scout: posse equilibrada (H={h_poss:.0f}%/A={a_poss:.0f}%) — Empate estatisticamente plausível")
+
+            # HSC7: Goleiro Ativo — Muitos Remates Sofridos
+            h_sav = ctx.get("h_saves_avg")
+            a_sav = ctx.get("a_saves_avg")
+            if h_sav is not None and a_sav is not None:
+                if h_sav >= 4.5 and a_sav >= 4.5:
+                    if mercado in ("OVER_25", "BTTS_YES"):
+                        adj += 6.0
+                        notas.append(f"Scout: goleiros muito ativos (H={h_sav:.1f}, A={a_sav:.1f} defesas/j) — jogo aberto")
+
     if adj > 0:
         nota_final = f"+{adj:.0f}pts — " + " · ".join(notas) if notas else f"+{adj:.0f}pts"
     elif adj < 0:
@@ -647,6 +741,12 @@ def extrair_forma_times(
         "h_cs_streak_casa": 0,
         "h2h_h_wins":       0, "h2h_a_wins":       0,
         "h2h_draws":        0, "h2h_total":        0,
+        "h_shots_on_avg": None, "h_shots_total_avg": None, "h_possession_avg": None,
+        "h_corners_avg": None, "h_yellows_avg": None, "h_saves_avg": None, "h_fouls_avg": None,
+        "h_shots_per_goal": None,
+        "a_shots_on_avg": None, "a_shots_total_avg": None, "a_possession_avg": None,
+        "a_corners_avg": None, "a_yellows_avg": None, "a_saves_avg": None, "a_fouls_avg": None,
+        "a_shots_per_goal": None,
     }
     try:
         if df_liga is None or df_liga.empty:
@@ -736,6 +836,65 @@ def extrair_forma_times(
         uh = _ultimos(dh, n_forma)
         ua = _ultimos(da, n_forma)
 
+        def _scout_avg(tid: int, prefix: str, uh_ua: dict) -> dict:
+            """Retorna médias de scout dos últimos n_forma jogos do time (qualquer mando)."""
+            home_rows = df[df["home_id"] == tid].copy()
+            away_rows = df[df["away_id"] == tid].copy()
+
+            rename_h = {
+                "h_shots_on": "shots_on", "h_shots_total": "shots_total",
+                "h_possession": "possession", "h_corners": "corners",
+                "h_yellows": "yellows", "h_saves": "saves", "h_fouls": "fouls",
+            }
+            rename_a = {
+                "a_shots_on": "shots_on", "a_shots_total": "shots_total",
+                "a_possession": "possession", "a_corners": "corners",
+                "a_yellows": "yellows", "a_saves": "saves", "a_fouls": "fouls",
+            }
+
+            cols_scout = ["shots_on", "shots_total", "possession", "corners", "yellows", "saves", "fouls"]
+
+            h_scout = home_rows.rename(columns={k: v for k, v in rename_h.items() if k in home_rows.columns})
+            a_scout = away_rows.rename(columns={k: v for k, v in rename_a.items() if k in away_rows.columns})
+
+            frames = []
+            for fr in [h_scout, a_scout]:
+                avail = [c for c in cols_scout if c in fr.columns]
+                if avail:
+                    date_cols = ["date"] if "date" in fr.columns else []
+                    frames.append(fr[avail + date_cols])
+
+            if not frames:
+                result = {f"{prefix}_{c}_avg": None for c in cols_scout}
+                result[f"{prefix}_shots_per_goal"] = None
+                return result
+
+            combined = pd.concat(frames, ignore_index=True)
+            if "date" in combined.columns:
+                combined = combined.sort_values("date")
+            last = combined.tail(n_forma)
+
+            result = {}
+            for c in cols_scout:
+                if c in last.columns:
+                    vals = pd.to_numeric(last[c], errors="coerce").dropna()
+                    result[f"{prefix}_{c}_avg"] = float(vals.mean()) if len(vals) > 0 else None
+                else:
+                    result[f"{prefix}_{c}_avg"] = None
+
+            # Derived: shots per goal (efficiency — shots_total needed per goal scored)
+            shots_avg = result.get(f"{prefix}_shots_total_avg")
+            gf = uh_ua.get("gf", 0)
+            if shots_avg is not None and gf and gf > 0:
+                result[f"{prefix}_shots_per_goal"] = shots_avg * n_forma / gf
+            else:
+                result[f"{prefix}_shots_per_goal"] = None
+
+            return result
+
+        scout_h = _scout_avg(home_id, "h", uh)
+        scout_a = _scout_avg(away_id, "a", ua)
+
         return {
             "h_wins_last5":     uh["W"],    "h_losses_last5":   uh["L"],
             "h_draws_last5":    uh["D"],    "h_gf_last5":       uh["gf"],
@@ -752,6 +911,8 @@ def extrair_forma_times(
             "h2h_a_wins":       h2h_a,
             "h2h_draws":        h2h_total - h2h_h - h2h_a,
             "h2h_total":        h2h_total,
+            **scout_h,
+            **scout_a,
         }
     except Exception:
         return _vazio
