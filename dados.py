@@ -975,6 +975,40 @@ class DadosManager:
 
             df_novos = df_api[~df_api["fixture_id"].isin(ids_cache)].copy()
 
+            # Restart do Streamlit Cloud apaga historico local → ids_cache fica vazio e
+            # todos os fixtures históricos aparecem como "novos", custando 17k+ créditos.
+            # Solução: se cache vazio mas liga foi calibrada antes (calibrado_em no JSONBin),
+            # adiciona fixtures pré-calibração sem xG (grátis) e só busca xG para os
+            # fixtures realmente novos (jogos ocorridos APÓS a última calibração).
+            if not ids_cache and not df_novos.empty and "date" in df_novos.columns:
+                _params_liga = banco.params_ligas.get(str(league_id), {})
+                _calibrado_em = _params_liga.get("calibrado_em", "")
+                if _calibrado_em:
+                    _cutoff = _calibrado_em[:10]  # YYYY-MM-DD
+                    _df_pre  = df_novos[df_novos["date"] < _cutoff].copy()
+                    df_novos = df_novos[df_novos["date"] >= _cutoff].copy()
+                    if not _df_pre.empty:
+                        # Fixtures pré-calibração: entram no cache sem xG/scout (já eram
+                        # conhecidos na calibração anterior que gerou os params no JSONBin)
+                        for _col in [
+                            "xg_home", "xg_away",
+                            "h_shots_on", "h_shots_total", "h_possession", "h_corners",
+                            "h_yellows", "h_saves", "h_fouls",
+                            "a_shots_on", "a_shots_total", "a_possession", "a_corners",
+                            "a_yellows", "a_saves", "a_fouls",
+                        ]:
+                            _df_pre[_col] = None
+                        _df_pre["season_year"] = season
+                        _pre_records = _df_pre.to_dict("records")
+                        cache_liga["registros"].extend(_pre_records)
+                        ids_cache.update(int(r["fixture_id"]) for r in _pre_records)
+                        houve_novidades = True
+                        log.info(
+                            f"Liga {league_id} s{season}: cache restaurado após restart — "
+                            f"{len(_df_pre)} fixtures pré-{_cutoff} adicionados sem xG, "
+                            f"{len(df_novos)} fixtures novos receberão xG."
+                        )
+
             if df_novos.empty:
                 log.info(f"Liga {league_id} s{season}: sem fixtures novos (cache 100%).")
                 continue
@@ -1194,7 +1228,21 @@ class DadosManager:
                 try:
                     df_api, _ = self.api.buscar_historico_liga(league_id, s, com_xg=False)
                     ids_api = set(df_api["fixture_id"].astype(int).tolist()) if not df_api.empty else set()
-                    novos_ids = ids_api - ids_cache
+                    # Se cache vazio mas liga foi calibrada antes (params no JSONBin),
+                    # só fixtures APÓS calibrado_em são "novos" — evita re-download massivo
+                    # após restart do Streamlit Cloud que apaga historico_ligas local.
+                    if not ids_cache and not df_api.empty:
+                        _p = banco.params_ligas.get(chave, {})
+                        _calib = _p.get("calibrado_em", "")
+                        if _calib:
+                            _cutoff = _calib[:10]  # YYYY-MM-DD
+                            novos_ids = set(
+                                df_api[df_api["date"] >= _cutoff]["fixture_id"].astype(int).tolist()
+                            )
+                        else:
+                            novos_ids = ids_api - ids_cache
+                    else:
+                        novos_ids = ids_api - ids_cache
                     n_novos = len(novos_ids)
                     detalhes_seasons.append({
                         "season":  s,
