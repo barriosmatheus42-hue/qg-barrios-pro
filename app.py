@@ -133,31 +133,6 @@ def calcular_stake_final(kelly_fracao: float, banca: float,
     return round(stake_final, 2)
 
 
-def calcular_estado_banca(picks: list, banca_inicial: float,
-                           depositos: list) -> tuple[float, float, float, float]:
-    """
-    Retorna (lucro_picks, total_depositos, banca_atual, roi_pct).
-
-    SEPARAÇÃO CORRETA:
-    - lucro_picks  = P/L puro das apostas (sem depósitos)
-    - ROI          = lucro_picks / banca_inicial   ← denominador NUNCA muda
-    - banca_atual  = banca_inicial + depositos + lucro_picks
-    """
-    lucro_picks = 0.0
-    for p in picks:
-        status = p.get("status", "Pendente")
-        stake  = float(p.get("stake", 0))
-        odd    = float(p.get("odd", 1.0))
-        if status == "Green":
-            lucro_picks += stake * (odd - 1.0)
-        elif status == "Red":
-            lucro_picks -= stake
-
-    total_dep = sum(float(d.get("valor", 0)) for d in depositos)
-    banca_atual = banca_inicial + total_dep + lucro_picks
-    roi = (lucro_picks / banca_inicial * 100) if banca_inicial > 0 else 0.0
-    return lucro_picks, total_dep, banca_atual, roi
-
 
 def detectar_temporada_atual() -> int:
     hoje = dt.date.today()
@@ -236,6 +211,711 @@ def calcular_score_qualidade(
         score *= 0.90   # juice alto consome a edge
 
     return round(score, 1)
+
+
+def avaliar_heuristicas(
+    mercado: str,
+    xg_lam: float,
+    xg_mu: float,
+    xg_total: float,
+    ctx: dict | None = None,
+) -> tuple[float, str]:
+    """
+    Matriz de bônus/penalidade contextual usando λ/μ do D-C e dados do historico_ligas.
+
+    Retorna (ajuste_pts, nota) onde ajuste_pts pode ser positivo (bônus) ou negativo (penalidade).
+    ctx esperado (D-C): alpha_h, beta_h, alpha_a, beta_a, n_jogos_h, n_jogos_a, rho, media_liga_gols.
+    ctx esperado (forma): h/a_wins/losses/draws_last5, h/a_gf/ga_last5, h/a_n_last5,
+                          h/a_win_streak, h/a_sem_marcar, h_cs_streak_casa,
+                          h2h_h_wins, h2h_a_wins, h2h_total.
+
+    Regras sem ctx (H1-H6)  : baseadas somente em λ/μ.
+    Regras com ctx (HC1-HC10): parâmetros D-C internos (alpha/beta/rho).
+    Regras com ctx (HC11-HC17): forma recente + H2H do historico_ligas (0 créditos extras).
+    """
+    adj = 0.0
+    notas: list[str] = []
+    ratio = xg_lam / max(xg_mu, 0.01)
+
+    # ── H1: AWAY com mandante muito superior ──────────────────────────
+    if mercado == "AWAY":
+        if ratio > 3.0:
+            adj -= 15.0
+            notas.append(f"Mandante com domínio severo (λ/μ={ratio:.1f})")
+        elif ratio > 2.2:
+            adj -= 8.0
+            notas.append(f"Mandante superior (λ/μ={ratio:.1f})")
+
+    # ── H2: BTTS_YES com visitante pouco ofensivo ─────────────────────
+    if mercado == "BTTS_YES":
+        if xg_mu < 0.70:
+            adj -= 12.0
+            notas.append(f"Visitante com μ={xg_mu:.2f} — baixo potencial de marcar")
+        elif xg_mu < 0.90:
+            adj -= 6.0
+            notas.append(f"Visitante abaixo da média ofensiva (μ={xg_mu:.2f})")
+
+    # ── H3: BTTS_NO com ambos atacando ───────────────────────────────
+    if mercado == "BTTS_NO":
+        if xg_lam > 1.55 and xg_mu > 1.05:
+            adj -= 10.0
+            notas.append(f"Ambos ofensivos (λ={xg_lam:.2f}, μ={xg_mu:.2f}) — BTTS_NO fragilizado")
+
+    # ── H4: DRAW com desequilíbrio extremo ───────────────────────────
+    if mercado == "DRAW":
+        if ratio > 3.0 or ratio < 0.33:
+            adj -= 18.0
+            notas.append(f"Desequilíbrio extremo (λ/μ={ratio:.1f}) — empate improvável")
+        elif ratio > 2.2 or ratio < 0.45:
+            adj -= 9.0
+            notas.append(f"Desequilíbrio acentuado (λ/μ={ratio:.1f})")
+
+    # ── H5: UNDER_25 na zona cinzenta ────────────────────────────────
+    if mercado == "UNDER_25" and 1.85 <= xg_total < 2.00:
+        adj -= 6.0
+        notas.append(f"xG total próximo do limiar (λ+μ={xg_total:.2f})")
+
+    # ── H6: OVER_25 com margem estreita ──────────────────────────────
+    if mercado == "OVER_25" and 2.50 < xg_total <= 2.68:
+        adj -= 6.0
+        notas.append(f"xG total marginalmente acima do limiar (λ+μ={xg_total:.2f})")
+
+    # ── Regras com ctx (parâmetros D-C internos) ──────────────────────
+    if ctx:
+        alpha_h   = float(ctx.get("alpha_h",   1.0))
+        beta_h    = float(ctx.get("beta_h",    1.0))
+        alpha_a   = float(ctx.get("alpha_a",   1.0))
+        beta_a    = float(ctx.get("beta_a",    1.0))
+        n_jogos_h = int(ctx.get("n_jogos_h",   0))
+        n_jogos_a = int(ctx.get("n_jogos_a",   0))
+        rho       = float(ctx.get("rho",       -0.05))
+        media     = float(ctx.get("media_liga_gols", 2.5))
+
+        cbi       = min(xg_lam, xg_mu) / max(xg_lam, xg_mu, 0.01)
+        force_h   = alpha_h / max(beta_a, 0.01)
+        force_a   = alpha_a / max(beta_h, 0.01)
+        fortress_h = alpha_h > 1.10 and beta_h < 0.90
+        fragil_h   = alpha_h < 0.90 and beta_h > 1.10
+        lethal_a   = alpha_a > 1.10 and beta_a < 0.90
+
+        # HC1: HOME ─ Fortaleza do mandante
+        if mercado == "HOME":
+            if fortress_h:
+                adj += 8.0
+                notas.append(f"Fortaleza do mandante (αH={alpha_h:.2f}, βH={beta_h:.2f})")
+            if force_h > 1.50 and force_a < 0.80:
+                adj += 6.0
+                notas.append(f"Superioridade estrutural (fH={force_h:.2f} vs fA={force_a:.2f})")
+            if n_jogos_h < 12:
+                adj -= 8.0
+                notas.append(f"Mandante com poucos jogos ({n_jogos_h}j) — incerteza alta")
+
+        # HC2: AWAY ─ Visitante letal
+        if mercado == "AWAY":
+            if lethal_a and fragil_h:
+                adj += 10.0
+                notas.append(f"Visitante letal vs mandante frágil (αA={alpha_a:.2f}, βH={beta_h:.2f})")
+            elif force_a > force_h * 1.25:
+                adj += 5.0
+                notas.append(f"Visitante com vantagem estrutural (fA={force_a:.2f})")
+
+        # HC3: DRAW ─ Liga propensa ao empate + equilíbrio
+        if mercado == "DRAW":
+            if rho < -0.10:
+                adj += 7.0
+                notas.append(f"Liga propensa ao empate (ρ={rho:.3f})")
+            if cbi > 0.80:
+                adj += 8.0
+                notas.append(f"Jogo equilibrado (CBI={cbi:.2f})")
+
+        # HC4: BTTS_YES ─ Contexto ofensivo mútuo
+        if mercado == "BTTS_YES":
+            if alpha_a > 0.95 and beta_h > 1.05:
+                adj += 8.0
+                notas.append(f"Visitante ataca bem vs defesa fraca do mandante (αA={alpha_a:.2f}, βH={beta_h:.2f})")
+            if alpha_h > 0.95 and beta_a > 1.05:
+                adj += 5.0
+                notas.append(f"Mandante também ataca bem vs fraca defesa visitante (αH={alpha_h:.2f})")
+
+        # HC5: BTTS_NO ─ Contexto defensivo dominante
+        if mercado == "BTTS_NO":
+            if fortress_h and alpha_a < 0.90:
+                adj += 10.0
+                notas.append(f"Fortaleza em casa vs visitante sem gol (αA={alpha_a:.2f})")
+            if beta_h < 0.85 and beta_a < 0.85:
+                adj += 8.0
+                notas.append(f"Ambas as defesas sólidas (βH={beta_h:.2f}, βA={beta_a:.2f})")
+
+        # HC6: OVER_25 ─ Liga goleadora vs propensa ao empate
+        if mercado == "OVER_25":
+            if media > 2.80:
+                adj += 6.0
+                notas.append(f"Liga goleadora (méd={media:.2f} gols/j)")
+            if rho < -0.12:
+                adj -= 6.0
+                notas.append(f"Liga com tendência ao empate baixo (ρ={rho:.3f}) — penaliza Over")
+
+        # HC7: UNDER_25 ─ Liga defensiva + defesas sólidas
+        if mercado == "UNDER_25":
+            if rho < -0.10:
+                adj += 7.0
+                notas.append(f"Liga propensa ao empate baixo (ρ={rho:.3f})")
+            if media < 2.40:
+                adj += 6.0
+                notas.append(f"Liga defensiva (méd={media:.2f} gols/j)")
+            if beta_h < 0.90 and beta_a < 0.90:
+                adj += 5.0
+                notas.append(f"Ambas as defesas sólidas (βH={beta_h:.2f}, βA={beta_a:.2f})")
+            if n_jogos_h < 12 or n_jogos_a < 12:
+                adj -= 4.0
+                notas.append(f"Time com poucos jogos (H={n_jogos_h}j, A={n_jogos_a}j)")
+
+        # HC8: 1X ─ Mando Invicto vs Ameaça Visitante
+        if mercado == "1X":
+            if fortress_h:
+                adj += 12.0
+                notas.append(f"Mando Invicto: mandante dominante (αH={alpha_h:.2f}, βH={beta_h:.2f})")
+            if rho < -0.08:
+                adj += 5.0
+                notas.append(f"Liga propensa ao empate reforça 1X (ρ={rho:.3f})")
+            if force_a > force_h * 1.25:
+                adj -= 10.0
+                notas.append(f"Visitante estruturalmente superior ameaça 1X (fA={force_a:.2f})")
+            elif lethal_a and not fortress_h:
+                adj -= 8.0
+                notas.append(f"Visitante letal vs mandante sem fortaleza (αA={alpha_a:.2f})")
+
+        # HC9: X2 ─ Zebra Descarada vs Dupla Chance Ilusória
+        if mercado == "X2":
+            if fragil_h and lethal_a:
+                adj += 12.0
+                notas.append(f"Zebra Descarada: casa frágil vs visitante letal (αA={alpha_a:.2f}, βH={beta_h:.2f})")
+            elif alpha_a > 1.10:
+                adj += 5.0
+                notas.append(f"Visitante com forte ataque (αA={alpha_a:.2f})")
+            if fortress_h and xg_lam > 1.60:
+                adj -= 15.0
+                notas.append(f"Dupla Chance Ilusória: mandante domina (αH={alpha_h:.2f}, λ={xg_lam:.2f})")
+            elif force_h > 1.50:
+                adj -= 10.0
+                notas.append(f"Mandante com vantagem estrutural contradiz X2 (fH={force_h:.2f})")
+
+        # HC10: 12 ─ Decisão Direta vs Empate Provável
+        if mercado == "12":
+            if cbi < 0.50:
+                adj += 8.0
+                notas.append(f"Resultado decisivo esperado (CBI={cbi:.2f})")
+            if force_h > 1.30 or force_a > 1.30:
+                adj += 5.0
+                notas.append(f"Existe favorito claro (fMax={max(force_h, force_a):.2f})")
+            if cbi > 0.80 and rho < -0.10:
+                adj -= 12.0
+                notas.append(f"Empate provável: equilíbrio em liga ρ-negativa (CBI={cbi:.2f}, ρ={rho:.3f})")
+            elif fortress_h and xg_mu < 0.85:
+                adj -= 8.0
+                notas.append(f"Mandante domina, visitante sem gol — 12 perde sentido (μ={xg_mu:.2f})")
+
+        # ── Forma recente + H2H (historico_ligas — 0 créditos extras) ───────
+        h_win_streak     = int(ctx.get("h_win_streak",     0))
+        a_win_streak     = int(ctx.get("a_win_streak",     0))
+        h_losses_last5   = int(ctx.get("h_losses_last5",   0))
+        a_losses_last5   = int(ctx.get("a_losses_last5",   0))
+        h_wins_last5     = int(ctx.get("h_wins_last5",     0))
+        a_wins_last5     = int(ctx.get("a_wins_last5",     0))
+        h_draws_last5    = int(ctx.get("h_draws_last5",    0))
+        a_draws_last5    = int(ctx.get("a_draws_last5",    0))
+        h_gf_last5       = int(ctx.get("h_gf_last5",       0))
+        a_gf_last5       = int(ctx.get("a_gf_last5",       0))
+        h_n_last5        = int(ctx.get("h_n_last5",        0))
+        a_n_last5        = int(ctx.get("a_n_last5",        0))
+        h_sem_marcar     = int(ctx.get("h_sem_marcar",     0))
+        a_sem_marcar     = int(ctx.get("a_sem_marcar",     0))
+        h_cs_streak_casa = int(ctx.get("h_cs_streak_casa", 0))
+        h2h_h_wins       = int(ctx.get("h2h_h_wins",       0))
+        h2h_a_wins       = int(ctx.get("h2h_a_wins",       0))
+        h2h_total        = int(ctx.get("h2h_total",        0))
+        tem_forma = h_n_last5 >= 3 and a_n_last5 >= 3
+        tem_h2h   = h2h_total >= 5
+
+        # HC11: Cavalo Cansado — modelo favorece mandante mas forma recente contradiz
+        if tem_forma and mercado in ("HOME", "1X"):
+            if ratio > 1.20 and h_losses_last5 >= 3:
+                adj -= 15.0
+                notas.append(f"Cavalo Cansado: favorito em queda ({h_losses_last5}D em {h_n_last5}j)")
+            elif ratio > 1.20 and h_losses_last5 >= 2 and h_wins_last5 == 0:
+                adj -= 8.0
+                notas.append(f"Mandante favorito sem vencer (0V/{h_losses_last5}D em {h_n_last5}j)")
+
+        # HC12: Rolo Compressor — sequência ativa de vitórias
+        if tem_forma:
+            if h_win_streak >= 4:
+                if mercado == "HOME":
+                    adj += 12.0
+                    notas.append(f"Rolo Compressor: mandante em {h_win_streak} vitórias seguidas")
+                elif mercado == "1X":
+                    adj += 8.0
+                    notas.append(f"Mandante em {h_win_streak} vit. seguidas reforça 1X")
+                elif mercado in ("AWAY", "X2"):
+                    adj -= 10.0
+                    notas.append(f"Mandante em {h_win_streak} vit. seguidas contradiz {mercado}")
+                elif mercado in ("UNDER_25", "BTTS_NO"):
+                    adj += 5.0
+                    notas.append(f"Mandante dominante ({h_win_streak} vit. seg.) apoia Under/BTTS_NO")
+            if a_win_streak >= 4:
+                if mercado == "AWAY":
+                    adj += 12.0
+                    notas.append(f"Rolo Compressor visitante: {a_win_streak} vitórias seguidas")
+                elif mercado == "X2":
+                    adj += 8.0
+                    notas.append(f"Visitante em {a_win_streak} vit. seguidas reforça X2")
+                elif mercado in ("HOME", "1X"):
+                    adj -= 8.0
+                    notas.append(f"Visitante em {a_win_streak} vit. seguidas enfraquece {mercado}")
+
+        # HC13: Freguesia Histórica — H2H com dominância clara (mín. 5 confrontos)
+        if tem_h2h:
+            h2h_h_pct = h2h_h_wins / h2h_total
+            h2h_a_pct = h2h_a_wins / h2h_total
+            if h2h_h_pct >= 0.70:
+                if mercado == "HOME":
+                    adj += 10.0
+                    notas.append(f"Freguesia Histórica: mandante domina H2H ({h2h_h_wins}V/{h2h_total}j)")
+                elif mercado == "1X":
+                    adj += 6.0
+                    notas.append(f"H2H favorece mandante ({h2h_h_wins}/{h2h_total} vitórias)")
+                elif mercado in ("AWAY", "X2"):
+                    adj -= 10.0
+                    notas.append(f"H2H desfavorável ao visitante: mandante venceu {h2h_h_wins}/{h2h_total}")
+            elif h2h_a_pct >= 0.70:
+                if mercado == "AWAY":
+                    adj += 10.0
+                    notas.append(f"Freguesia Histórica: visitante domina H2H ({h2h_a_wins}V/{h2h_total}j)")
+                elif mercado == "X2":
+                    adj += 6.0
+                    notas.append(f"H2H favorece visitante ({h2h_a_wins}/{h2h_total} vitórias)")
+                elif mercado in ("HOME", "1X"):
+                    adj -= 10.0
+                    notas.append(f"H2H desfavorável ao mandante: visitante venceu {h2h_a_wins}/{h2h_total}")
+
+        # HC14: Ataque Inoperante — seca de gols mina Over/BTTS_YES
+        if tem_forma and mercado in ("OVER_25", "BTTS_YES"):
+            if h_sem_marcar >= 3:
+                adj -= 12.0
+                notas.append(f"Ataque inoperante: mandante sem marcar há {h_sem_marcar}j")
+            elif h_sem_marcar == 2:
+                adj -= 5.0
+                notas.append(f"Mandante sem marcar nos últimos {h_sem_marcar} jogos")
+            if a_sem_marcar >= 3:
+                adj -= 12.0
+                notas.append(f"Ataque inoperante: visitante sem marcar há {a_sem_marcar}j")
+            elif a_sem_marcar == 2:
+                adj -= 5.0
+                notas.append(f"Visitante sem marcar nos últimos {a_sem_marcar} jogos")
+
+        # HC15: Muralha em Casa — clean sheets em casa favorece Under/BTTS_NO
+        if tem_forma and mercado in ("UNDER_25", "BTTS_NO"):
+            if h_cs_streak_casa >= 3:
+                adj += 10.0
+                notas.append(f"Muralha em Casa: {h_cs_streak_casa} clean sheets seguidas do mandante")
+            elif h_cs_streak_casa == 2:
+                adj += 5.0
+                notas.append(f"Mandante com {h_cs_streak_casa} clean sheets em casa recentes")
+
+        # HC16: Forma Goleadora — ambos marcando bem favorece Over/BTTS_YES
+        if tem_forma and mercado in ("OVER_25", "BTTS_YES"):
+            if h_gf_last5 >= 4 and a_gf_last5 >= 4:
+                adj += 8.0
+                notas.append(f"Forma goleadora: H {h_gf_last5}gols, A {a_gf_last5}gols em {h_n_last5}j")
+            elif h_gf_last5 >= 3 and a_gf_last5 >= 3:
+                adj += 4.0
+                notas.append(f"Ambos marcando bem (H={h_gf_last5}, A={a_gf_last5} gols em {h_n_last5}j)")
+
+        # HC17: Empate Recorrente — histórico de empates recentes corrobora DRAW
+        if tem_forma and mercado == "DRAW":
+            if h_draws_last5 >= 2 and a_draws_last5 >= 2:
+                adj += 6.0
+                notas.append(f"Empate recorrente: H {h_draws_last5}E, A {a_draws_last5}E em {h_n_last5}j")
+            elif h_draws_last5 + a_draws_last5 >= 5:
+                adj += 4.0
+                notas.append(f"Times propensos ao empate (H={h_draws_last5}, A={a_draws_last5} em {h_n_last5}j)")
+
+        # HC_BTTS_DEF: Bloqueio de BTTS_NO por ataque visitante letal na forma recente
+        # Raiz dos falsos positivos: D-C histórico subestima visitantes em sequência ofensiva
+        if mercado == "BTTS_NO" and tem_forma:
+            if a_gf_last5 >= 4:
+                adj -= 15.0
+                notas.append(f"Ataque visitante LETAL: {a_gf_last5}g em {a_n_last5}j — BTTS_NO bloqueado")
+            elif a_gf_last5 >= 3:
+                adj -= 8.0
+                notas.append(f"Visitante em forma ofensiva ({a_gf_last5}g em {a_n_last5}j)")
+            if h_gf_last5 >= 3 and a_gf_last5 >= 3:
+                adj -= 10.0
+                notas.append(f"Ambos marcando bem (H={h_gf_last5}, A={a_gf_last5}g) — BTTS_NO fragilizado")
+
+        # HC18: Invencibilidade — sequência de 4+ jogos sem perder (V+E) favorece o time
+        if tem_forma:
+            h_unbeaten = h_wins_last5 + h_draws_last5
+            a_unbeaten = a_wins_last5 + a_draws_last5
+            if h_unbeaten >= 4 and h_n_last5 >= 4:
+                if mercado in ("HOME", "1X"):
+                    adj += 10.0
+                    notas.append(f"Invencibilidade do mandante: {h_unbeaten} sem perder em {h_n_last5}j")
+                elif mercado in ("AWAY", "X2"):
+                    adj -= 8.0
+                    notas.append(f"Mandante invicto há {h_unbeaten}j — enfraquece {mercado}")
+            if a_unbeaten >= 4 and a_n_last5 >= 4:
+                if mercado in ("AWAY", "X2"):
+                    adj += 10.0
+                    notas.append(f"Invencibilidade do visitante: {a_unbeaten} sem perder em {a_n_last5}j")
+                elif mercado in ("HOME", "1X"):
+                    adj -= 8.0
+                    notas.append(f"Visitante invicto há {a_unbeaten}j — enfraquece {mercado}")
+
+        # HC19: Defesa de Ferro — time sofreu ≤2 gols no somatório dos últimos 4 jogos
+        if tem_forma:
+            h_ga = int(ctx.get("h_ga_last5", 99))
+            a_ga = int(ctx.get("a_ga_last5", 99))
+            if h_ga <= 2 and h_n_last5 >= 4 and mercado in ("UNDER_25", "BTTS_NO"):
+                adj += 12.0
+                notas.append(f"Defesa de Ferro do mandante: só {h_ga}g sofridos em {h_n_last5}j")
+            if a_ga <= 2 and a_n_last5 >= 4 and mercado in ("UNDER_25", "BTTS_NO"):
+                adj += 12.0
+                notas.append(f"Defesa de Ferro do visitante: só {a_ga}g sofridos em {a_n_last5}j")
+
+        # HC20: Impulso Visitante — visitante ganhou 3+ dos últimos 5 jogos
+        if tem_forma:
+            if a_wins_last5 >= 3:
+                if mercado in ("AWAY", "X2"):
+                    adj += 8.0
+                    notas.append(f"Impulso Visitante: {a_wins_last5}V em {a_n_last5}j")
+                elif mercado in ("HOME", "1X"):
+                    adj -= 5.0
+                    notas.append(f"Visitante em alta ({a_wins_last5}V em {a_n_last5}j) — enfraquece {mercado}")
+
+        # HC21: Defesas Mútuas Vulneráveis — ambos sofrendo muitos gols
+        if tem_forma:
+            h_ga_v = int(ctx.get("h_ga_last5", 0))
+            a_ga_v = int(ctx.get("a_ga_last5", 0))
+            if h_ga_v >= 4 and a_ga_v >= 4:
+                if mercado in ("OVER_25", "BTTS_YES"):
+                    adj += 8.0
+                    notas.append(f"Defesas vazadas (H={h_ga_v}, A={a_ga_v}g sofridos) — Over/BTTS favoritizados")
+                elif mercado in ("UNDER_25", "BTTS_NO"):
+                    adj -= 10.0
+                    notas.append(f"Defesas muito abertas (H={h_ga_v}, A={a_ga_v}g sofridos) — Under/BTTS_NO bloqueado")
+
+        # HC22: Visitante em Seca Ofensiva — não marcou em 2+ jogos consecutivos
+        if tem_forma:
+            a_sem = int(ctx.get("a_sem_marcar", 0))
+            if a_sem >= 2:
+                if mercado in ("BTTS_NO", "UNDER_25"):
+                    adj += 8.0
+                    notas.append(f"Visitante em seca: {a_sem}j sem marcar — BTTS_NO/Under favorecidos")
+                elif mercado in ("BTTS_YES", "AWAY"):
+                    adj -= 8.0
+                    notas.append(f"Visitante sem marcar há {a_sem}j — fragiliza BTTS_YES/AWAY")
+
+    # ═══════════════════════════════════════════════════════════
+    # SCOUT LAYER — Heurísticas Avançadas (dados de /fixtures/statistics)
+    # Ativa apenas quando historico_ligas tem stats de scout disponíveis
+    # ═══════════════════════════════════════════════════════════
+    if ctx:
+        h_sog   = ctx.get("h_shots_on_avg")    # shots on goal / game
+        a_sog   = ctx.get("a_shots_on_avg")
+        h_shots = ctx.get("h_shots_total_avg")  # total shots / game
+        a_shots = ctx.get("a_shots_total_avg")
+        h_poss  = ctx.get("h_possession_avg")   # possession %
+        a_poss  = ctx.get("a_possession_avg")
+        h_corn  = ctx.get("h_corners_avg")
+        a_corn  = ctx.get("a_corners_avg")
+        h_yell  = ctx.get("h_yellows_avg")
+        a_yell  = ctx.get("a_yellows_avg")
+        h_spg   = ctx.get("h_shots_per_goal")   # shots needed per goal
+        a_spg   = ctx.get("a_shots_per_goal")
+
+        tem_scout = h_sog is not None and a_sog is not None
+
+        if tem_scout:
+            # HSC1: Eficiência Ofensiva Oculta
+            # D-C pode subestimar jogos onde ambos batem muito no alvo
+            if h_sog >= 5.0 and a_sog >= 5.0:
+                if mercado in ("OVER_25", "BTTS_YES"):
+                    adj += 10.0
+                    notas.append(f"Scout: alta produção no alvo (H={h_sog:.1f}, A={a_sog:.1f} sog/j) — Over/BTTS favorecido")
+                elif mercado in ("UNDER_25", "BTTS_NO"):
+                    adj -= 8.0
+                    notas.append(f"Scout: ambos criam muito (H={h_sog:.1f}, A={a_sog:.1f} sog/j) — Under/BTTS_NO fragilizado")
+
+            # HSC2: Mira Ruim — Ineficiência Ofensiva
+            if h_spg is not None and a_spg is not None:
+                if h_spg >= 15.0 and a_spg >= 15.0:
+                    if mercado in ("UNDER_25", "BTTS_NO"):
+                        adj += 8.0
+                        notas.append(f"Scout: ambos ineficientes ({h_spg:.0f}/{a_spg:.0f} chutes/gol) — Under/BTTS_NO seguro")
+                    elif mercado in ("OVER_25", "BTTS_YES"):
+                        adj -= 6.0
+                        notas.append(f"Scout: baixa conversão ofensiva ({h_spg:.0f}/{a_spg:.0f} ch/gol) — Over penalizado")
+                elif h_spg is not None and h_spg >= 15.0 and mercado in ("HOME",):
+                    adj -= 5.0
+                    notas.append(f"Scout: mandante ineficiente ({h_spg:.0f} ch/gol) — HOME penalizado")
+
+            # HSC3: Dominância Territorial — Posse Alta com D-C confirmando
+            if h_poss is not None and a_poss is not None:
+                if h_poss >= 58.0 and mercado in ("HOME", "1X"):
+                    adj += 12.0
+                    notas.append(f"Scout: dominância territorial do mandante ({h_poss:.0f}% posse) — HOME/1X reforçado")
+                elif a_poss >= 58.0 and mercado in ("AWAY", "X2"):
+                    adj += 12.0
+                    notas.append(f"Scout: dominância territorial do visitante ({a_poss:.0f}% posse) — AWAY/X2 reforçado")
+                elif h_poss >= 58.0 and mercado in ("AWAY", "X2"):
+                    adj -= 8.0
+                    notas.append(f"Scout: mandante domina posse ({h_poss:.0f}%) — AWAY/X2 fragilizado")
+                elif a_poss >= 58.0 and mercado in ("HOME", "1X"):
+                    adj -= 8.0
+                    notas.append(f"Scout: visitante domina posse ({a_poss:.0f}%) — HOME/1X fragilizado")
+
+            # HSC4: Pressão por Escanteios — Território de Gol
+            if h_corn is not None and a_corn is not None:
+                if h_corn >= 6.0 and a_corn >= 6.0 and mercado in ("OVER_25", "BTTS_YES"):
+                    adj += 6.0
+                    notas.append(f"Scout: alta pressão territorial (H={h_corn:.1f}, A={a_corn:.1f} escanteios/j)")
+                elif h_corn >= 7.0 and mercado in ("HOME", "1X"):
+                    adj += 6.0
+                    notas.append(f"Scout: mandante cria muita pressão ({h_corn:.1f} escanteios/j)")
+
+            # HSC5: Jogo Truncado — Cartões Travam o Ritmo
+            if h_yell is not None and a_yell is not None:
+                if h_yell >= 2.5 and a_yell >= 2.5:
+                    if mercado in ("UNDER_25", "DRAW"):
+                        adj += 5.0
+                        notas.append(f"Scout: jogo físico e truncado (H={h_yell:.1f}, A={a_yell:.1f} cartões/j) — ritmo reduzido")
+                    elif mercado in ("OVER_25",):
+                        adj -= 4.0
+                        notas.append(f"Scout: jogo truncado ({h_yell:.1f}+{a_yell:.1f} cartões) — fluidity reduzida")
+
+            # HSC6: Equilíbrio de Posse — Sinal de Empate Estatístico
+            if h_poss is not None and a_poss is not None:
+                if 45.0 <= h_poss <= 55.0 and 45.0 <= a_poss <= 55.0:
+                    if mercado in ("DRAW", "1X", "X2"):
+                        adj += 6.0
+                        notas.append(f"Scout: posse equilibrada (H={h_poss:.0f}%/A={a_poss:.0f}%) — Empate estatisticamente plausível")
+
+            # HSC7: Goleiro Ativo — Muitos Remates Sofridos
+            h_sav = ctx.get("h_saves_avg")
+            a_sav = ctx.get("a_saves_avg")
+            if h_sav is not None and a_sav is not None:
+                if h_sav >= 4.5 and a_sav >= 4.5:
+                    if mercado in ("OVER_25", "BTTS_YES"):
+                        adj += 6.0
+                        notas.append(f"Scout: goleiros muito ativos (H={h_sav:.1f}, A={a_sav:.1f} defesas/j) — jogo aberto")
+
+    if adj > 0:
+        nota_final = f"+{adj:.0f}pts — " + " · ".join(notas) if notas else f"+{adj:.0f}pts"
+    elif adj < 0:
+        nota_final = f"{adj:.0f}pts — " + " · ".join(notas) if notas else f"{adj:.0f}pts"
+    else:
+        nota_final = "Contexto OK"
+    return adj, nota_final
+
+
+def extrair_forma_times(
+    df_liga: "pd.DataFrame",
+    home_id: int,
+    away_id: int,
+    n_forma: int = 5,
+) -> dict:
+    """
+    Extrai métricas de forma recente e H2H do historico_ligas local (0 créditos extras).
+
+    df_liga : DataFrame ordenado por 'date' com colunas home_id, away_id, home_goals, away_goals.
+    Retorna dict com chaves h_* / a_* (por time) e h2h_* (confronto direto).
+    Todos os campos retornam 0 quando há dados insuficientes ou em caso de erro.
+    """
+    _vazio: dict = {
+        "h_wins_last5":     0, "h_losses_last5":   0, "h_draws_last5":    0,
+        "h_gf_last5":       0, "h_ga_last5":       0, "h_n_last5":        0,
+        "a_wins_last5":     0, "a_losses_last5":   0, "a_draws_last5":    0,
+        "a_gf_last5":       0, "a_ga_last5":       0, "a_n_last5":        0,
+        "h_win_streak":     0, "a_win_streak":     0,
+        "h_sem_marcar":     0, "a_sem_marcar":     0,
+        "h_cs_streak_casa": 0,
+        "h2h_h_wins":       0, "h2h_a_wins":       0,
+        "h2h_draws":        0, "h2h_total":        0,
+        "h_shots_on_avg": None, "h_shots_total_avg": None, "h_possession_avg": None,
+        "h_corners_avg": None, "h_yellows_avg": None, "h_saves_avg": None, "h_fouls_avg": None,
+        "h_shots_per_goal": None,
+        "a_shots_on_avg": None, "a_shots_total_avg": None, "a_possession_avg": None,
+        "a_corners_avg": None, "a_yellows_avg": None, "a_saves_avg": None, "a_fouls_avg": None,
+        "a_shots_per_goal": None,
+    }
+    try:
+        if df_liga is None or df_liga.empty:
+            return _vazio
+        needed = {"home_id", "away_id", "home_goals", "away_goals"}
+        if not needed.issubset(df_liga.columns):
+            return _vazio
+
+        df = df_liga.copy()
+        df["home_goals"] = pd.to_numeric(df["home_goals"], errors="coerce").fillna(0).astype(int)
+        df["away_goals"] = pd.to_numeric(df["away_goals"], errors="coerce").fillna(0).astype(int)
+        if "date" in df.columns:
+            df = df.sort_values("date").reset_index(drop=True)
+
+        def _jogos_time(tid: int) -> pd.DataFrame:
+            cols_base = ["date"] if "date" in df.columns else []
+            home = df[df["home_id"] == tid][cols_base + ["home_goals", "away_goals"]].copy()
+            home = home.rename(columns={"home_goals": "gf", "away_goals": "ga"})
+            away = df[df["away_id"] == tid][cols_base + ["away_goals", "home_goals"]].copy()
+            away = away.rename(columns={"away_goals": "gf", "home_goals": "ga"})
+            todos = pd.concat([home, away], ignore_index=True)
+            if "date" in todos.columns:
+                todos = todos.sort_values("date").reset_index(drop=True)
+            todos["res"] = todos.apply(
+                lambda r: "W" if r["gf"] > r["ga"] else ("L" if r["gf"] < r["ga"] else "D"),
+                axis=1,
+            )
+            return todos
+
+        def _ultimos(jg: pd.DataFrame, n: int) -> dict:
+            last = jg.tail(n)
+            if last.empty:
+                return {"W": 0, "L": 0, "D": 0, "gf": 0, "ga": 0, "n": 0}
+            vc = last["res"].value_counts()
+            return {
+                "W": int(vc.get("W", 0)), "L": int(vc.get("L", 0)), "D": int(vc.get("D", 0)),
+                "gf": int(last["gf"].sum()), "ga": int(last["ga"].sum()), "n": len(last),
+            }
+
+        def _streak_vit(jg: pd.DataFrame) -> int:
+            seq = list(jg["res"].tail(10))[::-1]
+            s = 0
+            for r in seq:
+                if r == "W": s += 1
+                else: break
+            return s
+
+        def _streak_sem_gol(jg: pd.DataFrame) -> int:
+            seq = list(jg["gf"].tail(10))[::-1]
+            s = 0
+            for g in seq:
+                if int(g) == 0: s += 1
+                else: break
+            return s
+
+        def _cs_casa(tid: int) -> int:
+            hg = df[df["home_id"] == tid]
+            if "date" in hg.columns:
+                hg = hg.sort_values("date")
+            seq = list(hg["away_goals"].fillna(0).astype(int).tail(10))[::-1]
+            s = 0
+            for g in seq:
+                if g == 0: s += 1
+                else: break
+            return s
+
+        # H2H: últimos 10 confrontos diretos (home ou away) entre os dois times
+        mask_h2h = (
+            ((df["home_id"] == home_id) & (df["away_id"] == away_id)) |
+            ((df["home_id"] == away_id) & (df["away_id"] == home_id))
+        )
+        h2h = df[mask_h2h].tail(10)
+        h2h_total = len(h2h)
+        h2h_h = h2h_a = 0
+        if h2h_total > 0:
+            h2h_h = int(
+                ((h2h["home_id"] == home_id) & (h2h["home_goals"] > h2h["away_goals"])).sum() +
+                ((h2h["away_id"] == home_id) & (h2h["away_goals"] > h2h["home_goals"])).sum()
+            )
+            h2h_a = int(
+                ((h2h["home_id"] == away_id) & (h2h["home_goals"] > h2h["away_goals"])).sum() +
+                ((h2h["away_id"] == away_id) & (h2h["away_goals"] > h2h["home_goals"])).sum()
+            )
+
+        dh = _jogos_time(home_id)
+        da = _jogos_time(away_id)
+        uh = _ultimos(dh, n_forma)
+        ua = _ultimos(da, n_forma)
+
+        def _scout_avg(tid: int, prefix: str, uh_ua: dict) -> dict:
+            """Retorna médias de scout dos últimos n_forma jogos do time (qualquer mando)."""
+            home_rows = df[df["home_id"] == tid].copy()
+            away_rows = df[df["away_id"] == tid].copy()
+
+            rename_h = {
+                "h_shots_on": "shots_on", "h_shots_total": "shots_total",
+                "h_possession": "possession", "h_corners": "corners",
+                "h_yellows": "yellows", "h_saves": "saves", "h_fouls": "fouls",
+            }
+            rename_a = {
+                "a_shots_on": "shots_on", "a_shots_total": "shots_total",
+                "a_possession": "possession", "a_corners": "corners",
+                "a_yellows": "yellows", "a_saves": "saves", "a_fouls": "fouls",
+            }
+
+            cols_scout = ["shots_on", "shots_total", "possession", "corners", "yellows", "saves", "fouls"]
+
+            h_scout = home_rows.rename(columns={k: v for k, v in rename_h.items() if k in home_rows.columns})
+            a_scout = away_rows.rename(columns={k: v for k, v in rename_a.items() if k in away_rows.columns})
+
+            frames = []
+            for fr in [h_scout, a_scout]:
+                avail = [c for c in cols_scout if c in fr.columns]
+                if avail:
+                    date_cols = ["date"] if "date" in fr.columns else []
+                    frames.append(fr[avail + date_cols])
+
+            if not frames:
+                result = {f"{prefix}_{c}_avg": None for c in cols_scout}
+                result[f"{prefix}_shots_per_goal"] = None
+                return result
+
+            combined = pd.concat(frames, ignore_index=True)
+            if "date" in combined.columns:
+                combined = combined.sort_values("date")
+            last = combined.tail(n_forma)
+
+            result = {}
+            for c in cols_scout:
+                if c in last.columns:
+                    vals = pd.to_numeric(last[c], errors="coerce").dropna()
+                    result[f"{prefix}_{c}_avg"] = float(vals.mean()) if len(vals) > 0 else None
+                else:
+                    result[f"{prefix}_{c}_avg"] = None
+
+            # Derived: shots per goal (efficiency — shots_total needed per goal scored)
+            shots_avg = result.get(f"{prefix}_shots_total_avg")
+            gf = uh_ua.get("gf", 0)
+            if shots_avg is not None and gf and gf > 0:
+                result[f"{prefix}_shots_per_goal"] = shots_avg * n_forma / gf
+            else:
+                result[f"{prefix}_shots_per_goal"] = None
+
+            return result
+
+        scout_h = _scout_avg(home_id, "h", uh)
+        scout_a = _scout_avg(away_id, "a", ua)
+
+        return {
+            "h_wins_last5":     uh["W"],    "h_losses_last5":   uh["L"],
+            "h_draws_last5":    uh["D"],    "h_gf_last5":       uh["gf"],
+            "h_ga_last5":       uh["ga"],   "h_n_last5":        uh["n"],
+            "a_wins_last5":     ua["W"],    "a_losses_last5":   ua["L"],
+            "a_draws_last5":    ua["D"],    "a_gf_last5":       ua["gf"],
+            "a_ga_last5":       ua["ga"],   "a_n_last5":        ua["n"],
+            "h_win_streak":     _streak_vit(dh),
+            "a_win_streak":     _streak_vit(da),
+            "h_sem_marcar":     _streak_sem_gol(dh),
+            "a_sem_marcar":     _streak_sem_gol(da),
+            "h_cs_streak_casa": _cs_casa(home_id),
+            "h2h_h_wins":       h2h_h,
+            "h2h_a_wins":       h2h_a,
+            "h2h_draws":        h2h_total - h2h_h - h2h_a,
+            "h2h_total":        h2h_total,
+            **scout_h,
+            **scout_a,
+        }
+    except Exception:
+        return _vazio
 
 
 def consultar_gemini(picks_aprovados: list[dict]) -> str:
@@ -343,7 +1023,7 @@ _risk_defaults = {
     "risk_prob_min":          45.0,
     "risk_teto_pct_pct":      10,
     "risk_limite_div":        20,
-    "risk_ligas_bloqueadas":  [],   # lista de league_ids excluídos do scanner
+    "risk_ligas_bloqueadas":  [],
 }
 for _rk, _rv in _risk_defaults.items():
     if _rk not in st.session_state:
@@ -366,94 +1046,16 @@ with st.sidebar:
 
     st.divider()
 
-    # ── BANCA — separação banca_inicial / depósitos / P/L ────────────
+    # ── BANCA — input direto do saldo atual para cálculo de stake ────────
     st.markdown("### 💰 Banca")
-
-    lucro_picks, total_dep, banca_atual, roi_pct = calcular_estado_banca(
-        banco.picks, banco.banca_inicial, banco.depositos
+    banca_atual = st.number_input(
+        "Saldo Atual (R$)",
+        value=float(st.session_state.get("_saldo_atual", banco.banca_inicial or 30.0)),
+        min_value=0.01,
+        step=0.50,
+        help="Informe o saldo atual da sua conta. Usado para calcular a stake pelo Kelly.",
     )
-
-    # Banca inicial: editável apenas se não há picks ainda (ou via reset explícito)
-    with st.expander("⚙️ Redefinir banca inicial", expanded=False):
-        st.caption("⚠️ Use somente ao começar uma nova banca do zero. Não afeta o histórico de picks.")
-        nova_banca = st.number_input(
-            "Nova banca inicial (R$)", value=float(banco.banca_inicial),
-            step=1.0, min_value=1.0, key="nova_banca_inicial"
-        )
-        if st.button("💾 Confirmar nova banca inicial", use_container_width=True):
-            banco.banca_inicial = nova_banca
-            dm.salvar_banco(banco)
-            st.success(f"Banca inicial redefinida para R$ {nova_banca:.2f}")
-            st.rerun()
-
-    with st.expander("🗑️ Reiniciar temporada (Hard Reset)", expanded=False):
-        st.error(
-            "**AÇÃO IRREVERSÍVEL.** Apaga todos os picks e depósitos registrados. "
-            "Use apenas para iniciar uma nova temporada do zero."
-        )
-        n_picks_hr = len(banco.picks)
-        n_dep_hr   = len(banco.depositos)
-        st.caption(f"Serão apagados: **{n_picks_hr} pick(s)** e **{n_dep_hr} depósito(s)**.")
-        nova_banca_hr = st.number_input(
-            "Nova banca inicial após reset (R$)",
-            value=float(banco.banca_inicial),
-            step=1.0, min_value=1.0,
-            key="hr_nova_banca",
-        )
-        confirmar_hr = st.checkbox(
-            f"Confirmo que quero APAGAR os {n_picks_hr} picks e {n_dep_hr} depósitos permanentemente",
-            key="hr_confirmar",
-        )
-        if st.button(
-            "🗑️ Executar Hard Reset",
-            type="primary",
-            use_container_width=True,
-            disabled=not confirmar_hr,
-        ):
-            banco.picks      = []
-            banco.depositos  = []
-            banco.banca_inicial = nova_banca_hr
-            dm.salvar_banco(banco)
-            st.session_state["banco"] = dm.carregar_banco(força_recarregar=True)
-            st.success(
-                f"✅ Hard Reset concluído. Banca inicial: R$ {nova_banca_hr:.2f}. "
-                "Picks e depósitos apagados."
-            )
-            st.rerun()
-
-    # Métricas da banca
-    c1, c2 = st.columns(2)
-    c1.metric("Capital inicial", f"R$ {banco.banca_inicial:.2f}")
-    c2.metric("Depósitos/Retiradas", f"R$ {total_dep:+.2f}")
-    st.metric(
-        "Banca atual",
-        f"R$ {banca_atual:.2f}",
-        delta=f"P/L apostas: R$ {lucro_picks:+.2f} | ROI: {roi_pct:+.1f}%"
-    )
-
-    # Registrar depósito ou retirada
-    with st.expander("➕ Depositar / ➖ Retirar dinheiro"):
-        st.caption("Registra entrada/saída de dinheiro sem alterar o ROI das apostas.")
-        tipo = st.radio("Tipo", ["Depósito", "Retirada"], horizontal=True)
-        valor_dep = st.number_input("Valor (R$)", min_value=0.01, step=1.0, value=10.0)
-        nota_dep  = st.text_input("Nota (opcional)", placeholder="Ex: recarga mensal")
-        if st.button("✅ Registrar", use_container_width=True, type="primary"):
-            valor_final = valor_dep if tipo == "Depósito" else -valor_dep
-            banco.depositos.append({
-                "data": dt.date.today().isoformat(),
-                "valor": valor_final,
-                "nota": nota_dep,
-                "registrado_em": dt.datetime.now().isoformat(),
-            })
-            dm.salvar_banco(banco)
-            st.success(f"{'Depósito' if valor_final > 0 else 'Retirada'} de R$ {abs(valor_final):.2f} registrado!")
-            st.rerun()
-
-    if banco.depositos:
-        with st.expander(f"📋 Histórico de depósitos ({len(banco.depositos)})"):
-            for d in reversed(banco.depositos[-10:]):
-                sinal = "➕" if d["valor"] > 0 else "➖"
-                st.caption(f"{sinal} R$ {abs(d['valor']):.2f} em {d['data']} — {d.get('nota', '—')}")
+    st.session_state["_saldo_atual"] = banca_atual
 
     st.divider()
 
@@ -505,15 +1107,11 @@ with st.sidebar:
 
 st.title("QG Barrios PRO V3")
 
-n_calibradas       = len(banco.params_ligas)
-n_picks_pendentes  = sum(1 for p in banco.picks if p.get("status") == "Pendente")
-n_picks_total      = len(banco.picks)
+n_calibradas = len(banco.params_ligas)
 
-col_h1, col_h2, col_h3, col_h4 = st.columns(4)
+col_h1, col_h2 = st.columns(2)
 col_h1.metric("Ligas calibradas", f"{n_calibradas}/{len(LIGAS_SUPORTADAS)}")
-col_h2.metric("Picks salvos", n_picks_total)
-col_h3.metric("Picks pendentes", n_picks_pendentes)
-col_h4.metric("Banca atual", f"R$ {banca_atual:.2f}")
+col_h2.metric("Banca atual", f"R$ {banca_atual:.2f}")
 
 st.divider()
 
@@ -522,11 +1120,9 @@ st.divider()
 # 6. ABAS PRINCIPAIS
 # =========================================================================
 
-tab_analise, tab_calibracao, tab_tracker, tab_auditoria = st.tabs([
+tab_analise, tab_calibracao = st.tabs([
     "🎯 Análise Diária",
     "⚙️ Calibração de Ligas",
-    "📋 Tracker (Diário de Bordo)",
-    "🔬 Auditoria do Motor",
 ])
 
 
@@ -548,29 +1144,75 @@ with tab_calibracao:
     # Tabela de status
     rows_status = []
     for league_id, nome in LIGAS_SUPORTADAS.items():
-        params_d = banco.params_ligas.get(str(league_id), {})
+        params_d   = banco.params_ligas.get(str(league_id), {})
         _tem_times = bool(params_d.get("times")) and params_d.get("n_jogos_calibracao", 0) > 0
+        n_times    = len(params_d.get("times", {})) if _tem_times else 0
+        n_jogos    = params_d.get("n_jogos_calibracao", 0)
+
+        # Calcula data do último jogo a partir do raio-x por time
+        raio_x          = params_d.get("raio_x_times", {})
+        ultimo_jogo_str = "—"
+        dias_sem_jogo   = None
+        if raio_x:
+            _datas = [
+                str(rx.get("ultimo_jogo", ""))[:10]
+                for rx in raio_x.values()
+                if rx.get("ultimo_jogo") and str(rx.get("ultimo_jogo"))[:4].isdigit()
+            ]
+            if _datas:
+                try:
+                    ultimo_jogo_str = max(_datas)
+                    dias_sem_jogo   = (dt.date.today() - dt.date.fromisoformat(ultimo_jogo_str)).days
+                except Exception:
+                    pass
+
+        # Status da safra: leva em conta tanto a idade da calibração quanto a data do último jogo
         if not params_d or not _tem_times:
-            status, n_times, n_jogos = "❌ Nunca calibrada", 0, 0
+            status = "❌ Nunca calibrada"
         else:
             try:
                 data_cal = dt.datetime.fromisoformat(params_d.get("calibrado_em", ""))
-                dias = (dt.datetime.now() - data_cal).days
-                status = f"🟡 Velha ({dias}d)" if dias >= INTERVALO_RECALIBRACAO_DIAS else f"🟢 Fresca ({dias}d)"
+                dias_cal = (dt.datetime.now() - data_cal).days
+                if dias_sem_jogo is not None:
+                    if dias_sem_jogo > 90:
+                        status = f"❄️ Finalizada ({dias_sem_jogo}d sem jogo)"
+                    elif dias_sem_jogo > 45:
+                        status = f"⏸️ Congelada ({dias_sem_jogo}d sem jogo)"
+                    elif dias_cal >= INTERVALO_RECALIBRACAO_DIAS:
+                        status = f"🟡 Velha ({dias_cal}d)"
+                    else:
+                        status = f"🟢 Fresca ({dias_cal}d)"
+                else:
+                    status = (
+                        f"🟡 Velha ({dias_cal}d)"
+                        if dias_cal >= INTERVALO_RECALIBRACAO_DIAS
+                        else f"🟢 Fresca ({dias_cal}d)"
+                    )
             except Exception:
                 status = "❌ Nunca calibrada"
-            n_times = len(params_d.get("times", {}))
-            n_jogos = params_d.get("n_jogos_calibracao", 0)
+
+        # Qualidade do calibrador baseada no volume de jogos usados no MLE
+        n_jogos_temp = sum(
+            1 for rx in raio_x.values() if rx.get("na_temporada_atual")
+        ) if raio_x else 0
         if n_jogos >= 80:
             qualidade = "✅ Boa"
         elif n_jogos >= 40:
             qualidade = "🟡 Mínima"
-        elif n_jogos > 0:
+        elif n_jogos >= 20:
             qualidade = "🔴 Marginal"
         else:
             qualidade = "❌ —"
-        rows_status.append({"Liga": f"{nome} (ID {league_id})", "Status": status,
-                             "Times": n_times, "Jogos": n_jogos, "Qualidade": qualidade})
+
+        rows_status.append({
+            "Liga":        f"{nome} (ID {league_id})",
+            "Status":      status,
+            "Último Jogo": ultimo_jogo_str,
+            "Times":       n_times,
+            "Jogos MLE":   n_jogos,
+            "Temp. atual": n_jogos_temp if n_jogos_temp > 0 else "—",
+            "Qualidade":   qualidade,
+        })
 
     st.dataframe(rows_status, use_container_width=True, hide_index=True)
 
@@ -747,11 +1389,17 @@ with tab_calibracao:
             if _nn > 0:
                 com_novos.append(_lid)
             elif _tem_cal:
+                # Liga calibrada + 0 novos → renova timestamp (grátis, sem MLE)
                 inativas.append(_lid)
             else:
-                # "Nunca calibrada" + 0 API games → tenta Full Fetch
-                # (dados.py fará bootstrap season + season-1; falha graciosamente se vazio)
-                com_novos.append(_lid)
+                # Nunca calibrada + 0 novos: verifica se a API tem ALGUM dado histórico.
+                # Se n_api == 0 o torneio ainda não iniciou (Copa del Rey em fase inicial,
+                # eliminatória fora de janela, etc.) — não desperdiça créditos tentando MLE.
+                _api_total = sum(s.get("n_api", 0) for s in _li.get("seasons", []))
+                if _api_total > 0:
+                    com_novos.append(_lid)   # tem dados históricos → bootstrap
+                else:
+                    aguardando.append(_lid)  # torneio não iniciou → skip silencioso
 
         # Fallback: snapshot perdido (session reiniciada entre Passo 1 e 2) → recalibra tudo
         if not snapshot.get("ligas"):
@@ -804,7 +1452,9 @@ with tab_calibracao:
         if _n_ok_cal > 0:
             _partes_rel.append(f"{_n_ok_cal} liga(s) recalibrada(s) com sucesso")
         if aguardando:
-            _partes_rel.append(f"{len(aguardando)} liga(s) aguardando início do torneio")
+            _partes_rel.append(
+                f"{len(aguardando)} liga(s) aguardando início (sem dados na API — créditos preservados)"
+            )
 
         if timeouts:
             st.warning(
@@ -1058,7 +1708,14 @@ with tab_analise:
                     try:
                         with st.spinner(f"Calibrando {l_nome} (ID {l_id})..."):
                             dm.calibrar_liga_avulsa(l_id, season)
-                        st.success(f"{l_nome} calibrada! Recarregando...")
+                        if dm.ultimo_save_jsonbin_ok:
+                            st.success(f"{l_nome} calibrada e salva na nuvem! Recarregando...")
+                        else:
+                            st.warning(
+                                f"⚠️ {l_nome} calibrada mas **falhou ao salvar no JSONBin**. "
+                                "Os params estão no arquivo local — serão perdidos no próximo restart. "
+                                "Verifique a quota do JSONBin ou tente novamente."
+                            )
                         st.session_state["banco"] = dm.carregar_banco(força_recarregar=True)
                         st.rerun()
                     except TimeoutError as e:
@@ -1110,6 +1767,21 @@ with tab_analise:
     jogos_com_odds = [j for j in calibrados if str(j["fixture"]["id"]) in odds_cache]
     previsoes      = cache_dia.get("previsoes", {})
 
+    # Pré-compila DataFrames de historico por liga — 0 créditos, uma vez por liga
+    _forma_dfs: dict[int, pd.DataFrame] = {}
+    for _j_tmp in jogos_com_odds:
+        _lid_tmp = _j_tmp["league"]["id"]
+        if _lid_tmp not in _forma_dfs:
+            _reg = banco.historico_ligas.get(str(_lid_tmp), {}).get("registros", [])
+            if _reg:
+                _df_tmp = pd.DataFrame(_reg)
+                if "date" in _df_tmp.columns:
+                    _df_tmp["date"] = pd.to_datetime(_df_tmp["date"], errors="coerce")
+                    _df_tmp = _df_tmp.sort_values("date").reset_index(drop=True)
+                _forma_dfs[_lid_tmp] = _df_tmp
+            else:
+                _forma_dfs[_lid_tmp] = pd.DataFrame()
+
     for j in jogos_com_odds:
         f_id   = str(j["fixture"]["id"])
         l_id   = j["league"]["id"]
@@ -1121,6 +1793,24 @@ with tab_analise:
             previsoes[f_id] = {k: prev.get(k) for k in
                                ("lambda", "mu", "xg_total", "mercados", "flags",
                                 "cobertura_ok", "erro")}
+        # dc_ctx sempre recalculado dos params atuais (nunca fica stale por recalibração)
+        h_data = params.times.get(h_id, {})
+        a_data = params.times.get(a_id, {})
+        dc_ctx: dict = {
+            "alpha_h":         h_data.get("alpha",  1.0),
+            "beta_h":          h_data.get("beta",   1.0),
+            "alpha_a":         a_data.get("alpha",  1.0),
+            "beta_a":          a_data.get("beta",   1.0),
+            "n_jogos_h":       h_data.get("n_jogos", 0),
+            "n_jogos_a":       a_data.get("n_jogos", 0),
+            "rho":             params.rho,
+            "media_liga_gols": params.media_liga_gols,
+        }
+        # Forma recente + H2H: extraídos do cache local — 0 créditos extras
+        dc_ctx.update(
+            extrair_forma_times(_forma_dfs.get(l_id, pd.DataFrame()), h_id, a_id)
+        )
+        previsoes[f_id]["dc_ctx"] = dc_ctx
     banco.datas[data_str]["previsoes"] = previsoes
     dm.salvar_banco(banco)
 
@@ -1155,7 +1845,6 @@ with tab_analise:
             cobertura_ok = prev.get("cobertura_ok", False)
             jogo_nome    = f"{j['teams']['home']['name']} v {j['teams']['away']['name']}"
             liga_nome_j  = j["league"]["name"]
-            # Penalidade adicional se a liga tem poucos dados de calibração
             _n_jogos_liga = banco.params_ligas.get(str(l_id_j), {}).get("n_jogos_calibracao", 0)
             _cal_marginal = _n_jogos_liga < 40
 
@@ -1187,10 +1876,17 @@ with tab_analise:
                     odd           = odd_val,
                     cobertura_ok  = cobertura_ok,
                 )
-                # Penalidade extra se liga tem dados insuficientes para calibração confiável
-                if _cal_marginal:
-                    score *= 0.80
-                    score  = round(score, 1)
+
+                # Camada heurística contextual — λ/μ + parâmetros D-C internos
+                heur_adj, heur_nota = avaliar_heuristicas(
+                    mercado,
+                    xg_lam   = float(prev.get("lambda") or 1.3),
+                    xg_mu    = float(prev.get("mu")     or 1.0),
+                    xg_total = xg_total_prev,
+                    ctx      = prev.get("dc_ctx"),
+                )
+                score = round(max(0.0, score + heur_adj), 1)
+
                 if score < SCORE_MINIMO_RANKING:
                     continue
 
@@ -1209,6 +1905,8 @@ with tab_analise:
                     "score":        score,
                     "cobertura_ok": cobertura_ok,
                     "cal_marginal": _cal_marginal,
+                    "heur_adj":     heur_adj,
+                    "heur_nota":    heur_nota,
                 })
 
         # 2. Deduplicação por jogo: mantém apenas o mercado de maior score por fixture
@@ -1234,53 +1932,57 @@ with tab_analise:
             )
 
             for i, p in enumerate(ranking, 1):
+                score    = p.get("score", 0)
+                if score >= 70:
+                    cor, badge = "#28a745", "🟢 Alta"
+                elif score >= 50:
+                    cor, badge = "#17a2b8", "🔵 Média"
+                else:
+                    cor, badge = "#ffc107", "🟡 Marginal"
+                barras  = int(score / 10)
+                bar_str = "█" * barras + "░" * (10 - barras)
+                cob_icon = "✅" if p.get("cobertura_ok") else "⚠️ dados parciais"
+                cal_icon = " · 🔴 cal. marginal (<40j)" if p.get("cal_marginal") else ""
                 try:
-                    score     = p["score"]
-                    # Cor por nível de score
-                    if score >= 70:
-                        cor, badge = "#28a745", "🟢 Alta"
-                    elif score >= 50:
-                        cor, badge = "#17a2b8", "🔵 Média"
-                    else:
-                        cor, badge = "#ffc107", "🟡 Marginal"
-
-                    # Barra de score visual (█ preenchidos proporcionalmente)
-                    barras  = int(score / 10)
-                    bar_str = "█" * barras + "░" * (10 - barras)
-
-                    cob_icon = "✅" if p.get("cobertura_ok") else "⚠️ dados parciais"
-                    cal_icon = " · 🔴 cal. marginal (<40j)" if p.get("cal_marginal") else ""
-
                     st.markdown(
-                        f"""<div style='border-left:4px solid {cor};padding:10px 14px;
-                                      margin-bottom:10px;background:#0e1117;border-radius:4px;'>
-                          <div style='display:flex;justify-content:space-between;
-                                      font-size:11px;color:#888;'>
-                            <span>#{i} · {p.get('liga','—')} · {cob_icon}{cal_icon}</span>
-                            <span style='color:{cor};font-weight:bold;'>{badge} &nbsp;
-                              <span style='font-family:monospace;letter-spacing:1px;'>{bar_str}</span>
-                              &nbsp;{score:.0f}/100
-                            </span>
-                          </div>
-                          <div style='font-size:17px;font-weight:bold;color:white;margin:5px 0 3px;'>
-                            {p.get('jogo','—')}
-                          </div>
-                          <div style='font-size:13px;color:#ccc;'>
-                            <b>{p.get('mercado','—')}</b> &nbsp;·&nbsp;
-                            Odd <b>{p.get('odd',0):.2f}</b> &nbsp;·&nbsp;
-                            Modelo <b>{p.get('prob_modelo',0):.1f}%</b> vs Mercado {p.get('prob_mercado',0):.1f}%
-                            &nbsp;·&nbsp; Δ <b>{p.get('divergencia',0):+.1f}pp</b>
-                          </div>
-                          <div style='font-size:12px;color:#aaa;margin-top:2px;'>
-                            EV <span style='color:{cor};font-weight:bold;'>{p.get('ev',0):+.1f}%</span>
-                            &nbsp;·&nbsp; Kelly {p.get('kelly',0)*100:.1f}%
-                            &nbsp;·&nbsp; 💵 Stake: <b>R$ {p.get('stake',0):.2f}</b>
-                          </div>
-                        </div>""",
+                        f"<div style='border-left:4px solid {cor};padding:10px 14px;"
+                        f"margin-bottom:4px;background:#0e1117;border-radius:4px;'>"
+                        f"<div style='display:flex;justify-content:space-between;"
+                        f"font-size:11px;color:#888;'>"
+                        f"<span>#{i} · {p.get('liga', '—')} · {cob_icon}{cal_icon}</span>"
+                        f"<span style='color:{cor};font-weight:bold;'>{badge} &nbsp;"
+                        f"<span style='font-family:monospace;letter-spacing:1px;'>{bar_str}</span>"
+                        f"&nbsp;{score:.0f}/100</span>"
+                        f"</div>"
+                        f"<div style='font-size:17px;font-weight:bold;color:white;margin:5px 0 3px;'>"
+                        f"{p.get('jogo', '—')}"
+                        f"</div>"
+                        f"<div style='font-size:13px;color:#ccc;'>"
+                        f"<b>{p.get('mercado', '—')}</b> &nbsp;·&nbsp; "
+                        f"Odd <b>{p.get('odd', 0):.2f}</b> &nbsp;·&nbsp; "
+                        f"Modelo <b>{p.get('prob_modelo', 0):.1f}%</b>"
+                        f" vs Mercado {p.get('prob_mercado', 0):.1f}% &nbsp;·&nbsp; "
+                        f"Δ <b>{p.get('divergencia', 0):+.1f}pp</b>"
+                        f"</div>"
+                        f"<div style='font-size:12px;color:#aaa;margin-top:2px;'>"
+                        f"EV <span style='color:{cor};font-weight:bold;'>{p.get('ev', 0):+.1f}%</span> &nbsp;·&nbsp; "
+                        f"Kelly {p.get('kelly', 0)*100:.1f}% &nbsp;·&nbsp; "
+                        f"💵 Stake: <b>R$ {p.get('stake', 0):.2f}</b>"
+                        f"</div>"
+                        f"</div>",
                         unsafe_allow_html=True,
                     )
                 except Exception:
-                    continue
+                    st.caption(f"#{i} {p.get('jogo','?')} · {p.get('mercado','?')} · Score {score:.0f}")
+                # Nota heurística — sempre renderiza, fora do try para não ser silenciada
+                _hadj  = p.get("heur_adj",  0.0)
+                _hnota = p.get("heur_nota", "Contexto OK")
+                if _hadj > 0:
+                    st.success(f"⬆️ {_hnota}")
+                elif _hadj < 0:
+                    st.warning(f"⬇️ {_hnota}")
+                else:
+                    st.info(f"🔬 Contexto OK — sem regras de forma disparadas")
 
             # ── Consultora Gemini ────────────────────────────────────────
             st.markdown("#### 🤖 Consultora IA (Gemini)")
@@ -1328,126 +2030,6 @@ with tab_analise:
                         )
                     st.markdown("---")
                     st.markdown(_gemini_texto)
-
-            # ── Painel de Execução em Lote ───────────────────────────────────────
-            st.markdown("---")
-            st.markdown("#### 📥 Painel de Execução")
-            st.caption(
-                f"{len(ranking)} entrada(s) do ranking. "
-                "Score ≥ 90 pré-selecionado. Defina a stake, revise e confirme em um clique."
-            )
-
-            # Proteção de banca: < R$ 50 → stake padrão inicial travada em R$ 1,00
-            _banca_baixa  = banca_atual < 50.0
-            _stake_init   = 1.0 if _banca_baixa else 1.0   # ambos 1.0 — usuário ajusta
-
-            _col_sp1, _col_sp2 = st.columns([2, 6])
-            with _col_sp1:
-                _stake_padrao = st.number_input(
-                    "💰 Stake Padrão (R$)",
-                    value=_stake_init,
-                    min_value=0.5,
-                    step=0.5,
-                    key="painel_stake_padrao",
-                )
-            with _col_sp2:
-                if _banca_baixa:
-                    st.warning(
-                        f"⚠️ Banca baixa (R$ {banca_atual:.2f}) — "
-                        "stake padrão sugerida em R$ 1,00 para proteção."
-                    )
-                else:
-                    st.caption(
-                        "Altere a Stake Padrão para aplicar o mesmo valor em todas as linhas. "
-                        "Cada célula de stake pode ser editada individualmente na tabela."
-                    )
-
-            # Ao mudar a stake padrão, reseta o estado do data_editor para que todas
-            # as linhas reinicializem com o novo valor (checkboxes também voltam ao padrão).
-            if st.session_state.get("_painel_stake_prev") != _stake_padrao:
-                st.session_state.pop("_painel_editor", None)
-                st.session_state["_painel_stake_prev"] = _stake_padrao
-
-            _df_painel = pd.DataFrame([
-                {
-                    "✅":         p.get("score", 0) >= 90,
-                    "Jogo":       p.get("jogo", "—"),
-                    "Mercado":    p.get("mercado", "—"),
-                    "Odd":        round(float(p.get("odd", 0)), 2),
-                    "Score":      int(p.get("score", 0)),
-                    "Stake (R$)": float(_stake_padrao),
-                }
-                for p in ranking
-            ])
-
-            _edited_painel = st.data_editor(
-                _df_painel,
-                column_config={
-                    "✅":         st.column_config.CheckboxColumn(
-                        "✅", width="small",
-                        help="Marque para incluir no registro em lote"
-                    ),
-                    "Jogo":       st.column_config.TextColumn("Jogo", disabled=True, width="large"),
-                    "Mercado":    st.column_config.TextColumn("Mercado", disabled=True, width="small"),
-                    "Odd":        st.column_config.NumberColumn("Odd", disabled=True, format="%.2f", width="small"),
-                    "Score":      st.column_config.NumberColumn("Score", disabled=True, width="small"),
-                    "Stake (R$)": st.column_config.NumberColumn(
-                        "Stake (R$)", min_value=0.5, step=0.5, format="R$ %.2f", width="medium"
-                    ),
-                },
-                hide_index=True,
-                use_container_width=True,
-                key="_painel_editor",
-            )
-
-            _sel_mask  = _edited_painel["✅"].fillna(False).astype(bool)
-            _n_sel     = int(_sel_mask.sum())
-            _tot_stake = float(_edited_painel.loc[_sel_mask, "Stake (R$)"].sum())
-
-            _col_info, _col_btn = st.columns([3, 2])
-            with _col_info:
-                st.caption(
-                    f"**{_n_sel}** selecionada(s)  ·  "
-                    f"Stake total: **R$ {_tot_stake:.2f}**  ·  "
-                    f"Banca atual: R$ {banca_atual:.2f}"
-                )
-            with _col_btn:
-                if st.button(
-                    f"📥 Confirmar e Registrar {_n_sel} Pick(s)" if _n_sel > 0
-                    else "📥 Nenhuma pick selecionada",
-                    type="primary",
-                    use_container_width=True,
-                    disabled=_n_sel == 0,
-                    key="_btn_registrar_lote",
-                ):
-                    _picks_novos = []
-                    for _idx in _edited_painel[_sel_mask].index:
-                        _p   = ranking[_idx]
-                        _stk = float(_edited_painel.at[_idx, "Stake (R$)"])
-                        _picks_novos.append({
-                            "data":           data_str,
-                            "jogo":           _p.get("jogo", "—"),
-                            "liga_id":        _p.get("liga", ""),
-                            "fixture_id":     str(_p.get("fixture_id", "")),
-                            "mercado":        _p.get("mercado", "—"),
-                            "odd":            float(_p.get("odd", 0)),
-                            "prob_modelo":    round(float(_p.get("prob_modelo", 0)), 2),
-                            "prob_mercado":   round(float(_p.get("prob_mercado", 0)), 2),
-                            "divergencia_pp": round(float(_p.get("divergencia", 0)), 2),
-                            "ev":             round(float(_p.get("ev", 0)), 2),
-                            "kelly_frac":     round(float(_p.get("kelly", 0)), 4),
-                            "stake":          _stk,
-                            "status":         "Pendente",
-                            "salvo_em":       dt.datetime.now().isoformat(),
-                        })
-                    banco.picks.extend(_picks_novos)
-                    dm.salvar_banco(banco)
-                    st.session_state["banco"] = banco
-                    st.session_state.pop("_painel_editor", None)
-                    st.success(f"✅ {len(_picks_novos)} pick(s) registrada(s) com sucesso!")
-                    st.rerun()
-
-            st.divider()
 
         elif jogos_com_odds:
             st.info(
@@ -1538,7 +2120,24 @@ with tab_analise:
                     unsafe_allow_html=True,
                 )
 
-                sub = st.tabs(["🔢 Gols", "🤝 BTTS", "🎯 Placar Exato", "💾 Salvar Pick"])
+                # Forma recente — caption contextual (0 créditos, usa cache local)
+                _ctx_j = prev.get("dc_ctx", {})
+                _hn5   = _ctx_j.get("h_n_last5", 0)
+                _an5   = _ctx_j.get("a_n_last5", 0)
+                if _hn5 >= 3 and _an5 >= 3:
+                    _hv = _ctx_j.get("h_wins_last5", 0)
+                    _av = _ctx_j.get("a_wins_last5", 0)
+                    _hgf = _ctx_j.get("h_gf_last5", 0)
+                    _hga = _ctx_j.get("h_ga_last5", 0)
+                    _agf = _ctx_j.get("a_gf_last5", 0)
+                    _aga = _ctx_j.get("a_ga_last5", 0)
+                    st.caption(
+                        f"📊 Forma ({_hn5}j): "
+                        f"Casa {_hv}V · {_hgf} GF · {_hga} GS  |  "
+                        f"Fora {_av}V · {_agf} GF · {_aga} GS"
+                    )
+
+                sub = st.tabs(["🔢 Gols", "🤝 BTTS", "🎯 Placar Exato"])
 
                 with sub[0]:
                     cols_o = st.columns(5)
@@ -1569,56 +2168,6 @@ with tab_analise:
                     for i, (k, v) in enumerate(pe):
                         cols[i % 4].metric(k.replace("PE_", ""), f"{v:.1f}%")
 
-                with sub[3]:
-                    todos_mk = [
-                        "OVER_15", "OVER_25", "OVER_35",
-                        "UNDER_15", "UNDER_25", "UNDER_35",
-                        "BTTS_YES", "BTTS_NO",
-                    ]
-                    mk_sel    = st.selectbox("Mercado", todos_mk, key=f"sel_{f_id}")
-                    odd_atual = odds_j.get(mk_sel, 0)
-                    prob_mod  = prev["mercados"][mk_sel]
-                    comp      = comparar_com_mercado(prob_mod, odd_atual, MARGEM_BOOKMAKER_DEFAULT, limite_div)
-                    stake_sug = calcular_stake_final(comp.get("kelly_fracao", 0), banca_atual, piso_kelly, teto_pct)
-
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("Odd", f"{odd_atual:.2f}")
-                    c2.metric("EV", f"{comp.get('ev_pct', 0):+.1f}%")
-                    c3.metric("Stake sugerida", f"R$ {stake_sug:.2f}" if stake_sug > 0 else "DESCARTAR")
-
-                    stake_input = st.number_input("Stake final (R$)", value=stake_sug,
-                                                  step=0.5, min_value=0.0, key=f"stk_{f_id}")
-                    bloqueado   = odd_atual < odd_min_save or comp.get("anomalia", True) or stake_input <= 0
-
-                    if bloqueado:
-                        motivos = []
-                        if odd_atual < odd_min_save:         motivos.append(f"odd {odd_atual:.2f} < {odd_min_save}")
-                        if comp.get("anomalia"):             motivos.append(f"anomalia (Δ {comp.get('divergencia_pp', 0):+.1f}pp)")
-                        if stake_input <= 0:                 motivos.append("stake zero")
-                        st.warning("⚠️ Save bloqueado: " + " | ".join(motivos))
-
-                    if st.button("💾 Salvar pick", disabled=bloqueado,
-                                 key=f"save_{f_id}", type="primary"):
-                        banco.picks.append({
-                            "data":         data_str,
-                            "jogo":         f"{j['teams']['home']['name']} v {j['teams']['away']['name']}",
-                            "liga_id":      j["league"]["id"],
-                            "fixture_id":   f_id,
-                            "mercado":      mk_sel,
-                            "odd":          odd_atual,
-                            "prob_modelo":  round(prob_mod, 2),
-                            "prob_mercado": round(comp.get("prob_mercado_pct", 0), 2),
-                            "divergencia_pp": round(comp.get("divergencia_pp", 0), 2),
-                            "ev":           round(comp.get("ev_pct", 0), 2),
-                            "kelly_frac":   round(comp.get("kelly_fracao", 0), 4),
-                            "stake":        stake_input,
-                            "status":       "Pendente",
-                            "salvo_em":     dt.datetime.now().isoformat(),
-                        })
-                        dm.salvar_banco(banco)
-                        st.success("Pick salva! ✅")
-                        st.rerun()
-
             except Exception as _e:
                 st.warning(f"⚠️ Erro ao renderizar jogo {f_id}: {_e}")
                 continue
@@ -1628,24 +2177,6 @@ with tab_analise:
     # ABA RESULTADO — Match Odds 1X2 / Dupla Chance (H1-HOME-Only, V6+)
     # =========================================================================
     with aba_resultado:
-
-        # ── Banca isolada para 1X2/DC ───────────────────────────────────────
-        # Filtra picks pelo nome do mercado — goals: OVER_*/UNDER_*/BTTS_*
-        # Match Odds: HOME/DRAW/AWAY/1X/X2/12 — nunca se sobrepõem.
-        picks_mo = [p for p in banco.picks if p.get("mercado") in _1X2_MERCADOS]
-        lucro_mo, _, _, roi_mo = calcular_estado_banca(picks_mo, banco.banca_inicial, [])
-        n_mo_green  = sum(1 for p in picks_mo if p.get("status") == "Green")
-        n_mo_red    = sum(1 for p in picks_mo if p.get("status") == "Red")
-        n_mo_pend   = sum(1 for p in picks_mo if p.get("status") == "Pendente")
-        n_mo_resol  = n_mo_green + n_mo_red
-        hr_mo       = (n_mo_green / n_mo_resol * 100) if n_mo_resol else 0.0
-
-        cs_mo = st.columns(5)
-        cs_mo[0].metric("Picks 1X2/DC", len(picks_mo))
-        cs_mo[1].metric("Green", n_mo_green)
-        cs_mo[2].metric("Red", n_mo_red)
-        cs_mo[3].metric("Hit Rate", f"{hr_mo:.1f}%")
-        cs_mo[4].metric("ROI 1X2/DC", f"{roi_mo:+.1f}%")
 
         if not jogos_com_odds:
             st.info("Carregue agenda e odds para ver sinais de resultado.")
@@ -1724,6 +2255,14 @@ with tab_analise:
                     if stake_mo <= 0:
                         continue
 
+                    heur_adj_mo, heur_nota_mo = avaliar_heuristicas(
+                        mercado,
+                        xg_lam   = float(prev.get("lambda") or 1.3),
+                        xg_mu    = float(prev.get("mu")     or 1.0),
+                        xg_total = float(prev.get("xg_total") or 2.3),
+                        ctx      = prev.get("dc_ctx"),
+                    )
+
                     candidatos_mo.append({
                         "fixture_id":   f_id,
                         "jogo":         jogo_nome,
@@ -1738,6 +2277,8 @@ with tab_analise:
                         "stake":        stake_mo,
                         "cobertura_ok": cobertura_ok,
                         "overround":    round(overround, 4),
+                        "heur_adj":     heur_adj_mo,
+                        "heur_nota":    heur_nota_mo,
                     })
 
             # Deduplicação: um mercado por jogo (maior EV dentro da faixa aprovada)
@@ -1770,127 +2311,42 @@ with tab_analise:
                         str(next((j["league"]["id"] for j in jogos_com_odds
                                   if str(j["fixture"]["id"]) == p["fixture_id"]), 0)), {}
                     ).get("calibradores", {}).get("1X2_HOME") else ""
+                    cob_ico = "✅" if p.get("cobertura_ok") else "⚠️"
 
                     st.markdown(
-                        f"""<div style='border-left:4px solid {cor};padding:10px 14px;
-                                      margin-bottom:8px;background:#0e1117;border-radius:4px;'>
-                          <div style='display:flex;justify-content:space-between;
-                                      font-size:11px;color:#888;'>
-                            <span>#{i} · {p.get('liga','—')} · {'✅' if p.get('cobertura_ok') else '⚠️'}{cal_badge}</span>
-                            <span style='color:{cor};font-weight:bold;'>
-                              {mkt} &nbsp;·&nbsp; OR: {p.get('overround',1.0):.3f}
-                            </span>
-                          </div>
-                          <div style='font-size:17px;font-weight:bold;color:white;margin:5px 0 3px;'>
-                            {p.get('jogo','—')}
-                          </div>
-                          <div style='font-size:13px;color:#ccc;'>
-                            Odd <b>{p.get('odd',0):.2f}</b> &nbsp;·&nbsp;
-                            Modelo <b>{p.get('prob_modelo',0):.1f}%</b>
-                            vs Mercado {p.get('prob_mercado',0):.1f}%
-                            &nbsp;·&nbsp; Delta <b>{p.get('divergencia',0):+.1f}pp</b>
-                          </div>
-                          <div style='font-size:12px;color:#aaa;margin-top:2px;'>
-                            EV <span style='color:{cor};font-weight:bold;'>{p.get('ev',0):+.1f}%</span>
-                            &nbsp;·&nbsp; Kelly {p.get('kelly',0)*100:.1f}%
-                            &nbsp;·&nbsp; Stake: <b>R$ {p.get('stake',0):.2f}</b>
-                          </div>
-                        </div>""",
+                        f"<div style='border-left:4px solid {cor};padding:10px 14px;"
+                        f"margin-bottom:4px;background:#0e1117;border-radius:4px;'>"
+                        f"<div style='display:flex;justify-content:space-between;"
+                        f"font-size:11px;color:#888;'>"
+                        f"<span>#{i} · {p.get('liga', '—')} · {cob_ico}{cal_badge}</span>"
+                        f"<span style='color:{cor};font-weight:bold;'>"
+                        f"{mkt} &nbsp;·&nbsp; OR: {p.get('overround', 1.0):.3f}</span>"
+                        f"</div>"
+                        f"<div style='font-size:17px;font-weight:bold;color:white;margin:5px 0 3px;'>"
+                        f"{p.get('jogo', '—')}"
+                        f"</div>"
+                        f"<div style='font-size:13px;color:#ccc;'>"
+                        f"Odd <b>{p.get('odd', 0):.2f}</b> &nbsp;·&nbsp; "
+                        f"Modelo <b>{p.get('prob_modelo', 0):.1f}%</b>"
+                        f" vs Mercado {p.get('prob_mercado', 0):.1f}% &nbsp;·&nbsp; "
+                        f"Delta <b>{p.get('divergencia', 0):+.1f}pp</b>"
+                        f"</div>"
+                        f"<div style='font-size:12px;color:#aaa;margin-top:2px;'>"
+                        f"EV <span style='color:{cor};font-weight:bold;'>{p.get('ev', 0):+.1f}%</span> &nbsp;·&nbsp; "
+                        f"Kelly {p.get('kelly', 0)*100:.1f}% &nbsp;·&nbsp; "
+                        f"Stake: <b>R$ {p.get('stake', 0):.2f}</b>"
+                        f"</div>"
+                        f"</div>",
                         unsafe_allow_html=True,
                     )
-
-                # ── Painel de Execução 1X2 ──────────────────────────────────
-                st.markdown("---")
-                st.markdown("#### 📥 Painel de Execução — 1X2/DC")
-
-                _banca_baixa_mo  = banca_atual < 50.0
-                _col_sp_mo1, _col_sp_mo2 = st.columns([2, 6])
-                with _col_sp_mo1:
-                    _stake_padrao_mo = st.number_input(
-                        "Stake (R$)", value=1.0, min_value=0.5, step=0.5,
-                        key="painel_stake_mo",
-                    )
-                with _col_sp_mo2:
-                    if _banca_baixa_mo:
-                        st.warning(f"⚠️ Banca baixa (R$ {banca_atual:.2f}) — stake sugerida R$ 1,00.")
-
-                if st.session_state.get("_painel_stake_mo_prev") != _stake_padrao_mo:
-                    st.session_state.pop("_painel_editor_mo", None)
-                    st.session_state["_painel_stake_mo_prev"] = _stake_padrao_mo
-
-                _df_painel_mo = pd.DataFrame([
-                    {
-                        "✅":         False,
-                        "Jogo":       p.get("jogo", "—"),
-                        "Mercado":    p.get("mercado", "—"),
-                        "Odd":        round(float(p.get("odd", 0)), 2),
-                        "EV%":        round(float(p.get("ev", 0)), 1),
-                        "Stake (R$)": float(_stake_padrao_mo),
-                    }
-                    for p in ranking_mo
-                ])
-
-                _edited_mo = st.data_editor(
-                    _df_painel_mo,
-                    column_config={
-                        "✅":         st.column_config.CheckboxColumn("✅", width="small"),
-                        "Jogo":       st.column_config.TextColumn("Jogo", disabled=True, width="large"),
-                        "Mercado":    st.column_config.TextColumn("Mercado", disabled=True, width="small"),
-                        "Odd":        st.column_config.NumberColumn("Odd", disabled=True, format="%.2f"),
-                        "EV%":        st.column_config.NumberColumn("EV%", disabled=True, format="+%.1f%%"),
-                        "Stake (R$)": st.column_config.NumberColumn(
-                            "Stake (R$)", min_value=0.5, step=0.5, format="R$ %.2f"
-                        ),
-                    },
-                    hide_index=True,
-                    use_container_width=True,
-                    key="_painel_editor_mo",
-                )
-
-                _sel_mo   = _edited_mo["✅"].fillna(False).astype(bool)
-                _n_sel_mo = int(_sel_mo.sum())
-                _tot_mo   = float(_edited_mo.loc[_sel_mo, "Stake (R$)"].sum())
-
-                _col_info_mo, _col_btn_mo = st.columns([3, 2])
-                with _col_info_mo:
-                    st.caption(
-                        f"**{_n_sel_mo}** selecionada(s) · Stake total: **R$ {_tot_mo:.2f}**"
-                    )
-                with _col_btn_mo:
-                    if st.button(
-                        f"📥 Registrar {_n_sel_mo} Pick(s) 1X2" if _n_sel_mo > 0
-                        else "📥 Nenhuma selecionada",
-                        type="primary",
-                        use_container_width=True,
-                        disabled=_n_sel_mo == 0,
-                        key="_btn_registrar_mo",
-                    ):
-                        _picks_novos_mo = []
-                        for _idx in _edited_mo[_sel_mo].index:
-                            _p   = ranking_mo[_idx]
-                            _stk = float(_edited_mo.at[_idx, "Stake (R$)"])
-                            _picks_novos_mo.append({
-                                "data":           data_str,
-                                "jogo":           _p.get("jogo", "—"),
-                                "liga_id":        _p.get("liga", ""),
-                                "fixture_id":     str(_p.get("fixture_id", "")),
-                                "mercado":        _p.get("mercado", "—"),
-                                "odd":            float(_p.get("odd", 0)),
-                                "prob_modelo":    round(float(_p.get("prob_modelo", 0)), 2),
-                                "prob_mercado":   round(float(_p.get("prob_mercado", 0)), 2),
-                                "divergencia_pp": round(float(_p.get("divergencia", 0)), 2),
-                                "ev":             round(float(_p.get("ev", 0)), 2),
-                                "kelly_frac":     round(float(_p.get("kelly", 0)), 4),
-                                "stake":          _stk,
-                                "status":         "Pendente",
-                                "salvo_em":       dt.datetime.now().isoformat(),
-                            })
-                        banco.picks.extend(_picks_novos_mo)
-                        dm.salvar_banco(banco)
-                        st.session_state["banco"] = banco
-                        st.session_state.pop("_painel_editor_mo", None)
-                        st.success(f"✅ {len(_picks_novos_mo)} pick(s) 1X2/DC registrada(s)!")
-                        st.rerun()
+                    _hadj_mo  = p.get("heur_adj",  0.0)
+                    _hnota_mo = p.get("heur_nota", "Contexto OK")
+                    if _hadj_mo > 0:
+                        st.success(f"⬆️ {_hnota_mo}")
+                    elif _hadj_mo < 0:
+                        st.warning(f"⬇️ {_hnota_mo}")
+                    else:
+                        st.info(f"🔬 Contexto OK — sem regras de forma disparadas")
 
             elif jogos_com_odds:
                 st.info(
@@ -1898,396 +2354,4 @@ with tab_analise:
                     "Verifique se há odds de 1X2 disponíveis para os jogos carregados."
                 )
 
-
-# =========================================================================
-# 6.3 ABA TRACKER
-# =========================================================================
-
-with tab_tracker:
-    st.markdown("### 📋 Diário de Bordo")
-
-    if not banco.picks:
-        st.info("Nenhuma pick salva ainda.")
-    else:
-        n_green    = sum(1 for p in banco.picks if p.get("status") == "Green")
-        n_red      = sum(1 for p in banco.picks if p.get("status") == "Red")
-        n_pend     = sum(1 for p in banco.picks if p.get("status") == "Pendente")
-        n_resolv   = n_green + n_red
-        taxa       = (n_green / n_resolv * 100) if n_resolv else 0
-
-        cs = st.columns(6)
-        cs[0].metric("Total", len(banco.picks))
-        cs[1].metric("✅ Green", n_green)
-        cs[2].metric("❌ Red", n_red)
-        cs[3].metric("⏳ Pendente", n_pend)
-        cs[4].metric("Taxa acerto", f"{taxa:.1f}%")
-        cs[5].metric("ROI apostas", f"{roi_pct:+.1f}%")
-
-        st.caption(f"Banca inicial: R$ {banco.banca_inicial:.2f} | "
-                   f"P/L apostas: R$ {lucro_picks:+.2f} | "
-                   f"Depósitos/Retiradas: R$ {total_dep:+.2f} | "
-                   f"Banca atual: R$ {banca_atual:.2f}")
-
-        st.divider()
-
-        for i, p in enumerate(reversed(banco.picks)):
-            real_idx = len(banco.picks) - 1 - i
-            status   = p.get("status", "Pendente")
-            icone    = {"Pendente": "⏳", "Green": "✅", "Red": "❌",
-                        "Devolvida": "➖", "Anulada": "➖"}.get(status, "❓")
-
-            with st.expander(
-                f"{icone} {p.get('data','?')} | {p.get('jogo','?')} | "
-                f"{p.get('mercado','?')} | Odd {p.get('odd','-')}"
-            ):
-                c1, c2, c3, c4 = st.columns(4)
-                c1.write(f"**Stake:** R$ {p.get('stake', 0):.2f}")
-                c2.write(f"**Odd:** {p.get('odd', '-')}")
-                c3.write(f"**Prob modelo:** {p.get('prob_modelo', '-')}%")
-                c4.write(f"**EV:** {p.get('ev', '-')}%")
-                if "divergencia_pp" in p:
-                    st.caption(f"Δ vs mercado: {p['divergencia_pp']:+.1f}pp | "
-                               f"Kelly: {p.get('kelly_frac', 0)*100:.1f}%")
-
-                if status == "Pendente":
-                    ca, cb, cc = st.columns(3)
-                    if ca.button("✅ Green",    key=f"green_{real_idx}", type="primary"):
-                        banco.picks[real_idx]["status"] = "Green"
-                        dm.salvar_banco(banco); st.rerun()
-                    if cb.button("❌ Red",      key=f"red_{real_idx}"):
-                        banco.picks[real_idx]["status"] = "Red"
-                        dm.salvar_banco(banco); st.rerun()
-                    if cc.button("➖ Devolvida", key=f"void_{real_idx}"):
-                        banco.picks[real_idx]["status"] = "Devolvida"
-                        dm.salvar_banco(banco); st.rerun()
-                else:
-                    if st.button("↩️ Desfazer", key=f"undo_{real_idx}"):
-                        banco.picks[real_idx]["status"] = "Pendente"
-                        dm.salvar_banco(banco); st.rerun()
-
-
-# =========================================================================
-# 6.4 ABA AUDITORIA
-# =========================================================================
-
-with tab_auditoria:
-    st.markdown("### 🔬 Auditoria do Motor")
-
-    if not banco.params_ligas:
-        st.info("Nenhuma liga calibrada ainda.")
-    else:
-        liga_aud = st.selectbox(
-            "Liga", options=list(banco.params_ligas.keys()),
-            format_func=lambda x: f"{LIGAS_SUPORTADAS.get(int(x), f'Liga {x}')} (ID {x})",
-        )
-        params_d = banco.params_ligas[liga_aud]
-        params   = ParametrosLiga.from_dict(params_d)
-
-        # Helper para resolver nome do time
-        def nome_time(tid: int) -> str:
-            t = int(tid)
-            # JSON serializa chaves como strings; tenta str primeiro, depois int
-            return params.nomes_times.get(str(t), params.nomes_times.get(t, f"ID {t}"))
-
-        # Métricas do motor
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("γ (vantagem casa)",   f"{params.home_advantage:.3f}")
-        c2.metric("ρ (Dixon-Coles tau)", f"{params.rho:.3f}")
-        c3.metric("Média gols/jogo",     f"{params.media_liga_gols:.2f}")
-        c4.metric("Jogos usados",        params.n_jogos_calibracao)
-
-        seasons_str = " + ".join(str(s) for s in params.seasons_incluidas) if params.seasons_incluidas else str(params.season)
-        tipo_season = "ano-calendário" if int(liga_aud) in LIGAS_TEMPORADA_ANO_ATUAL else "europeia"
-        xg_label = f"xG ✅ blend={PESO_XG_PRODUCAO}" if params.xg_ativo else "xG ❌ gols reais"
-        cal_n = len(params.calibradores)
-        cal_label = (
-            f"📐 {cal_n}/{len(MERCADOS_PRODUCAO)} mkt calibrados"
-            if cal_n > 0 else "📐 sem calibradores"
-        )
-        st.caption(
-            f"Calibrada em: {params.calibrado_em[:16]} | "
-            f"Temporadas: **{seasons_str}** ({tipo_season}) | "
-            f"Log-likelihood: {params.log_likelihood:.2f} | "
-            f"{len(params.nomes_times)} nomes resolvidos | {xg_label} | {cal_label}"
-        )
-
-        # ── Raio-X da base bruta ─────────────────────────────────────────
-        if params.raio_x_times:
-            season_atual_str  = params.seasons_incluidas[-1] if params.seasons_incluidas else params.season
-            season_hist_str   = params.seasons_incluidas[0]  if len(params.seasons_incluidas) > 1 else "—"
-            tem_multi = len(params.seasons_incluidas) > 1
-
-            n_no_modelo    = sum(1 for v in params.raio_x_times.values() if v.get("no_modelo"))
-            n_filtrados    = sum(1 for v in params.raio_x_times.values() if not v.get("no_modelo"))
-            n_rebaixados   = sum(1 for v in params.raio_x_times.values()
-                                 if not v.get("na_temporada_atual") and tem_multi)
-
-            with st.expander(
-                f"🔬 Raio-X da Base Bruta — {len(params.raio_x_times)} times detectados · "
-                f"{n_no_modelo} no modelo · {n_filtrados} filtrados"
-                + (f" · {n_rebaixados} rebaixados/ausentes de {season_atual_str}" if n_rebaixados else ""),
-                expanded=False,
-            ):
-                st.caption(
-                    "**Verde** = no modelo | **Amarelo** = passou no MLE mas removido por ser só do histórico "
-                    "| **Vermelho** = excluído (poucos jogos ou não está na temporada atual)"
-                )
-
-                linhas_raio_x = []
-                for tid, rx in sorted(
-                    params.raio_x_times.items(),
-                    key=lambda x: (not x[1].get("no_modelo"), -x[1].get("n_total", 0)),
-                ):
-                    nome = params.nomes_times.get(int(tid), f"ID {tid}")
-                    no_mod   = rx.get("no_modelo", False)
-                    na_atual = rx.get("na_temporada_atual", True)
-
-                    if no_mod:
-                        status = "✅ No modelo"
-                    elif na_atual:
-                        status = "🟡 Poucos jogos (filtrado)"
-                    else:
-                        status = f"🔴 Rebaixado / não está em {season_atual_str}"
-
-                    linha = {
-                        "Time":                         nome,
-                        f"Jogos {season_atual_str}":    rx.get("n_atual", 0),
-                        "Jogos histórico":              rx.get("n_historico", 0) if tem_multi else "—",
-                        "Total":                        rx.get("n_total", 0),
-                        "Último jogo":                  rx.get("ultimo_jogo", "?"),
-                        "Status":                       status,
-                    }
-                    if not tem_multi:
-                        del linha["Jogos histórico"]
-                    linhas_raio_x.append(linha)
-
-                st.dataframe(linhas_raio_x, use_container_width=True, hide_index=True)
-
-                # Alerta sobre times rebaixados encontrados
-                rebaixados_lista = [
-                    params.nomes_times.get(int(tid), f"ID {tid}")
-                    for tid, rx in params.raio_x_times.items()
-                    if not rx.get("na_temporada_atual") and tem_multi
-                ]
-                if rebaixados_lista:
-                    st.warning(
-                        f"⚠️ **{len(rebaixados_lista)} time(s) do histórico {season_hist_str} "
-                        f"excluídos do modelo** (não aparecem em {season_atual_str}):\n" +
-                        ", ".join(rebaixados_lista[:15]) +
-                        ("..." if len(rebaixados_lista) > 15 else "")
-                    )
-                else:
-                    st.success(f"✅ Todos os times do modelo aparecem em {season_atual_str}.")
-        else:
-            st.info("💡 Raio-X disponível após recalibrar. Clique em 'Calibrar' para gerar.")
-
-        # ── Calibradores Isotônicos ──────────────────────────────────────────
-        if cal_n > 0:
-            with st.expander(
-                f"📐 Calibradores por mercado ({cal_n}/{len(MERCADOS_PRODUCAO)} ativos)",
-                expanded=False,
-            ):
-                st.caption(
-                    "Efeito da calibração isotônica: prob bruta → prob calibrada. "
-                    "Valores abaixo de 50% podem subir ou descer dependendo do viés histórico."
-                )
-                _rows_cal_aud = []
-                for _mkt_a in sorted(MERCADOS_PRODUCAO):
-                    if _mkt_a in params.calibradores:
-                        _cal_obj = params.calibradores[_mkt_a]
-                        _rows_cal_aud.append({
-                            "Mercado":          _mkt_a,
-                            "Amostras":         _cal_obj.n_amostras,
-                            "40% -> cal":       f"{_cal_obj.calibrar(40.0):.1f}%",
-                            "50% -> cal":       f"{_cal_obj.calibrar(50.0):.1f}%",
-                            "60% -> cal":       f"{_cal_obj.calibrar(60.0):.1f}%",
-                            "70% -> cal":       f"{_cal_obj.calibrar(70.0):.1f}%",
-                        })
-                    else:
-                        _rows_cal_aud.append({
-                            "Mercado":          _mkt_a,
-                            "Amostras":         "—",
-                            "40% -> cal":       "—",
-                            "50% -> cal":       "—",
-                            "60% -> cal":       "—",
-                            "70% -> cal":       "—",
-                        })
-                st.dataframe(_rows_cal_aud, use_container_width=True, hide_index=True)
-        else:
-            st.info(
-                "💡 **Calibradores não treinados** para esta liga. "
-                "Vá em **Calibração → 📐 Calibradores Isotônicos** e clique em 'Treinar Calibradores'."
-            )
-
-        # Ranking de ataques
-        times_ord = sorted(params.times.items(), key=lambda x: -x[1]["alpha"])
-
-        st.markdown("#### 🔴 Top 5 ataques (α maior = melhor ofensivo)")
-        st.dataframe(
-            [{"Time": nome_time(int(k)), "Ataque (α)": round(v["alpha"], 3),
-              "Defesa (β)": round(v["beta"], 3), "Jogos": v["n_jogos"]}
-             for k, v in times_ord[:5]],
-            use_container_width=True, hide_index=True,
-        )
-
-        st.markdown("#### 📉 Bottom 5 ataques (piores ofensivos)")
-        st.dataframe(
-            [{"Time": nome_time(int(k)), "Ataque (α)": round(v["alpha"], 3),
-              "Defesa (β)": round(v["beta"], 3), "Jogos": v["n_jogos"]}
-             for k, v in times_ord[-5:]],
-            use_container_width=True, hide_index=True,
-        )
-
-        st.markdown("#### 🛡️ Top 5 defesas (β MENOR = melhor defensivo)")
-        times_def = sorted(params.times.items(), key=lambda x: x[1]["beta"])
-        st.dataframe(
-            [{"Time": nome_time(int(k)), "Ataque (α)": round(v["alpha"], 3),
-              "Defesa (β)": round(v["beta"], 3), "Jogos": v["n_jogos"]}
-             for k, v in times_def[:5]],
-            use_container_width=True, hide_index=True,
-        )
-
-        st.markdown("#### 📋 Todos os times calibrados")
-        with st.expander(f"Ver todos os {len(params.times)} times"):
-            todos = [
-                {"Time": nome_time(int(k)), "ID": int(k),
-                 "Ataque (α)": round(v["alpha"], 3),
-                 "Defesa (β)": round(v["beta"], 3),
-                 "Jogos": v["n_jogos"]}
-                for k, v in sorted(params.times.items(), key=lambda x: -x[1]["alpha"])
-            ]
-            st.dataframe(todos, use_container_width=True, hide_index=True)
-
-    st.divider()
-
-    # =========================================================================
-    # DIAGNÓSTICO COMPLETO
-    # =========================================================================
-    st.markdown("#### 🩺 Diagnóstico do Sistema")
-    if st.button("🔍 Rodar diagnóstico completo", type="primary"):
-        import json as _json
-        from pathlib import Path as _Path
-
-        linhas = []
-
-        # ── Seção 1: Arquivo local ─────────────────────────────────────────
-        linhas.append("═" * 55)
-        linhas.append("SEÇÃO 1 — SAÚDE DO ARQUIVO LOCAL")
-        linhas.append("═" * 55)
-        arq = _Path("banco_barrios_pro.json")
-        if arq.exists():
-            size_kb = arq.stat().st_size / 1024
-            try:
-                with open(arq, "r", encoding="utf-8") as f:
-                    _json.load(f)
-                linhas.append(f"✅ {arq.name} existe e é JSON válido ({size_kb:.1f} KB)")
-            except Exception as e:
-                linhas.append(f"❌ {arq.name} existe mas está CORROMPIDO: {e}")
-        else:
-            linhas.append(f"⚠️  {arq.name} não encontrado — sistema rodando só em memória")
-
-        try:
-            saldo_api = dm.saldo_creditos()
-            linhas.append(f"✅ Conexão API-Sports OK — saldo: {saldo_api}/7500 créditos")
-        except Exception as e:
-            linhas.append(f"❌ Conexão API-Sports FALHOU: {e}")
-
-        # ── Seção 2: Completude das ligas calibradas ───────────────────────
-        linhas.append("")
-        linhas.append("═" * 55)
-        linhas.append("SEÇÃO 2 — COMPLETUDE DAS LIGAS")
-        linhas.append("═" * 55)
-        linhas.append(f"Calibradas: {len(banco.params_ligas)} / {len(LIGAS_SUPORTADAS)} suportadas")
-        linhas.append("")
-
-        hoje_dt = dt.datetime.now()
-        for chave, pd_raw in banco.params_ligas.items():
-            nome_l = LIGAS_SUPORTADAS.get(int(chave), f"Liga {chave}")
-            n_times_l = len(pd_raw.get("times", {}))
-            n_jogos_l = pd_raw.get("n_jogos_calibracao", 0)
-            cal_em_s  = pd_raw.get("calibrado_em", "")[:16]
-            seasons_l = pd_raw.get("seasons_incluidas", [pd_raw.get("season", "?")])
-            tem_nomes = len(pd_raw.get("nomes_times", {}))
-
-            try:
-                dias_l = (hoje_dt - dt.datetime.fromisoformat(pd_raw.get("calibrado_em",""))).days
-                fresh  = "✅" if dias_l <= 7 else ("🟡" if dias_l <= 14 else "🔴")
-            except Exception:
-                dias_l = -1
-                fresh  = "⚠️"
-
-            seasons_info = "+".join(str(s) for s in seasons_l)
-            nomes_info   = f"{tem_nomes} nomes" if tem_nomes else "sem nomes (recalibrar)"
-            linhas.append(
-                f"  {fresh} {nome_l}: {n_times_l} times | {n_jogos_l} jogos | "
-                f"seasons={seasons_info} | {cal_em_s} ({dias_l}d) | {nomes_info}"
-            )
-
-        # ── Seção 3: Integridade dos IDs ───────────────────────────────────
-        linhas.append("")
-        linhas.append("═" * 55)
-        linhas.append("SEÇÃO 3 — INTEGRIDADE DOS IDs DE TIMES")
-        linhas.append("═" * 55)
-
-        total_prob = 0
-        for chave, pd_raw in banco.params_ligas.items():
-            nome_l = LIGAS_SUPORTADAS.get(int(chave), f"Liga {chave}")
-            times_raw = pd_raw.get("times", {})
-            problemas = []
-
-            ids_vistos: set = set()
-            for tid_str, tv in times_raw.items():
-                # ID não-inteiro
-                try:
-                    tid_int = int(tid_str)
-                except (ValueError, TypeError):
-                    problemas.append(f"ID não-inteiro: '{tid_str}'")
-                    continue
-
-                # Duplicata
-                if tid_int in ids_vistos:
-                    problemas.append(f"ID duplicado: {tid_int}")
-                ids_vistos.add(tid_int)
-
-                # α/β fora dos bounds razoáveis
-                alpha = tv.get("alpha")
-                beta  = tv.get("beta")
-                if alpha is None or beta is None:
-                    problemas.append(f"α ou β ausente no time {tid_int}")
-                elif not (0.05 < float(alpha) < 5.0) or not (0.05 < float(beta) < 5.0):
-                    problemas.append(
-                        f"α/β fora dos bounds: time {tid_int} "
-                        f"(α={alpha:.3f}, β={beta:.3f})"
-                    )
-
-            if problemas:
-                total_prob += len(problemas)
-                linhas.append(f"  ❌ {nome_l}: {len(problemas)} problema(s)")
-                for p in problemas[:5]:
-                    linhas.append(f"     • {p}")
-            else:
-                linhas.append(f"  ✅ {nome_l}: {len(times_raw)} times OK")
-
-        if total_prob == 0:
-            linhas.append("")
-            linhas.append("✅ Nenhum ID corrompido ou duplicado encontrado.")
-        else:
-            linhas.append(f"\n❌ Total de problemas encontrados: {total_prob}")
-
-        # ── Resumo de picks ────────────────────────────────────────────────
-        linhas.append("")
-        linhas.append("═" * 55)
-        linhas.append("SEÇÃO 4 — PICKS E BANCA")
-        linhas.append("═" * 55)
-        n_sem_odd  = sum(1 for p in banco.picks if not p.get("odd"))
-        n_sem_stat = sum(1 for p in banco.picks if not p.get("status"))
-        linhas.append(f"Total de picks: {len(banco.picks)}")
-        linhas.append(f"Pendentes: {sum(1 for p in banco.picks if p.get('status')=='Pendente')}")
-        linhas.append(f"Picks sem odd registrada: {n_sem_odd}")
-        linhas.append(f"Picks sem status: {n_sem_stat}")
-        linhas.append(f"Banca inicial: R$ {banco.banca_inicial:.2f}")
-        linhas.append(f"Depósitos registrados: {len(banco.depositos)}")
-        linhas.append(f"P/L apostas: R$ {lucro_picks:+.2f} | ROI: {roi_pct:+.1f}%")
-        linhas.append(f"Banca atual: R$ {banca_atual:.2f}")
-
-        st.code("\n".join(linhas), language=None)
+# (tab_auditoria removed — motor diagnostics live in Calibração tab)
