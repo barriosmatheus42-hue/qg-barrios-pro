@@ -582,12 +582,45 @@ def avaliar_heuristicas(
                 adj += 12.0
                 notas.append(f"Defesa de Ferro do visitante: só {a_ga}g sofridos em {a_n_last5}j")
 
+        # HC20: Impulso Visitante — visitante ganhou 3+ dos últimos 5 jogos
+        if tem_forma:
+            if a_wins_last5 >= 3:
+                if mercado in ("AWAY", "X2"):
+                    adj += 8.0
+                    notas.append(f"Impulso Visitante: {a_wins_last5}V em {a_n_last5}j")
+                elif mercado in ("HOME", "1X"):
+                    adj -= 5.0
+                    notas.append(f"Visitante em alta ({a_wins_last5}V em {a_n_last5}j) — enfraquece {mercado}")
+
+        # HC21: Defesas Mútuas Vulneráveis — ambos sofrendo muitos gols
+        if tem_forma:
+            h_ga_v = int(ctx.get("h_ga_last5", 0))
+            a_ga_v = int(ctx.get("a_ga_last5", 0))
+            if h_ga_v >= 4 and a_ga_v >= 4:
+                if mercado in ("OVER_25", "BTTS_YES"):
+                    adj += 8.0
+                    notas.append(f"Defesas vazadas (H={h_ga_v}, A={a_ga_v}g sofridos) — Over/BTTS favoritizados")
+                elif mercado in ("UNDER_25", "BTTS_NO"):
+                    adj -= 10.0
+                    notas.append(f"Defesas muito abertas (H={h_ga_v}, A={a_ga_v}g sofridos) — Under/BTTS_NO bloqueado")
+
+        # HC22: Visitante em Seca Ofensiva — não marcou em 2+ jogos consecutivos
+        if tem_forma:
+            a_sem = int(ctx.get("a_sem_marcar", 0))
+            if a_sem >= 2:
+                if mercado in ("BTTS_NO", "UNDER_25"):
+                    adj += 8.0
+                    notas.append(f"Visitante em seca: {a_sem}j sem marcar — BTTS_NO/Under favorecidos")
+                elif mercado in ("BTTS_YES", "AWAY"):
+                    adj -= 8.0
+                    notas.append(f"Visitante sem marcar há {a_sem}j — fragiliza BTTS_YES/AWAY")
+
     if adj > 0:
-        nota_final = f"⬆️ +{adj:.0f}pts: " + " · ".join(notas) if notas else f"⬆️ +{adj:.0f}pts"
+        nota_final = f"+{adj:.0f}pts — " + " · ".join(notas) if notas else f"+{adj:.0f}pts"
     elif adj < 0:
-        nota_final = f"⬇️ {adj:.0f}pts: " + " · ".join(notas) if notas else f"⬇️ {adj:.0f}pts"
+        nota_final = f"{adj:.0f}pts — " + " · ".join(notas) if notas else f"{adj:.0f}pts"
     else:
-        nota_final = "✅ Contexto OK"
+        nota_final = "Contexto OK"
     return adj, nota_final
 
 
@@ -1738,23 +1771,18 @@ with tab_analise:
             )
 
             for i, p in enumerate(ranking, 1):
+                score    = p.get("score", 0)
+                if score >= 70:
+                    cor, badge = "#28a745", "🟢 Alta"
+                elif score >= 50:
+                    cor, badge = "#17a2b8", "🔵 Média"
+                else:
+                    cor, badge = "#ffc107", "🟡 Marginal"
+                barras  = int(score / 10)
+                bar_str = "█" * barras + "░" * (10 - barras)
+                cob_icon = "✅" if p.get("cobertura_ok") else "⚠️ dados parciais"
+                cal_icon = " · 🔴 cal. marginal (<40j)" if p.get("cal_marginal") else ""
                 try:
-                    score     = p["score"]
-                    # Cor por nível de score
-                    if score >= 70:
-                        cor, badge = "#28a745", "🟢 Alta"
-                    elif score >= 50:
-                        cor, badge = "#17a2b8", "🔵 Média"
-                    else:
-                        cor, badge = "#ffc107", "🟡 Marginal"
-
-                    # Barra de score visual (█ preenchidos proporcionalmente)
-                    barras  = int(score / 10)
-                    bar_str = "█" * barras + "░" * (10 - barras)
-
-                    cob_icon  = "✅" if p.get("cobertura_ok") else "⚠️ dados parciais"
-                    cal_icon  = " · 🔴 cal. marginal (<40j)" if p.get("cal_marginal") else ""
-
                     st.markdown(
                         f"<div style='border-left:4px solid {cor};padding:10px 14px;"
                         f"margin-bottom:4px;background:#0e1117;border-radius:4px;'>"
@@ -1783,16 +1811,17 @@ with tab_analise:
                         f"</div>",
                         unsafe_allow_html=True,
                     )
-                    _hadj  = p.get("heur_adj",  0.0)
-                    _hnota = p.get("heur_nota", "✅ Contexto OK")
-                    if _hadj > 0:
-                        st.success(f"⬆️ {_hnota}")
-                    elif _hadj < 0:
-                        st.warning(f"⬇️ {_hnota}")
-                    else:
-                        st.info(f"🔬 {_hnota}")
                 except Exception:
-                    continue
+                    st.caption(f"#{i} {p.get('jogo','?')} · {p.get('mercado','?')} · Score {score:.0f}")
+                # Nota heurística — sempre renderiza, fora do try para não ser silenciada
+                _hadj  = p.get("heur_adj",  0.0)
+                _hnota = p.get("heur_nota", "Contexto OK")
+                if _hadj > 0:
+                    st.success(f"⬆️ {_hnota}")
+                elif _hadj < 0:
+                    st.warning(f"⬇️ {_hnota}")
+                else:
+                    st.info(f"🔬 Contexto OK — sem regras de forma disparadas")
 
             # ── Consultora Gemini ────────────────────────────────────────
             st.markdown("#### 🤖 Consultora IA (Gemini)")
@@ -1929,6 +1958,23 @@ with tab_analise:
                     </div>""",
                     unsafe_allow_html=True,
                 )
+
+                # Forma recente — caption contextual (0 créditos, usa cache local)
+                _ctx_j = prev.get("dc_ctx", {})
+                _hn5   = _ctx_j.get("h_n_last5", 0)
+                _an5   = _ctx_j.get("a_n_last5", 0)
+                if _hn5 >= 3 and _an5 >= 3:
+                    _hv = _ctx_j.get("h_wins_last5", 0)
+                    _av = _ctx_j.get("a_wins_last5", 0)
+                    _hgf = _ctx_j.get("h_gf_last5", 0)
+                    _hga = _ctx_j.get("h_ga_last5", 0)
+                    _agf = _ctx_j.get("a_gf_last5", 0)
+                    _aga = _ctx_j.get("a_ga_last5", 0)
+                    st.caption(
+                        f"📊 Forma ({_hn5}j): "
+                        f"Casa {_hv}V · {_hgf} GF · {_hga} GS  |  "
+                        f"Fora {_av}V · {_agf} GF · {_aga} GS"
+                    )
 
                 sub = st.tabs(["🔢 Gols", "🤝 BTTS", "🎯 Placar Exato"])
 
@@ -2133,13 +2179,13 @@ with tab_analise:
                         unsafe_allow_html=True,
                     )
                     _hadj_mo  = p.get("heur_adj",  0.0)
-                    _hnota_mo = p.get("heur_nota", "✅ Contexto OK")
+                    _hnota_mo = p.get("heur_nota", "Contexto OK")
                     if _hadj_mo > 0:
                         st.success(f"⬆️ {_hnota_mo}")
                     elif _hadj_mo < 0:
                         st.warning(f"⬇️ {_hnota_mo}")
                     else:
-                        st.info(f"🔬 {_hnota_mo}")
+                        st.info(f"🔬 Contexto OK — sem regras de forma disparadas")
 
             elif jogos_com_odds:
                 st.info(
