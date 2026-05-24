@@ -280,6 +280,47 @@ def avaliar_heuristicas(
         adj -= 6.0
         notas.append(f"xG total marginalmente acima do limiar (λ+μ={xg_total:.2f})")
 
+    # ── H5b: UNDER_35 na zona cinzenta ───────────────────────────────
+    if mercado == "UNDER_35" and 3.00 <= xg_total < 3.20:
+        adj -= 5.0
+        notas.append(f"xG próximo do limiar Under 3.5 (λ+μ={xg_total:.2f}) — incerteza alta")
+
+    # ── H5c: UNDER_15 — regime por xG ────────────────────────────────
+    if mercado == "UNDER_15":
+        if xg_total < 1.20:
+            adj += 10.0
+            notas.append(f"xG muito baixo (λ+μ={xg_total:.2f}) — Under 1.5 com alta convicção")
+        elif xg_total < 1.30:
+            adj += 5.0
+            notas.append(f"xG baixo (λ+μ={xg_total:.2f}) — Under 1.5 favorecido")
+        elif 1.40 <= xg_total < 1.50:
+            adj -= 4.0
+            notas.append(f"xG próximo do limiar Under 1.5 (λ+μ={xg_total:.2f})")
+        elif xg_total >= 1.50:
+            adj -= 8.0
+            notas.append(f"xG acima do limiar Under 1.5 (λ+μ={xg_total:.2f}) — risco alto")
+
+    # ── H6b: OVER_35 — regime por xG ─────────────────────────────────
+    if mercado == "OVER_35":
+        if xg_total > 4.00:
+            adj += 8.0
+            notas.append(f"xG muito alto (λ+μ={xg_total:.2f}) — Over 3.5 com alta convicção")
+        elif xg_total > 3.60:
+            adj += 4.0
+            notas.append(f"xG favorável para Over 3.5 (λ+μ={xg_total:.2f})")
+        elif 3.50 < xg_total <= 3.60:
+            adj -= 4.0
+            notas.append(f"xG marginalmente acima do limiar Over 3.5 (λ+μ={xg_total:.2f})")
+
+    # ── H6c: OVER_15 — visitante inofensivo penaliza ─────────────────
+    if mercado == "OVER_15":
+        if xg_mu < 0.50:
+            adj -= 8.0
+            notas.append(f"Visitante inofensivo (μ={xg_mu:.2f}) — Over 1.5 em risco")
+        elif xg_mu < 0.70 and xg_lam < 0.80:
+            adj -= 5.0
+            notas.append(f"Ambos com baixo potencial ofensivo (λ={xg_lam:.2f}, μ={xg_mu:.2f})")
+
     # ── Regras com ctx (parâmetros D-C internos) ──────────────────────
     if ctx:
         alpha_h   = float(ctx.get("alpha_h",   1.0))
@@ -539,18 +580,28 @@ def avaliar_heuristicas(
                 adj += 4.0
                 notas.append(f"Times propensos ao empate (H={h_draws_last5}, A={a_draws_last5} em {h_n_last5}j)")
 
-        # HC_BTTS_DEF: Bloqueio de BTTS_NO por ataque visitante letal na forma recente
-        # Raiz dos falsos positivos: D-C histórico subestima visitantes em sequência ofensiva
+        # HC_BTTS_DEF v2: Bloqueio escalonado de BTTS_NO por ataque visitante letal
+        # >=6g → hard block (-35pts força drop abaixo de 60); >=5g → gravemente fragilizado;
+        # >=4g → bloqueado; >=3g → penalidade leve. D-C histórico subestima visitantes em form.
         if mercado == "BTTS_NO" and tem_forma:
-            if a_gf_last5 >= 4:
+            if a_gf_last5 >= 6:
+                adj -= 35.0
+                notas.append(f"HARD BLOCK — visitante EXPLOSIVO: {a_gf_last5}g em {a_n_last5}j — BTTS_NO inválido")
+            elif a_gf_last5 >= 5:
+                adj -= 25.0
+                notas.append(f"Visitante em explosão ofensiva ({a_gf_last5}g em {a_n_last5}j) — BTTS_NO gravemente fragilizado")
+            elif a_gf_last5 >= 4:
                 adj -= 15.0
                 notas.append(f"Ataque visitante LETAL: {a_gf_last5}g em {a_n_last5}j — BTTS_NO bloqueado")
             elif a_gf_last5 >= 3:
                 adj -= 8.0
                 notas.append(f"Visitante em forma ofensiva ({a_gf_last5}g em {a_n_last5}j)")
-            if h_gf_last5 >= 3 and a_gf_last5 >= 3:
+            if h_gf_last5 >= 4 and a_gf_last5 >= 3:
                 adj -= 10.0
                 notas.append(f"Ambos marcando bem (H={h_gf_last5}, A={a_gf_last5}g) — BTTS_NO fragilizado")
+            if h_gf_last5 >= 5:
+                adj -= 12.0
+                notas.append(f"Mandante também goleador ({h_gf_last5}g em {h_n_last5}j) — BTTS_NO duplamente ameaçado")
 
         # HC18: Invencibilidade — sequência de 4+ jogos sem perder (V+E) favorece o time
         if tem_forma:
@@ -614,6 +665,58 @@ def avaliar_heuristicas(
                 elif mercado in ("BTTS_YES", "AWAY"):
                     adj -= 8.0
                     notas.append(f"Visitante sem marcar há {a_sem}j — fragiliza BTTS_YES/AWAY")
+
+        # HC23: OVER_35 com defesas mútuas muito abertas na forma recente
+        if mercado == "OVER_35" and tem_forma:
+            h_ga_35 = int(ctx.get("h_ga_last5", 0))
+            a_ga_35 = int(ctx.get("a_ga_last5", 0))
+            if h_ga_35 >= 6 and a_ga_35 >= 6:
+                adj += 12.0
+                notas.append(f"Defesas muito abertas (H sofreu {h_ga_35}, A sofreu {a_ga_35}g) — Over 3.5 potencializado")
+            elif h_ga_35 >= 5 and a_ga_35 >= 5:
+                adj += 6.0
+                notas.append(f"Defesas vulneráveis (H={h_ga_35}, A={a_ga_35}g sofridos) — Over 3.5 favorecido")
+
+        # HC24: UNDER_15 — estéril ofensiva na forma recente
+        if mercado == "UNDER_15" and tem_forma:
+            if h_gf_last5 + a_gf_last5 <= 2:
+                adj += 8.0
+                notas.append(f"Ambas equipes estéreis (H={h_gf_last5}+A={a_gf_last5}g em {h_n_last5}j)")
+            elif h_gf_last5 <= 1 and a_gf_last5 <= 1:
+                adj += 5.0
+                notas.append(f"Produção ofensiva muito baixa (H={h_gf_last5}, A={a_gf_last5}g em {h_n_last5}j)")
+
+        # HC25: Dupla Seca Ofensiva — ambos sem marcar reforça UNDER/BTTS_NO
+        if mercado in ("UNDER_25", "BTTS_NO") and tem_forma:
+            if h_sem_marcar >= 2 and a_sem_marcar >= 2:
+                adj += 12.0
+                notas.append(f"Dupla Seca: ambos sem marcar (H={h_sem_marcar}j, A={a_sem_marcar}j) — Under/BTTS_NO reforçados")
+
+        # HC26: Liga super-goleadora reforça OVER_25 com maior convicção
+        if mercado == "OVER_25" and media > 3.20:
+            adj += 6.0
+            notas.append(f"Liga super-goleadora (méd={media:.2f}g/j) — Over 2.5 estruturalmente favorecido")
+
+        # HC27: DRAW — zona de risco moderado (λ/μ 1.6-2.2, não coberta por H4)
+        if mercado == "DRAW" and 1.60 <= ratio < 2.20:
+            adj -= 5.0
+            notas.append(f"Desequilíbrio moderado (λ/μ={ratio:.1f}) — risco latente para o empate")
+
+        # HC28: DRAW — forma equilibrada de ambos confirma empate estatisticamente
+        if mercado == "DRAW" and tem_forma and ratio < 1.60:
+            if h_draws_last5 >= 2 or a_draws_last5 >= 2:
+                if (h_wins_last5 + h_draws_last5) >= 3 and (a_wins_last5 + a_draws_last5) >= 3:
+                    adj += 7.0
+                    notas.append(f"Forma equilibrada (H={h_wins_last5}V+{h_draws_last5}E, A={a_wins_last5}V+{a_draws_last5}E) — empate plausível")
+
+        # HC29: HOME/1X/OVER_25 — mandante prolífico e invicto recente
+        if mercado in ("HOME", "OVER_25", "1X") and tem_forma:
+            if h_gf_last5 >= 5 and h_losses_last5 == 0:
+                if mercado in ("HOME", "1X"):
+                    adj += 7.0
+                else:
+                    adj += 5.0
+                notas.append(f"Mandante prolífico e invicto ({h_gf_last5}g, 0D em {h_n_last5}j)")
 
     # ═══════════════════════════════════════════════════════════
     # SCOUT LAYER — Heurísticas Avançadas (dados de /fixtures/statistics)
@@ -709,12 +812,32 @@ def avaliar_heuristicas(
                         adj += 6.0
                         notas.append(f"Scout: goleiros muito ativos (H={h_sav:.1f}, A={a_sav:.1f} defesas/j) — jogo aberto")
 
+    # ── Detecção de conflito de sinais ───────────────────────────────────────
+    # Proxy: há notas que indicam bônus E notas que indicam penalidade (≥3 regras disparadas)
+    _kw_pos = ("Fortaleza", "Rolo", "Invencib", "Ferro", "Muralha", "Impulso",
+               "Dupla Seca", "xG muito baixo", "xG baixo", "super-gole", "prolífico",
+               "propensa ao empate", "equilibrado", "equilibrada", "Goleador",
+               "Eficiência", "Dominância", "Goleiro", "Escanteio", "Seca: ",
+               "estéreis", "vulneráveis (H=", "Defesas mútuas vuln")
+    _kw_neg = ("fragiliz", "BLOCK", "HARD", "Cansado", "Ilusória", "contradiz",
+               "risco latente", "inoperante", "sem gol", "Desequilíbrio",
+               "moderado (λ", "poucos jogos", "acima do limiar", "próximo do limiar",
+               "inofensivo", "duplamente ameaçado", "gravemente fragilizado",
+               "Defesas muito abertas", "defesas vuln")
+    _has_pos = any(any(kw in n for kw in _kw_pos) for n in notas)
+    _has_neg = any(any(kw in n for kw in _kw_neg) for n in notas)
+    _conflito = _has_pos and _has_neg and len(notas) >= 3
+
     if adj > 0:
         nota_final = f"+{adj:.0f}pts — " + " · ".join(notas) if notas else f"+{adj:.0f}pts"
     elif adj < 0:
         nota_final = f"{adj:.0f}pts — " + " · ".join(notas) if notas else f"{adj:.0f}pts"
     else:
         nota_final = "Contexto OK"
+
+    if _conflito:
+        nota_final = f"[⚠️ CONFLITO DE SINAIS] {nota_final}"
+
     return adj, nota_final
 
 
@@ -1031,7 +1154,7 @@ for _rk, _rv in _risk_defaults.items():
 
 with st.sidebar:
     st.markdown("## 👑 QG Barrios PRO V3")
-    st.caption("Motor: Dixon-Coles (MLE) · Sem incremental · fix-historico-ids-v2")
+    st.caption("Motor: Dixon-Coles (MLE) · Sem incremental · regras-v2-HC23-29-hardblock")
 
     # ── Créditos API ─────────────────────────────────────────────────
     try:
@@ -1886,6 +2009,15 @@ with tab_analise:
                     ctx      = prev.get("dc_ctx"),
                 )
                 score = round(max(0.0, score + heur_adj), 1)
+
+                # Hard block: BTTS_NO descartado quando visitante marcou 6+ gols em 5j.
+                # O D-C histórico não consegue capturar explosão ofensiva recente — o sinal
+                # de forma é superior ao modelo neste caso extremo.
+                if mercado == "BTTS_NO":
+                    _ctx_hb = prev.get("dc_ctx", {})
+                    if (_ctx_hb.get("a_gf_last5", 0) >= 6
+                            and _ctx_hb.get("a_n_last5", 0) >= 4):
+                        continue
 
                 if score < SCORE_MINIMO_RANKING:
                     continue
