@@ -705,6 +705,9 @@ class BancoQG:
     params_ligas: dict = None        # {league_id_str: {ParametrosLiga.to_dict()}}
     datas: dict = None               # cache de análises por data (agenda, odds, previsões)
     historico_ligas: dict = None     # cache local de treino com xG — NÃO vai pro JSONBin
+    historico_ids: dict = None       # {liga_id_str: [fixture_id, ...]} — VAI pro JSONBin
+                                     # Persiste quais fixtures já foram baixados para que
+                                     # o delta fetch não os re-baixe após restart do Cloud.
 
     def __post_init__(self):
         if self.picks is None:
@@ -717,6 +720,8 @@ class BancoQG:
             self.datas = {}
         if self.historico_ligas is None:
             self.historico_ligas = {}
+        if self.historico_ids is None:
+            self.historico_ids = {}
 
     def to_dict(self) -> dict:
         return {
@@ -737,6 +742,7 @@ class BancoQG:
             params_ligas=d.get("params_ligas", {}),
             datas=d.get("datas", {}),
             historico_ligas=d.get("historico_ligas", {}),
+            historico_ids=d.get("historico_ids", {}),
         )
 
 
@@ -794,6 +800,14 @@ class DadosManager:
         banco.params_ligas = {**_params_nuvem_raw, **_params_local_raw}
         banco.datas = banco_local.get("datas", {})                      # cache do dia fica local
         banco.historico_ligas = banco_local.get("historico_ligas", {}) # xG cache — local apenas
+        # historico_ids: union de nuvem + local. Nuvem tem IDs de sessões anteriores;
+        # local pode ter IDs de fixtures baixados nesta sessão antes do próximo save.
+        _ids_nuvem = banco_nuvem.get("historico_ids", {})
+        _ids_local = banco_local.get("historico_ids", {})
+        merged_ids: dict = {}
+        for _k in set(_ids_nuvem) | set(_ids_local):
+            merged_ids[_k] = list(set(_ids_nuvem.get(_k, [])) | set(_ids_local.get(_k, [])))
+        banco.historico_ids = merged_ids
 
         self._banco = banco
         return banco
@@ -828,11 +842,18 @@ class DadosManager:
                 p["calibradores"] = cals_compact
             params_nuvem[lid_str] = p
 
+        # historico_ids: só salva ligas que já foram calibradas para limitar tamanho.
+        # IDs como lista de ints → ~3KB por liga calibrada (300 fixtures × 8 chars).
+        hist_ids_nuvem: dict = {}
+        for lid_str, ids in (b.historico_ids or {}).items():
+            hist_ids_nuvem[lid_str] = [int(i) for i in ids]
+
         nuvem = {
             "picks":         b.picks,
             "banca_inicial": b.banca_inicial,
             "depositos":     b.depositos,
             "params_ligas":  params_nuvem,
+            "historico_ids": hist_ids_nuvem,
         }
         ok = self.jsonbin.escrever(nuvem)
         self.ultimo_save_jsonbin_ok = ok
@@ -903,6 +924,15 @@ class DadosManager:
                     hist_final[liga_str]["registros"].extend(novos)
                     hist_final[liga_str]["atualizado_em"] = liga_nova.get("atualizado_em", "")
 
+        # historico_ids: union de IDs do disco e da memória por liga
+        hist_ids_disco = disco.get("historico_ids", {})
+        hist_ids_mem   = banco.historico_ids or {}
+        hist_ids_final: dict = {}
+        for _k in set(hist_ids_disco) | set(hist_ids_mem):
+            _disco_set = set(int(i) for i in hist_ids_disco.get(_k, []))
+            _mem_set   = set(int(i) for i in hist_ids_mem.get(_k, []))
+            hist_ids_final[_k] = list(_disco_set | _mem_set)
+
         resultado = {
             "picks":           picks_final,
             "banca_inicial":   banco.banca_inicial,
@@ -910,6 +940,7 @@ class DadosManager:
             "params_ligas":    params_final,
             "datas":           datas_final,
             "historico_ligas": hist_final,
+            "historico_ids":   hist_ids_final,
         }
         try:
             with open(arquivo, "w", encoding="utf-8") as f:
@@ -955,6 +986,17 @@ class DadosManager:
         cache_liga = banco.historico_ligas.get(chave, {"registros": [], "atualizado_em": ""})
 
         ids_cache: set[int] = {int(r["fixture_id"]) for r in cache_liga["registros"]}
+
+        # Fallback: usa historico_ids do JSONBin quando cache local está vazio (após restart).
+        # Evita re-download de fixtures já conhecidos de sessões anteriores.
+        if not ids_cache:
+            ids_jsonbin: set[int] = set(int(i) for i in banco.historico_ids.get(chave, []))
+            if ids_jsonbin:
+                ids_cache = ids_jsonbin
+                log.info(
+                    f"Liga {league_id}: cache local vazio — restaurando {len(ids_jsonbin)} "
+                    "IDs do JSONBin (historico_ids). Só fixtures novos receberão xG."
+                )
 
         nomes_global: dict[int, str] = {}
         houve_novidades = False
@@ -1049,7 +1091,10 @@ class DadosManager:
             ids_cache.update(int(r["fixture_id"]) for r in novos)
             houve_novidades = True
 
-        # Persiste cache no arquivo local via append-only merge (nunca vai pro JSONBin)
+        # Persiste cache no arquivo local + atualiza historico_ids no JSONBin.
+        # historico_ids é a âncora cloud que evita re-download após restart.
+        if ids_cache:
+            banco.historico_ids[chave] = list(ids_cache)
         if houve_novidades:
             cache_liga["atualizado_em"] = dt.datetime.now().isoformat()
             banco.historico_ligas[chave] = cache_liga
@@ -1213,13 +1258,36 @@ class DadosManager:
         for league_id in ligas_alvo:
             chave = str(league_id)
             cache_liga = banco.historico_ligas.get(chave, {"registros": []})
-            ids_cache: set[int] = {int(r["fixture_id"]) for r in cache_liga.get("registros", [])}
+            ids_local: set[int] = {int(r["fixture_id"]) for r in cache_liga.get("registros", [])}
+
+            # Fallback: usa historico_ids do JSONBin quando cache local está vazio.
+            ids_jsonbin: set[int] = set(int(i) for i in banco.historico_ids.get(chave, []))
+            ids_cache: set[int] = ids_local | ids_jsonbin
+
+            has_params = bool(banco.params_ligas.get(chave, {}).get("times"))
 
             usar_ano_atual = league_id in LIGAS_TEMPORADA_ANO_ATUAL
             if usar_ano_atual:
                 seasons = [ano_atual - 1, ano_atual]
             else:
                 seasons = [season_europeia]
+
+            # Liga nunca baixada e nunca calibrada → skip (bootstrap separado).
+            # Evita gastar créditos em listas de ligas ainda inativas.
+            if not ids_cache and not has_params:
+                resultado_ligas.append({
+                    "league_id":    league_id,
+                    "nome":         LIGAS_SUPORTADAS.get(league_id, f"Liga {league_id}"),
+                    "n_novos_liga": 0,
+                    "n_cache_liga": 0,
+                    "n_api_liga":   0,
+                    "seasons": [
+                        {"season": s, "n_api": 0, "n_cache": 0, "n_novos": 0, "erro": None}
+                        for s in seasons
+                    ],
+                })
+                n_novos_total += 0
+                continue
 
             detalhes_seasons = []
             n_novos_liga = 0
@@ -1228,21 +1296,7 @@ class DadosManager:
                 try:
                     df_api, _ = self.api.buscar_historico_liga(league_id, s, com_xg=False)
                     ids_api = set(df_api["fixture_id"].astype(int).tolist()) if not df_api.empty else set()
-                    # Se cache vazio mas liga foi calibrada antes (params no JSONBin),
-                    # só fixtures APÓS calibrado_em são "novos" — evita re-download massivo
-                    # após restart do Streamlit Cloud que apaga historico_ligas local.
-                    if not ids_cache and not df_api.empty:
-                        _p = banco.params_ligas.get(chave, {})
-                        _calib = _p.get("calibrado_em", "")
-                        if _calib:
-                            _cutoff = _calib[:10]  # YYYY-MM-DD
-                            novos_ids = set(
-                                df_api[df_api["date"] >= _cutoff]["fixture_id"].astype(int).tolist()
-                            )
-                        else:
-                            novos_ids = ids_api - ids_cache
-                    else:
-                        novos_ids = ids_api - ids_cache
+                    novos_ids = ids_api - ids_cache
                     n_novos = len(novos_ids)
                     detalhes_seasons.append({
                         "season":  s,
