@@ -1031,7 +1031,7 @@ for _rk, _rv in _risk_defaults.items():
 
 with st.sidebar:
     st.markdown("## 👑 QG Barrios PRO V3")
-    st.caption("Motor: Dixon-Coles (MLE) · Sem incremental")
+    st.caption("Motor: Dixon-Coles (MLE) · Sem incremental · fix-historico-ids-v2")
 
     # ── Créditos API ─────────────────────────────────────────────────
     try:
