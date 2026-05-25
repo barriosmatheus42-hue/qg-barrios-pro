@@ -1964,15 +1964,16 @@ with tab_analise:
             "BTTS_YES", "BTTS_NO",
         ]
         # Pisos de odd por mercado — independentes do slider global (odd_min_save).
-        # Mercados com liquidez naturalmente baixa (OVER_15, BTTS_YES) têm pisos menores.
-        # O slider "Odd mínima global" ainda protege mercados principais (OVER_25, BTTS_NO).
+        # Raciocínio profissional: odds abaixo de 1.50 exigem calibração de ±2pp que o D-C
+        # ainda não tem validação suficiente. BTTS_YES/OVER_15 abertas mas com pisos conservadores.
+        # DC (1X/X2/12) mantido desativado enquanto DRAW (componente) não tem backtest sólido.
         _GOLS_ODD_MIN = {
-            "OVER_15":   1.20, "OVER_25":  1.50, "OVER_35":  1.55,
-            "UNDER_15":  1.50, "UNDER_25": 1.50, "UNDER_35": 1.20,
-            "BTTS_YES":  1.35, "BTTS_NO":  1.60,
+            "OVER_15":   1.50, "OVER_25":  1.50, "OVER_35":  1.55,
+            "UNDER_15":  1.55, "UNDER_25": 1.50, "UNDER_35": 1.30,
+            "BTTS_YES":  1.55, "BTTS_NO":  1.60,
         }
         # Mercados que respeitam o slider global (validados por backtest)
-        _GOLS_USA_GLOBAL_SLIDER = {"OVER_25", "UNDER_25", "BTTS_NO", "OVER_35", "UNDER_35"}
+        _GOLS_USA_GLOBAL_SLIDER = {"OVER_25", "UNDER_25", "BTTS_NO", "OVER_35", "UNDER_35", "OVER_15", "BTTS_YES"}
         _ligas_bloq = set(st.session_state.get("risk_ligas_bloqueadas", []))
         for j in jogos_com_odds:
             f_id   = str(j["fixture"]["id"])
@@ -2395,12 +2396,11 @@ with tab_analise:
                     ev_min  = _EV_MIN[mercado]
                     ev_max  = _EV_MAX[mercado]
                     prob_mn = _PROB_MIN[mercado]
-                    # DC (1X/X2/12) bypass slider global — pisos validados por backtest
-                    # HOME/DRAW/AWAY respeitam o slider global como proteção extra
-                    if mercado in ("1X", "X2", "12"):
-                        eff_odd_mn = _ODD_MIN[mercado]
-                    else:
-                        eff_odd_mn = max(_ODD_MIN[mercado], odd_min_save)
+                    # DC (1X/X2/12) mantém o slider global — DRAW (componente do DC) ainda
+                    # não tem backtest validado suficiente (0/3 hoje). Quando DRAW melhorar,
+                    # reabrir DC com eff_odd_mn = _ODD_MIN[mercado].
+                    # HOME/DRAW/AWAY e DC respeitam o slider global como proteção.
+                    eff_odd_mn = max(_ODD_MIN[mercado], odd_min_save)
                     odd_mx     = _ODD_MAX[mercado]
 
                     if not (ev_min <= ev <= ev_max
