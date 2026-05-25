@@ -1154,7 +1154,7 @@ for _rk, _rv in _risk_defaults.items():
 
 with st.sidebar:
     st.markdown("## 👑 QG Barrios PRO V3")
-    st.caption("Motor: Dixon-Coles (MLE) · Sem incremental · v2-banca-odds-antidraw")
+    st.caption("Motor: Dixon-Coles (MLE) · Sem incremental · v2-DC-por-direcao")
 
     # ── Créditos API ─────────────────────────────────────────────────
     try:
@@ -2376,6 +2376,18 @@ with tab_analise:
                 odd_x2 = (1.0 / (1.0/odd_d + 1.0/odd_a)) if odd_d > 1 and odd_a > 1 else 0.0
                 odd_12 = (1.0 / (1.0/odd_h + 1.0/odd_a)) if odd_h > 1 and odd_a > 1 else 0.0
 
+                # DC por Direção — ancoras de direção para 1X e X2
+                # 1X: mandante deve ser favorito (P_HOME > 50%) → empate é seguro, não aposta cega
+                # X2: visitante deve ter força real (P_AWAY > 32%) → seguro de empate com valor
+                # 12: manter filtros normais (sem seguro de empate, variância não justifica DC)
+                # Odd sweet spot: onde o seguro tem valor sem destruir o retorno
+                _DC_SWEET = {
+                    "1X": (1.18, 1.60),   # 1X fora do sweet spot perde sentido de cobertura
+                    "X2": (1.22, 1.68),   # X2 barato demais = visitante esmagador (aposte direto)
+                    "12": (1.18, 2.50),   # 12 mantém range normal
+                }
+                _DC_EV_MIN = {"1X": 5.0, "X2": 5.0, "12": 8.0}  # menor pq direção ancora o risco
+
                 candidatos_jogo = [
                     ("HOME", p_home, odd_h),
                     ("DRAW", p_draw, odd_d),
@@ -2388,20 +2400,45 @@ with tab_analise:
                 for mercado, prob_pct, odd_mkt in candidatos_jogo:
                     if odd_mkt <= 1.0:
                         continue
+
+                    # ── Filtros de DC por direção (1X e X2) ─────────────────────────
+                    _dc_label = ""  # label extra para UI
+                    if mercado == "1X":
+                        # Âncora: mandante favorito. Sem isso, 1X é aposta cega no empate.
+                        if p_home < 0.50:
+                            continue
+                        sw_lo, sw_hi = _DC_SWEET["1X"]
+                        if not (sw_lo <= odd_mkt <= sw_hi):
+                            continue
+                        _dc_label = f"🏠→🛡️ Mandante+Seguro (P_home={p_home:.0%})"
+                    elif mercado == "X2":
+                        # Âncora: visitante com força real. X2 com visitante fraco é puro DRAW.
+                        if p_away < 0.32:
+                            continue
+                        sw_lo, sw_hi = _DC_SWEET["X2"]
+                        if not (sw_lo <= odd_mkt <= sw_hi):
+                            continue
+                        _dc_label = f"✈️→🛡️ Visitante+Seguro (P_away={p_away:.0%})"
+
                     comp = comparar_com_mercado(prob_pct, odd_mkt, overround)
                     if "erro" in comp:
                         continue
 
                     ev   = comp["ev_pct"]
-                    ev_min  = _EV_MIN[mercado]
-                    ev_max  = _EV_MAX[mercado]
-                    prob_mn = _PROB_MIN[mercado]
-                    # DC (1X/X2/12) mantém o slider global — DRAW (componente do DC) ainda
-                    # não tem backtest validado suficiente (0/3 hoje). Quando DRAW melhorar,
-                    # reabrir DC com eff_odd_mn = _ODD_MIN[mercado].
-                    # HOME/DRAW/AWAY e DC respeitam o slider global como proteção.
-                    eff_odd_mn = max(_ODD_MIN[mercado], odd_min_save)
-                    odd_mx     = _ODD_MAX[mercado]
+                    # DC usa EV_MIN menor (direção ancora) e sem override de slider global
+                    if mercado in ("1X", "X2", "12"):
+                        ev_min  = _DC_EV_MIN[mercado]
+                        ev_max  = _EV_MAX[mercado]
+                        prob_mn = _PROB_MIN[mercado]
+                        sw_lo, sw_hi = _DC_SWEET[mercado]
+                        eff_odd_mn = sw_lo   # sweet spot já é o piso efetivo
+                        odd_mx     = sw_hi
+                    else:
+                        ev_min  = _EV_MIN[mercado]
+                        ev_max  = _EV_MAX[mercado]
+                        prob_mn = _PROB_MIN[mercado]
+                        eff_odd_mn = max(_ODD_MIN[mercado], odd_min_save)
+                        odd_mx     = _ODD_MAX[mercado]
 
                     if not (ev_min <= ev <= ev_max
                             and prob_pct >= prob_mn
@@ -2421,6 +2458,11 @@ with tab_analise:
                         xg_total = float(prev.get("xg_total") or 2.3),
                         ctx      = prev.get("dc_ctx"),
                     )
+                    # DC: adiciona contexto de direção à nota heurística
+                    if _dc_label and heur_nota_mo == "Contexto OK":
+                        heur_nota_mo = _dc_label
+                    elif _dc_label:
+                        heur_nota_mo = f"{_dc_label} · {heur_nota_mo}"
 
                     candidatos_mo.append({
                         "fixture_id":   f_id,
@@ -2456,12 +2498,19 @@ with tab_analise:
             ranking_mo = sorted(melhor_mo.values(), key=lambda x: x["ev"], reverse=True)
 
             if ranking_mo:
+                # Separa mercados diretos de DC por direção para display distinto
+                _ranking_direto = [p for p in ranking_mo if p.get("mercado") not in ("1X","X2","12")]
+                _ranking_dc     = [p for p in ranking_mo if p.get("mercado") in ("1X","X2","12")]
+
+                _n_direto = len(_ranking_direto)
+                _n_dc     = len(_ranking_dc)
                 st.markdown(
-                    f"### 📊 Sinais de Resultado ({len(ranking_mo)} entrada"
-                    f"{'s' if len(ranking_mo) > 1 else ''})"
+                    f"### 📊 Sinais de Resultado ({_n_direto} direto{'s' if _n_direto!=1 else ''}"
+                    + (f" + {_n_dc} Dupla Chance" if _n_dc else "") + ")"
                 )
                 st.caption(
                     f"H1-HOME-Only · Phantom Draw EV>28% · Teto AWAY 22% · "
+                    f"DC por direção: 1X âncora HOME>50%, X2 âncora AWAY>32% · "
                     f"Overround real por jogo · {len(candidatos_mo)} candidatos antes da dedup"
                 )
 
@@ -2470,23 +2519,27 @@ with tab_analise:
                     "1X": "#28a745",   "X2": "#fd7e14",   "12": "#dc3545",
                 }
 
-                for i, p in enumerate(ranking_mo, 1):
+                def _render_pick_mo(i: int, p: dict, prefixo: str = "") -> None:
                     mkt = p.get("mercado", "—")
                     cor = _cor_mercado.get(mkt, "#888")
+                    _e_dc = mkt in ("1X", "X2", "12")
                     cal_badge = " · Cal✓" if mkt == "HOME" and banco.params_ligas.get(
                         str(next((j["league"]["id"] for j in jogos_com_odds
                                   if str(j["fixture"]["id"]) == p["fixture_id"]), 0)), {}
                     ).get("calibradores", {}).get("1X2_HOME") else ""
                     cob_ico = "✅" if p.get("cobertura_ok") else "⚠️"
+                    _dc_badge = " 🛡️ DC" if _e_dc else ""
 
                     st.markdown(
                         f"<div style='border-left:4px solid {cor};padding:10px 14px;"
-                        f"margin-bottom:4px;background:#0e1117;border-radius:4px;'>"
+                        f"margin-bottom:4px;background:#0e1117;border-radius:4px;"
+                        + ("border:1px solid " + cor + "33;" if _e_dc else "") +
+                        f"'>"
                         f"<div style='display:flex;justify-content:space-between;"
                         f"font-size:11px;color:#888;'>"
-                        f"<span>#{i} · {p.get('liga', '—')} · {cob_ico}{cal_badge}</span>"
+                        f"<span>{prefixo}#{i} · {p.get('liga', '—')} · {cob_ico}{cal_badge}</span>"
                         f"<span style='color:{cor};font-weight:bold;'>"
-                        f"{mkt} &nbsp;·&nbsp; OR: {p.get('overround', 1.0):.3f}</span>"
+                        f"{mkt}{_dc_badge} &nbsp;·&nbsp; OR: {p.get('overround', 1.0):.3f}</span>"
                         f"</div>"
                         f"<div style='font-size:17px;font-weight:bold;color:white;margin:5px 0 3px;'>"
                         f"{p.get('jogo', '—')}"
@@ -2512,7 +2565,22 @@ with tab_analise:
                     elif _hadj_mo < 0:
                         st.warning(f"⬇️ {_hnota_mo}")
                     else:
-                        st.info(f"🔬 Contexto OK — sem regras de forma disparadas")
+                        st.info(f"🔬 {_hnota_mo if _hnota_mo != 'Contexto OK' else 'Contexto OK — sem regras de forma disparadas'}")
+
+                # Picks diretos (HOME/DRAW/AWAY)
+                for i, p in enumerate(_ranking_direto, 1):
+                    _render_pick_mo(i, p)
+
+                # Dupla Chance por Direção — seção separada
+                if _ranking_dc:
+                    st.markdown("#### 🛡️ Dupla Chance por Direção")
+                    st.caption(
+                        "1X: modelo favorece mandante (P>50%) + odd sweet spot 1.18-1.60 · "
+                        "X2: visitante com força real (P>32%) + odd sweet spot 1.22-1.68 · "
+                        "Seguro de empate ancorado em direção — não depende da calibração de DRAW"
+                    )
+                    for i, p in enumerate(_ranking_dc, 1):
+                        _render_pick_mo(i, p)
 
             elif jogos_com_odds:
                 st.info(
