@@ -1154,7 +1154,7 @@ for _rk, _rv in _risk_defaults.items():
 
 with st.sidebar:
     st.markdown("## 👑 QG Barrios PRO V3")
-    st.caption("Motor: Dixon-Coles (MLE) · Sem incremental · regras-v2-HC23-29-hardblock")
+    st.caption("Motor: Dixon-Coles (MLE) · Sem incremental · v2-banca-odds-antidraw")
 
     # ── Créditos API ─────────────────────────────────────────────────
     try:
@@ -1176,9 +1176,17 @@ with st.sidebar:
         value=float(st.session_state.get("_saldo_atual", banco.banca_inicial or 30.0)),
         min_value=0.01,
         step=0.50,
-        help="Informe o saldo atual da sua conta. Usado para calcular a stake pelo Kelly.",
+        help="Informe o saldo atual da sua conta. Salvo automaticamente no cloud ao alterar.",
     )
     st.session_state["_saldo_atual"] = banca_atual
+    # Persiste no JSONBin para sobreviver ao reload/restart do Streamlit Cloud
+    if abs(banca_atual - float(banco.banca_inicial or 0.0)) > 0.01:
+        banco.banca_inicial = banca_atual
+        st.session_state["banco"] = banco
+        try:
+            dm.salvar_banco(banco)
+        except Exception:
+            pass  # non-critical — session_state já retém o valor durante a sessão
 
     st.divider()
 
@@ -1955,6 +1963,16 @@ with tab_analise:
             "UNDER_15", "UNDER_25", "UNDER_35",
             "BTTS_YES", "BTTS_NO",
         ]
+        # Pisos de odd por mercado — independentes do slider global (odd_min_save).
+        # Mercados com liquidez naturalmente baixa (OVER_15, BTTS_YES) têm pisos menores.
+        # O slider "Odd mínima global" ainda protege mercados principais (OVER_25, BTTS_NO).
+        _GOLS_ODD_MIN = {
+            "OVER_15":   1.20, "OVER_25":  1.50, "OVER_35":  1.55,
+            "UNDER_15":  1.50, "UNDER_25": 1.50, "UNDER_35": 1.20,
+            "BTTS_YES":  1.35, "BTTS_NO":  1.60,
+        }
+        # Mercados que respeitam o slider global (validados por backtest)
+        _GOLS_USA_GLOBAL_SLIDER = {"OVER_25", "UNDER_25", "BTTS_NO", "OVER_35", "UNDER_35"}
         _ligas_bloq = set(st.session_state.get("risk_ligas_bloqueadas", []))
         for j in jogos_com_odds:
             f_id   = str(j["fixture"]["id"])
@@ -1974,7 +1992,12 @@ with tab_analise:
             for mercado in MERCADOS_VARREDURA:
                 prob_modelo = prev["mercados"].get(mercado, 0)
                 odd_val     = odds_j.get(mercado, 0)
-                if odd_val <= 1.0 or odd_val < odd_min_save:
+                # Piso efetivo: mercados no grupo "usa global slider" respeitam o slider;
+                # OVER_15, BTTS_YES etc. usam apenas seu piso calibrado de backtest.
+                _odd_piso = _GOLS_ODD_MIN.get(mercado, 1.50)
+                if mercado in _GOLS_USA_GLOBAL_SLIDER:
+                    _odd_piso = max(_odd_piso, odd_min_save)
+                if odd_val <= 1.0 or odd_val < _odd_piso:
                     continue
                 if prob_modelo < prob_min:
                     continue
@@ -2372,8 +2395,12 @@ with tab_analise:
                     ev_min  = _EV_MIN[mercado]
                     ev_max  = _EV_MAX[mercado]
                     prob_mn = _PROB_MIN[mercado]
-                    # Piso efetivo: máximo entre o mínimo do backtest e o slider global
-                    eff_odd_mn = max(_ODD_MIN[mercado], odd_min_save)
+                    # DC (1X/X2/12) bypass slider global — pisos validados por backtest
+                    # HOME/DRAW/AWAY respeitam o slider global como proteção extra
+                    if mercado in ("1X", "X2", "12"):
+                        eff_odd_mn = _ODD_MIN[mercado]
+                    else:
+                        eff_odd_mn = max(_ODD_MIN[mercado], odd_min_save)
                     odd_mx     = _ODD_MAX[mercado]
 
                     if not (ev_min <= ev <= ev_max
@@ -2414,10 +2441,17 @@ with tab_analise:
                     })
 
             # Deduplicação: um mercado por jogo (maior EV dentro da faixa aprovada)
+            # Anti-phantom-DRAW: quando DRAW EV >40%, aplica desconto de 15pp para fins de
+            # deduplicação — EV muito alto em DRAW geralmente indica D-C superestimando,
+            # e outros mercados do jogo (AWAY/HOME) devem ter preferência se aprovados.
             melhor_mo: dict[str, dict] = {}
             for c in candidatos_mo:
                 fid = c["fixture_id"]
-                if fid not in melhor_mo or c["ev"] > melhor_mo[fid]["ev"]:
+                _ev_dedup = c["ev"]
+                if c["mercado"] == "DRAW" and _ev_dedup > 40.0:
+                    _ev_dedup -= 15.0  # desconto anti-phantom para fins de dedup apenas
+                c["_ev_dedup"] = _ev_dedup
+                if fid not in melhor_mo or _ev_dedup > melhor_mo[fid].get("_ev_dedup", melhor_mo[fid]["ev"]):
                     melhor_mo[fid] = c
             ranking_mo = sorted(melhor_mo.values(), key=lambda x: x["ev"], reverse=True)
 
