@@ -815,6 +815,7 @@ def prever_jogo(
     away_id: int,
     aplicar_shrink: bool = True,
     cobertura_minima: int = 10,
+    times_fallback=None,
 ) -> dict:
     """
     Calcula todas as probabilidades de mercados para um jogo.
@@ -825,21 +826,36 @@ def prever_jogo(
         - mercados: dict {nome_mercado: prob_em_porcentagem}
         - flags: lista de anomalias detectadas
         - cobertura_ok: True/False (se os dois times têm >= cobertura_minima jogos)
+
+    Parâmetros opcionais:
+        times_fallback: dict {team_id (int) → {alpha, beta, n_jogos}} com dados de
+            outras ligas (ex.: Brasileirão para times que jogam Libertadores).
+            Usado quando o time não está em params.times — melhor que a média global.
     """
     flags = []
 
-    # Times desconhecidos → usa média da liga (alpha=1.0, beta=1.0) em vez de retornar erro.
-    # Garante análise para Copa Libertadores/Sudamericana/Copas onde times de ligas menores
-    # participam sem dados completos na calibração. cobertura_ok=False sinaliza ao usuário.
+    # Times desconhecidos: prioridade de busca:
+    #   1. params.times da liga alvo (Libertadores, Copa, etc.)
+    #   2. times_fallback — dados da liga doméstica do time (Brasileirão, La Liga, etc.)
+    #   3. _avg global (alpha=1.0, beta=1.0) — último recurso
+    # Garante análise para Copas/internacionais sem cravar erro. cobertura_ok=False avisa.
     _avg = {"alpha": 1.0, "beta": 1.0, "n_jogos": 0}
     th = params.times.get(home_id)
     ta = params.times.get(away_id)
     if th is None:
-        flags.append(f"TIME_CASA_DESCONHECIDO(id={home_id})")
-        th = _avg
+        if times_fallback and home_id in times_fallback:
+            th = times_fallback[home_id]
+            flags.append(f"TIME_CASA_CROSS_LIGA(id={home_id})")
+        else:
+            flags.append(f"TIME_CASA_DESCONHECIDO(id={home_id})")
+            th = _avg
     if ta is None:
-        flags.append(f"TIME_FORA_DESCONHECIDO(id={away_id})")
-        ta = _avg
+        if times_fallback and away_id in times_fallback:
+            ta = times_fallback[away_id]
+            flags.append(f"TIME_FORA_CROSS_LIGA(id={away_id})")
+        else:
+            flags.append(f"TIME_FORA_DESCONHECIDO(id={away_id})")
+            ta = _avg
 
     # Cobertura
     n_h, n_a = th["n_jogos"], ta["n_jogos"]

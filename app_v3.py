@@ -1154,7 +1154,7 @@ for _rk, _rv in _risk_defaults.items():
 
 with st.sidebar:
     st.markdown("## 👑 QG Barrios PRO V3")
-    st.caption("Motor: Dixon-Coles (MLE) · v3-cal-ui-season-auto · fix-times-desconhecidos")
+    st.caption("Motor: Dixon-Coles (MLE) · v4-cross-liga-fallback · passo2-seguro")
 
     # ── Créditos API ─────────────────────────────────────────────────
     try:
@@ -1509,7 +1509,9 @@ with tab_calibracao:
                 else "Sem créditos suficientes ou apenas ligas aguardando início do torneio."
             ),
         ):
-            st.session_state["delta_snapshot"] = preview
+            # Armazena _pode_calibrar junto ao snapshot para garantir que a execução
+            # respeite o que foi mostrado ao usuário: "0 créditos" = só toca inativas.
+            st.session_state["delta_snapshot"] = {**preview, "_pode_calibrar": _pode_calibrar}
             st.session_state["delta_confirmado"] = True
             st.session_state.pop("delta_preview", None)
             st.session_state.pop("delta_cats", None)
@@ -1547,6 +1549,12 @@ with tab_calibracao:
         # Fallback: snapshot perdido (session reiniciada entre Passo 1 e 2) → recalibra tudo
         if not snapshot.get("ligas"):
             com_novos = list(LIGAS_SUPORTADAS.keys())
+
+        # SEGURANÇA: se o botão foi exibido como "0 créditos" (saldo insuficiente para ligas
+        # com novos jogos), garantir que NÃO tentamos calibrar — apenas toca inativas.
+        # _pode_calibrar=False quando o saldo não cobria o custo xG mostrado no Passo 1.
+        if not snapshot.get("_pode_calibrar", True):
+            com_novos = []
 
         total_ops    = len(inativas) + len(com_novos)
         progress_bar = st.progress(0)
@@ -1910,6 +1918,17 @@ with tab_analise:
     jogos_com_odds = [j for j in calibrados if str(j["fixture"]["id"]) in odds_cache]
     previsoes      = cache_dia.get("previsoes", {})
 
+    # Cross-liga fallback: times de Copa/Libertadores que não estão nos params da competição
+    # são buscados na liga doméstica (ex.: time do Brasileirão aparece na Libertadores).
+    # Prioridade: params da liga alvo > fallback de outra liga > média global.
+    # Construímos uma vez, mapeando team_id → params do primeiro match encontrado.
+    _times_todos: dict = {}
+    for _pld in banco.params_ligas.values():
+        for _tid_str, _tdata in _pld.get("times", {}).items():
+            _tid_int = int(_tid_str)
+            if _tid_int not in _times_todos:
+                _times_todos[_tid_int] = _tdata
+
     # Pré-compila DataFrames de historico por liga — 0 créditos, uma vez por liga
     _forma_dfs: dict[int, pd.DataFrame] = {}
     for _j_tmp in jogos_com_odds:
@@ -1932,13 +1951,17 @@ with tab_analise:
         h_id   = j["teams"]["home"]["id"]
         a_id   = j["teams"]["away"]["id"]
         if f_id not in previsoes:
-            prev = prever_jogo(params, h_id, a_id, aplicar_shrink=True, cobertura_minima=10)
+            prev = prever_jogo(
+                params, h_id, a_id,
+                aplicar_shrink=True, cobertura_minima=10,
+                times_fallback=_times_todos,
+            )
             previsoes[f_id] = {k: prev.get(k) for k in
                                ("lambda", "mu", "xg_total", "mercados", "flags",
                                 "cobertura_ok", "erro")}
-        # dc_ctx sempre recalculado dos params atuais (nunca fica stale por recalibração)
-        h_data = params.times.get(h_id, {})
-        a_data = params.times.get(a_id, {})
+        # dc_ctx: usa fallback cross-liga quando time não está nos params da competição
+        h_data = params.times.get(h_id) or _times_todos.get(h_id) or {}
+        a_data = params.times.get(a_id) or _times_todos.get(a_id) or {}
         dc_ctx: dict = {
             "alpha_h":         h_data.get("alpha",  1.0),
             "beta_h":          h_data.get("beta",   1.0),
