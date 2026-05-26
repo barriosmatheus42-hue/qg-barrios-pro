@@ -1146,6 +1146,7 @@ _risk_defaults = {
     "risk_prob_min":          45.0,
     "risk_teto_pct_pct":      10,
     "risk_limite_div":        20,
+    "risk_limite_risco_pct":  20,   # % máximo da banca exposta por dia (portfólio Kelly)
     "risk_ligas_bloqueadas":  [],
 }
 for _rk, _rv in _risk_defaults.items():
@@ -1154,7 +1155,7 @@ for _rk, _rv in _risk_defaults.items():
 
 with st.sidebar:
     st.markdown("## 👑 QG Barrios PRO V3")
-    st.caption("Motor: Dixon-Coles (MLE) · v4-cross-liga-fallback · passo2-seguro")
+    st.caption("Motor: Dixon-Coles (MLE) · v5-kelly-portfolio · fix-dc-escala")
 
     # ── Créditos API ─────────────────────────────────────────────────
     try:
@@ -1198,6 +1199,20 @@ with st.sidebar:
         prob_min     = st.number_input("Prob. mínima do modelo (%)", min_value=0.0, max_value=99.0, step=5.0, key="risk_prob_min")
         # 20pp: limiar documentado no paper Dixon-Coles e nos bugs do V6.1.
         limite_div   = st.slider("Anomalia se divergência >", 10, 20, key="risk_limite_div")
+        st.divider()
+        # Kelly de Portfólio: distribui a banca entre TODAS as entradas do dia.
+        # Em dias com poucas entradas, cada pick recebe stake maior.
+        # Em dias com muitas, os stakes são escalonados para o limite.
+        st.caption("**📊 Kelly Portfólio**")
+        limite_risco_pct = st.slider(
+            "Risco diário máximo (% da banca)",
+            min_value=5, max_value=30,
+            key="risk_limite_risco_pct",
+            help=(
+                "Caps o total exposto no dia. Ex.: 20% com banca R$37 = máx R$7,40 no dia. "
+                "Com poucas entradas cada stake sobe. Com muitas, cada stake cai proporcionalmente."
+            ),
+        ) / 100.0
         st.divider()
         st.caption("**🚫 Bloquear ligas do scanner** — picks dessas ligas são suprimidos em Gols e Resultados.")
         ligas_bloqueadas_sel = st.multiselect(
@@ -1980,6 +1995,19 @@ with tab_analise:
     banco.datas[data_str]["previsoes"] = previsoes
     dm.salvar_banco(banco)
 
+    # ── Kelly de Portfólio ───────────────────────────────────────────────────
+    # Usa os Kelly totais da renderização anterior para escalar os stakes de forma
+    # que o risco diário total não ultrapasse limite_risco_pct da banca.
+    # Primeira renderização: fator=1.0 (sem dados prévios → Kelly individual).
+    # Após qualquer interação do usuário: fator escalonado com base nos picks do dia.
+    _kelly_dia_gols_prev = st.session_state.get("_kelly_dia_gols", 0.0)
+    _kelly_dia_mo_prev   = st.session_state.get("_kelly_dia_mo",   0.0)
+    _kelly_total_prev    = _kelly_dia_gols_prev + _kelly_dia_mo_prev
+    if _kelly_total_prev > 1e-6:
+        _fator_portfolio = min(1.0, limite_risco_pct / _kelly_total_prev)
+    else:
+        _fator_portfolio = 1.0  # sem picks anteriores: Kelly individual intacto
+
     aba_gols, aba_resultado = st.tabs(["🎯 Sniper de Gols", "📊 Estrategista de Resultados"])
 
     # =========================================================================
@@ -2111,6 +2139,13 @@ with tab_analise:
         # 3. Ranking final: score desc
         ranking = sorted(melhor_por_jogo.values(), key=lambda x: x["score"], reverse=True)
 
+        # ── Kelly Portfólio: armazena total e reescala stakes ────────────
+        _kelly_sum_gols = sum(p["kelly"] for p in ranking)
+        st.session_state["_kelly_dia_gols"] = _kelly_sum_gols
+        if _fator_portfolio < 0.999:
+            for p in ranking:
+                p["stake"] = max(piso_kelly, round(p["kelly"] * banca_atual * _fator_portfolio, 2))
+
         # ── Exibe ranking ────────────────────────────────────────────────
         n_total_aprovados = len(candidatos)  # antes da dedup, para info
 
@@ -2120,6 +2155,18 @@ with tab_analise:
                 f"Score ≥ {SCORE_MINIMO_RANKING} · 1 mercado/jogo (melhor score) · "
                 f"EV mínimo por mercado (UNDER_25 ≥ {EV_MIN_POR_MERCADO['UNDER_25']:.0f}%) · "
                 f"{n_total_aprovados} candidatos antes da filtragem"
+            )
+            # Banner de portfólio: mostra exposição total do dia (gols + resultados)
+            _n_mo_prev   = st.session_state.get("_n_picks_mo",   0)
+            _stk_mo_prev = st.session_state.get("_stake_dia_mo", 0.0)
+            _stk_gols    = sum(p["stake"] for p in ranking)
+            _total_picks = len(ranking) + _n_mo_prev
+            _total_stake = _stk_gols + _stk_mo_prev
+            _pct_banca   = (_total_stake / banca_atual * 100) if banca_atual > 0 else 0
+            _fator_str   = f" · escala {_fator_portfolio:.2f}×" if _fator_portfolio < 0.999 else ""
+            st.info(
+                f"💼 **Portfólio do dia:** {_total_picks} picks · "
+                f"R$ {_total_stake:.2f} expostos ({_pct_banca:.1f}% da banca){_fator_str}"
             )
 
             for i, p in enumerate(ranking, 1):
@@ -2437,23 +2484,25 @@ with tab_analise:
                         continue
 
                     # ── Filtros de DC por direção (1X e X2) ─────────────────────────
+                    # ATENÇÃO: p_home / p_away estão em % (0-100), não decimais (0-1).
+                    # Thresholds e labels devem usar a mesma escala.
                     _dc_label = ""  # label extra para UI
                     if mercado == "1X":
                         # Âncora: mandante favorito. Sem isso, 1X é aposta cega no empate.
-                        if p_home < 0.50:
+                        if p_home < 50.0:
                             continue
                         sw_lo, sw_hi = _DC_SWEET["1X"]
                         if not (sw_lo <= odd_mkt <= sw_hi):
                             continue
-                        _dc_label = f"🏠→🛡️ Mandante+Seguro (P_home={p_home:.0%})"
+                        _dc_label = f"🏠→🛡️ Mandante+Seguro (P_home={p_home:.1f}%)"
                     elif mercado == "X2":
                         # Âncora: visitante com força real. X2 com visitante fraco é puro DRAW.
-                        if p_away < 0.32:
+                        if p_away < 32.0:
                             continue
                         sw_lo, sw_hi = _DC_SWEET["X2"]
                         if not (sw_lo <= odd_mkt <= sw_hi):
                             continue
-                        _dc_label = f"✈️→🛡️ Visitante+Seguro (P_away={p_away:.0%})"
+                        _dc_label = f"✈️→🛡️ Visitante+Seguro (P_away={p_away:.1f}%)"
 
                     comp = comparar_com_mercado(prob_pct, odd_mkt, overround)
                     if "erro" in comp:
@@ -2532,6 +2581,17 @@ with tab_analise:
                     melhor_mo[fid] = c
             ranking_mo = sorted(melhor_mo.values(), key=lambda x: x["ev"], reverse=True)
 
+            # ── Kelly Portfólio: armazena total e reescala stakes ────────
+            _kelly_sum_mo = sum(p["kelly"] for p in ranking_mo)
+            st.session_state["_kelly_dia_mo"] = _kelly_sum_mo
+            _stk_mo_total = 0.0
+            if _fator_portfolio < 0.999:
+                for p in ranking_mo:
+                    p["stake"] = max(piso_kelly, round(p["kelly"] * banca_atual * _fator_portfolio, 2))
+            _stk_mo_total = sum(p["stake"] for p in ranking_mo)
+            st.session_state["_stake_dia_mo"] = _stk_mo_total
+            st.session_state["_n_picks_mo"]   = len(ranking_mo)
+
             if ranking_mo:
                 # Separa mercados diretos de DC por direção para display distinto
                 _ranking_direto = [p for p in ranking_mo if p.get("mercado") not in ("1X","X2","12")]
@@ -2547,6 +2607,14 @@ with tab_analise:
                     f"H1-HOME-Only · Phantom Draw EV>28% · Teto AWAY 22% · "
                     f"DC por direção: 1X âncora HOME>50%, X2 âncora AWAY>32% · "
                     f"Overround real por jogo · {len(candidatos_mo)} candidatos antes da dedup"
+                )
+                # Banner portfólio — esta aba
+                _pct_b_mo  = (_stk_mo_total / banca_atual * 100) if banca_atual > 0 else 0
+                _fator_str_mo = f" · escala {_fator_portfolio:.2f}×" if _fator_portfolio < 0.999 else " · Kelly individual"
+                st.info(
+                    f"💼 **Portfólio Resultados:** {len(ranking_mo)} picks · "
+                    f"R$ {_stk_mo_total:.2f} ({_pct_b_mo:.1f}% da banca){_fator_str_mo}  \n"
+                    f"📊 Veja aba Gols para total consolidado do dia"
                 )
 
                 _cor_mercado = {
