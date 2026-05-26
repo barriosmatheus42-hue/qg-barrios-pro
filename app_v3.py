@@ -15,21 +15,10 @@ Stack: Streamlit, motor.py, dados.py
 from __future__ import annotations
 
 import datetime as dt
-import importlib
 import json
-import sys
 import pandas as pd
 
 import streamlit as st
-
-# ── Força reimportação de dados.py a cada execução ───────────────────────────
-# Necessário para que mudanças em LIGAS_SUPORTADAS e constantes sejam
-# refletidas imediatamente após deploy no Streamlit Cloud, sem que o
-# Python sirva o módulo antigo do cache de sys.modules.
-if "dados" in sys.modules:
-    importlib.reload(sys.modules["dados"])
-if "motor" in sys.modules:
-    importlib.reload(sys.modules["motor"])
 
 from motor import (
     ParametrosLiga,
@@ -109,9 +98,16 @@ PESO_KELLY       = 0.15
 # =========================================================================
 # 2. INICIALIZAÇÃO DO MANAGER
 # =========================================================================
+# Cache key inclui o número de ligas: quando LIGAS_SUPORTADAS cresce (novas
+# ligas adicionadas), a key muda → @st.cache_resource descarta o objeto
+# antigo e cria um DadosManager novo com o código atualizado.
+# Isso evita que o manager "envelhecido" sirva LIGAS_SUPORTADAS velha mesmo
+# após deploy de novo código no Streamlit Cloud.
+_MANAGER_CACHE_KEY = f"manager-{len(LIGAS_SUPORTADAS)}-ligas"
+
 
 @st.cache_resource
-def get_manager() -> DadosManager:
+def get_manager(cache_key: str = _MANAGER_CACHE_KEY) -> DadosManager:  # noqa: ARG001
     return criar_dados_manager_de_secrets(st.secrets, diretorio_local=".")
 
 
