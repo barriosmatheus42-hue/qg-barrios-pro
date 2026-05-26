@@ -1275,22 +1275,11 @@ class DadosManager:
             else:
                 seasons = [season_europeia]
 
-            # Liga nunca baixada e nunca calibrada → skip (bootstrap separado).
-            # Evita gastar créditos em listas de ligas ainda inativas.
-            if not ids_cache and not has_params:
-                resultado_ligas.append({
-                    "league_id":    league_id,
-                    "nome":         LIGAS_SUPORTADAS.get(league_id, f"Liga {league_id}"),
-                    "n_novos_liga": 0,
-                    "n_cache_liga": 0,
-                    "n_api_liga":   0,
-                    "seasons": [
-                        {"season": s, "n_api": 0, "n_cache": 0, "n_novos": 0, "erro": None}
-                        for s in seasons
-                    ],
-                })
-                n_novos_total += 0
-                continue
+            # NOTA: removido o skip automático para ligas nunca calibradas.
+            # O skip causava bug: League One, Copa del Rey etc. retornavam 0 créditos
+            # mesmo tendo centenas de jogos na API — a lista de fixtures (1 crédito/chamada)
+            # é necessária para descobrir se a liga tem dados ou não.
+            # Ligas verdadeiramente inativas (n_api=0) ainda vão para "aguardando" no Passo 2.
 
             detalhes_seasons = []
             n_novos_liga = 0

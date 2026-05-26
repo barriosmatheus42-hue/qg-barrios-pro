@@ -1155,7 +1155,7 @@ for _rk, _rv in _risk_defaults.items():
 
 with st.sidebar:
     st.markdown("## 👑 QG Barrios PRO V3")
-    st.caption("Motor: Dixon-Coles (MLE) · v5-kelly-portfolio · fix-dc-escala · 64 ligas")
+    st.caption("Motor: Dixon-Coles (MLE) · v5-kelly-portfolio · fix-delta-bootstrap · 64 ligas")
 
     # ── Créditos API ─────────────────────────────────────────────────
     try:
