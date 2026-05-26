@@ -64,8 +64,9 @@ LIGAS_SUPORTADAS = {
     135: "Serie A",
     78:  "Bundesliga",
     61:  "Ligue 1",
-    # ── Segundas Divisões Europa ──────────────────────────────────────
+    # ── Segundas / Terceiras Divisões Europa ─────────────────────────
     40:  "Championship (Inglaterra)",
+    41:  "League One (Inglaterra)",      # 3ª divisão — jogos sexta/sábado/terça, dados excelentes
     79:  "2. Bundesliga",
     136: "Serie B (Itália)",
     141: "Segunda División (Espanha)",
@@ -91,6 +92,7 @@ LIGAS_SUPORTADAS = {
     218: "Bundesliga (Áustria)",
     207: "Super League (Suíça)",
     210: "HNL (Croácia)",
+    271: "Ligat ha'Al (Israel)",         # joga sextas/sábados — cobre dias sem Europa
     # ── Europeias de verão (ano-calendário) ───────────────────────────
     103: "Eliteserien (Noruega)",
     113: "Allsvenskan (Suécia)",
@@ -116,6 +118,7 @@ LIGAS_SUPORTADAS = {
     # ── Oceania / Oriente Médio / Ásia ───────────────────────────────
     188: "A-League (Austrália)",
     307: "Saudi Pro League",
+    435: "UAE Pro League",               # joga sextas/sábados — Oriente Médio, mercado crescente
     98:  "J1 League (Japão)",
     292: "K League 1 (Coreia do Sul)",
     169: "Super League (China)",
