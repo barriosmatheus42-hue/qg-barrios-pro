@@ -15,10 +15,21 @@ Stack: Streamlit, motor.py, dados.py
 from __future__ import annotations
 
 import datetime as dt
+import importlib
 import json
+import sys
 import pandas as pd
 
 import streamlit as st
+
+# ── Força reimportação de dados.py a cada execução ───────────────────────────
+# Necessário para que mudanças em LIGAS_SUPORTADAS e constantes sejam
+# refletidas imediatamente após deploy no Streamlit Cloud, sem que o
+# Python sirva o módulo antigo do cache de sys.modules.
+if "dados" in sys.modules:
+    importlib.reload(sys.modules["dados"])
+if "motor" in sys.modules:
+    importlib.reload(sys.modules["motor"])
 
 from motor import (
     ParametrosLiga,
