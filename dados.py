@@ -67,6 +67,7 @@ LIGAS_SUPORTADAS = {
     # ── Segundas Divisões Europa ──────────────────────────────────────
     40:  "Championship (Inglaterra)",
     41:  "League One (Inglaterra)",
+    42:  "League Two (Inglaterra)",
     79:  "2. Bundesliga",
     136: "Serie B (Itália)",
     141: "Segunda División (Espanha)",
@@ -83,9 +84,12 @@ LIGAS_SUPORTADAS = {
     48:  "League Cup (EFL)",
     # ── Outras Europeias (inverno) ────────────────────────────────────
     88:  "Eredivisie",
+    89:  "Eerste Divisie (Holanda)",
     94:  "Primeira Liga",
+    95:  "Segunda Liga (Portugal)",
     203: "Süper Lig",
     179: "Scottish Premiership",
+    180: "Scottish Championship",
     144: "Belgian Pro League",
     106: "Ekstraklasa (Polônia)",
     197: "Super League (Grécia)",
@@ -93,6 +97,10 @@ LIGAS_SUPORTADAS = {
     207: "Super League (Suíça)",
     210: "HNL (Croácia)",
     271: "Ligat ha'Al (Israel)",
+    235: "Russian Premier League",
+    283: "Liga I (Romênia)",
+    286: "Super Liga (Sérvia)",
+    345: "Czech Liga",
     # ── Europeias de verão (ano-calendário) ───────────────────────────
     103: "Eliteserien (Noruega)",
     113: "Allsvenskan (Suécia)",
