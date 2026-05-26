@@ -1281,7 +1281,18 @@ class DadosManager:
             if usar_ano_atual:
                 seasons = [ano_atual - 1, ano_atual]
             else:
-                seasons = [season_europeia]
+                # Para ligas europeias nunca calibradas (cache + params ambos vazios),
+                # inclui também a season anterior — espelha o Full Fetch Bootstrap de
+                # obter_params_liga (que faz season_anterior = season_principal - 1).
+                # Isso garante que o preview mostre os dados reais que a calibração usará,
+                # em vez de "sem dados API" quando season_atual tem poucos jogos finalizados
+                # (ex: liga com season 2025/26 acabando em maio, mas API retorna 0 FT por
+                # paginação ou timing — a season 2024/25 completa sempre tem dados).
+                _cache_vazio = not cache_liga.get("registros") and not ids_jsonbin
+                if _cache_vazio and not has_params:
+                    seasons = [season_europeia - 1, season_europeia]  # bootstrap: 2 seasons
+                else:
+                    seasons = [season_europeia]                        # delta normal: 1 season
 
             # NOTA: removido o skip automático para ligas nunca calibradas.
             # O skip causava bug: League One, Copa del Rey etc. retornavam 0 créditos
