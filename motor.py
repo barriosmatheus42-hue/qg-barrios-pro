@@ -828,13 +828,18 @@ def prever_jogo(
     """
     flags = []
 
-    if home_id not in params.times:
-        return {"erro": f"Time casa (id={home_id}) não está nos parâmetros da liga", "flags": ["TIME_DESCONHECIDO"]}
-    if away_id not in params.times:
-        return {"erro": f"Time fora (id={away_id}) não está nos parâmetros da liga", "flags": ["TIME_DESCONHECIDO"]}
-
-    th = params.times[home_id]
-    ta = params.times[away_id]
+    # Times desconhecidos → usa média da liga (alpha=1.0, beta=1.0) em vez de retornar erro.
+    # Garante análise para Copa Libertadores/Sudamericana/Copas onde times de ligas menores
+    # participam sem dados completos na calibração. cobertura_ok=False sinaliza ao usuário.
+    _avg = {"alpha": 1.0, "beta": 1.0, "n_jogos": 0}
+    th = params.times.get(home_id)
+    ta = params.times.get(away_id)
+    if th is None:
+        flags.append(f"TIME_CASA_DESCONHECIDO(id={home_id})")
+        th = _avg
+    if ta is None:
+        flags.append(f"TIME_FORA_DESCONHECIDO(id={away_id})")
+        ta = _avg
 
     # Cobertura
     n_h, n_a = th["n_jogos"], ta["n_jogos"]

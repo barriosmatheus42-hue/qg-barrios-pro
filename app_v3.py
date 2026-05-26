@@ -1154,7 +1154,7 @@ for _rk, _rv in _risk_defaults.items():
 
 with st.sidebar:
     st.markdown("## 👑 QG Barrios PRO V3")
-    st.caption("Motor: Dixon-Coles (MLE) · Sem incremental · v2-DC-por-direcao")
+    st.caption("Motor: Dixon-Coles (MLE) · v3-cal-ui-season-auto · fix-times-desconhecidos")
 
     # ── Créditos API ─────────────────────────────────────────────────
     try:
@@ -1229,7 +1229,8 @@ with st.sidebar:
     # ── Data e temporada ─────────────────────────────────────────────
     data_consulta = st.date_input("Data do Scanner", dt.date.today())
     data_str      = data_consulta.strftime("%Y-%m-%d")
-    season        = st.number_input("Temporada (ano)", value=detectar_temporada_atual(), step=1)
+    season        = detectar_temporada_atual()
+    st.caption(f"📅 Temporada detectada automaticamente: **{season}** (muda em julho/agosto)")
 
 
 # =========================================================================
@@ -1267,9 +1268,10 @@ with tab_calibracao:
 
     st.markdown(f"### Status das ligas ({_n_ligas} configuradas)")
     st.caption(
-        f"Calibração manual: clique 'Calibrar TODAS' segunda e quinta. "
-        f"Custo estimado por liga: ~{_custo_por_liga} créditos "
-        f"(histórico + xG blend peso={PESO_XG_PRODUCAO})."
+        f"🟢 **Fresca** = calibrada recentemente · "
+        f"🟡 **Velha** = precisa atualizar · "
+        f"❌ **Nunca calibrada** = ainda sem dados. "
+        f"xG blend peso={PESO_XG_PRODUCAO}."
     )
 
     # Tabela de status
@@ -1347,19 +1349,29 @@ with tab_calibracao:
 
     st.dataframe(rows_status, use_container_width=True, hide_index=True)
 
-    custo_total = _n_ligas * _custo_por_liga
+    # ── Resumo de status (sem susto de custo total de bootstrap) ─────
+    _n_frescas    = sum(1 for r in rows_status if r["Status"].startswith("🟢"))
+    _n_velhas     = sum(1 for r in rows_status if r["Status"].startswith("🟡"))
+    _n_congeladas = sum(1 for r in rows_status if r["Status"].startswith(("❄️", "⏸️")))
+    _n_nunca      = sum(1 for r in rows_status if r["Status"].startswith("❌"))
+    _partes_res = []
+    if _n_frescas:    _partes_res.append(f"🟢 {_n_frescas} frescas")
+    if _n_velhas:     _partes_res.append(f"🟡 {_n_velhas} velhas")
+    if _n_congeladas: _partes_res.append(f"⏸️ {_n_congeladas} congeladas/finalizadas")
+    if _n_nunca:      _partes_res.append(f"❌ {_n_nunca} nunca calibradas")
     st.info(
-        f"Custo estimado para calibrar todas as {_n_ligas} ligas: "
-        f"~{custo_total} créditos (inclui xG via /fixtures/statistics, peso={PESO_XG_PRODUCAO})."
+        "**Resumo:** " + " · ".join(_partes_res) + "  \n"
+        "💡 **Custo real de atualização** = apenas os jogos novos × 2 créditos (delta fetch) — "
+        "não o bootstrap completo. Use **Passo 1** abaixo para ver o custo exato antes de gastar."
     )
 
     # ── Trava de Custo — Calibrar TODAS (2 fases) ────────────────────
-    st.markdown("#### 🔄 Calibração com Delta Fetch")
+    st.markdown("#### 🔄 Atualizar Todas as Ligas")
     st.caption(
-        "**Passo 1** analisa quantos jogos novos existem desde o último download "
-        f"(custo: ~{_n_ligas * 2} créditos para as listas). "
-        "**Passo 2** confirma o download de xG e executa o MLE. "
-        "Nenhum crédito de xG é gasto antes da sua confirmação."
+        f"**Passo 1** — lista fixtures novas ({_n_ligas} ligas × 2 = ~{_n_ligas * 2} créditos). "
+        "Mostra quantos jogos novos há por liga e o custo exato de xG. "
+        "**Passo 2** — confirma e executa: baixa xG dos jogos novos + recalibra MLE. "
+        "⚠️ Ligas inativas (0 novos jogos) são marcadas como frescas **sem gastar créditos**."
     )
 
     # ── FASE 1: botão de análise ──────────────────────────────────────
