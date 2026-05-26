@@ -1710,11 +1710,39 @@ with tab_calibracao:
                 _custo_l = _prev_lote["custo_estimado_creditos"]
                 _ok_l    = _custo_l <= saldo - SALDO_MINIMO_EMERGENCIA
 
-                if _n_tot_l == 0:
+                # Detecta ligas com erro de API (n_api=0 + erro != None)
+                _ligas_com_erro = [
+                    _li for _li in _prev_lote["ligas"]
+                    if any(s.get("erro") for s in _li.get("seasons", []))
+                ]
+                _ligas_nunca_cal_sem_api = [
+                    _li for _li in _prev_lote["ligas"]
+                    if _li["n_novos_liga"] == 0
+                    and sum(s.get("n_api", 0) for s in _li.get("seasons", [])) == 0
+                    and not any(s.get("erro") for s in _li.get("seasons", []))
+                ]
+                if _ligas_com_erro:
+                    st.error(
+                        f"⚠️ **{len(_ligas_com_erro)} liga(s) com erro de API** — "
+                        "verifique se seu plano API Football cobre essas ligas:\n"
+                        + "\n".join(f"• {_li['nome']}: " + "; ".join(
+                            s["erro"] for s in _li.get("seasons", []) if s.get("erro")
+                        ) for _li in _ligas_com_erro)
+                    )
+                if _ligas_nunca_cal_sem_api:
+                    st.warning(
+                        f"⏳ **{len(_ligas_nunca_cal_sem_api)} liga(s) sem dados na API** "
+                        "(temporada ainda não iniciou ou liga não está no seu plano):\n"
+                        + "\n".join(f"• {_li['nome']}" for _li in _ligas_nunca_cal_sem_api)
+                    )
+
+                if _n_tot_l == 0 and not _ligas_com_erro and not _ligas_nunca_cal_sem_api:
                     st.success(
                         f"✅ **Cache 100% atualizado** para as {len(ligas_lote_sel)} liga(s). "
                         "Pode calibrar sem gastar créditos de xG."
                     )
+                elif _n_tot_l == 0 and (_ligas_com_erro or _ligas_nunca_cal_sem_api):
+                    st.info("ℹ️ Nenhum jogo novo encontrado — veja erros acima para ligas problemáticas.")
                 elif _ok_l:
                     st.warning(
                         f"📊 **{_n_tot_l} fixtures novos** · "
@@ -1730,12 +1758,25 @@ with tab_calibracao:
                 # Tabela por liga
                 _rows_lote = []
                 for _li in _prev_lote["ligas"]:
-                    _nn = _li["n_novos_liga"]
+                    _nn    = _li["n_novos_liga"]
+                    _n_api = sum(s.get("n_api", 0) for s in _li.get("seasons", []))
+                    _erros = [s["erro"] for s in _li.get("seasons", []) if s.get("erro")]
+                    if _erros:
+                        _status = f"❌ ERRO API: {_erros[0][:60]}"
+                    elif _nn == 0 and _n_api == 0:
+                        _status = "⏳ sem dados API"
+                    elif _nn == 0:
+                        _status = "✅ atualizado"
+                    elif _nn > 150:
+                        _status = "🔴 bootstrap (~" + str(_nn) + " jogos)"
+                    else:
+                        _status = "🟡 atualizar (" + str(_nn) + " novos)"
                     _rows_lote.append({
                         "Liga":           _li["nome"],
+                        "n_api":          _n_api,
                         "Novos fixtures": _nn,
                         "Créditos xG":    _nn * CUSTO_ESTIMADO_XG_FIXTURE,
-                        "Status":         "✅" if _nn == 0 else ("🔴 bootstrap" if _nn > 150 else "🟡"),
+                        "Status":         _status,
                     })
                 with st.expander("📋 Detalhes por liga"):
                     st.dataframe(_rows_lote, use_container_width=True, hide_index=True)
