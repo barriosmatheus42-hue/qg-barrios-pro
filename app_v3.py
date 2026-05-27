@@ -98,24 +98,25 @@ PESO_KELLY       = 0.15
 # =========================================================================
 # 2. INICIALIZAÇÃO DO MANAGER
 # =========================================================================
-# Cache key inclui: nº de ligas + backend (gist|jsonbin).
-# Muda automaticamente quando LIGAS_SUPORTADAS cresce OU quando
-# as credenciais de persistência mudam (ex: JSONBin → Gist),
-# forçando um novo DadosManager com o cliente correto.
-_backend_tipo = (
+# Cache key usa o GIST_ID real (ou bin_id) para garantir miss automático
+# quando as credenciais mudam. Assim nunca fica preso no manager antigo.
+_backend_tipo  = (
     "gist" if (st.secrets.get("GITHUB_TOKEN") and st.secrets.get("GIST_ID"))
     else "jsonbin"
 )
-_MANAGER_CACHE_KEY = f"manager-{len(LIGAS_SUPORTADAS)}-ligas-{_backend_tipo}"
+_cache_gist_id = str(st.secrets.get("GIST_ID", ""))
+_cache_bin_id  = str(st.secrets.get("JSONBIN_BIN_ID", ""))
+_cache_storage_id = _cache_gist_id or _cache_bin_id  # identifica o storage atual
 
 
 @st.cache_resource
-def get_manager(cache_key: str = _MANAGER_CACHE_KEY) -> DadosManager:  # noqa: ARG001
+def get_manager(n_ligas: int, storage_id: str) -> DadosManager:  # noqa: ARG001
+    """Cache keyed on nº de ligas + storage ID — miss automático ao trocar secrets."""
     return criar_dados_manager_de_secrets(st.secrets, diretorio_local=".")
 
 
 try:
-    dm = get_manager()
+    dm = get_manager(len(LIGAS_SUPORTADAS), _cache_storage_id)
 except Exception as e:
     st.error(f"Falha ao inicializar manager: {e}")
     st.stop()
@@ -1246,6 +1247,13 @@ with st.sidebar:
         else:
             _err_msg = getattr(dm, "ultimo_save_erro", "") or "erro desconhecido"
             st.error(f"❌ Falha ao sincronizar: `{_err_msg}`")
+
+    # ── Limpar cache (força recriação do manager com secrets atuais) ─
+    if st.button("🔄 Reiniciar Manager", use_container_width=True,
+                 help="Força recriação do DadosManager com os secrets atuais. Use após trocar GIST_ID."):
+        get_manager.clear()
+        st.session_state.clear()
+        st.rerun()
 
     # ── Teste de conexão Gist (diagnóstico) ──────────────────────────
     if st.button("🔍 Testar Conexão Cloud", use_container_width=True,
