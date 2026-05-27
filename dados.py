@@ -742,9 +742,20 @@ class GistClient:
         return {}
 
     def escrever(self, dados: dict, timeout: int = 30) -> bool:
-        payload = {"files": {self.FILENAME: {"content": json.dumps(dados)}}}
+        # ensure_ascii=True: converte acentos/Unicode para \uXXXX
+        # evita ConnectionResetError que ocorre quando json=payload
+        # re-serializa strings com caracteres não-ASCII (ex: nomes de times).
         try:
-            res = requests.patch(self.url, headers=self.headers, json=payload, timeout=timeout)
+            content_str = json.dumps(dados, ensure_ascii=True)
+            body = json.dumps(
+                {"files": {self.FILENAME: {"content": content_str}}}
+            ).encode("utf-8")
+        except Exception as e:
+            log.warning(f"Gist: erro ao serializar payload: {e}")
+            return False
+        h = {**self.headers, "Content-Type": "application/json"}
+        try:
+            res = requests.patch(self.url, headers=h, data=body, timeout=timeout)
             if res.status_code == 200:
                 return True
             log.warning(f"Gist escrever: HTTP {res.status_code} — {res.text[:200]}")
@@ -922,7 +933,10 @@ class DadosManager:
 
         params_nuvem: dict = {}
         for lid_str, params_d in (b.params_ligas or {}).items():
-            p = dict(params_d)
+            # nomes_times: dict {team_id: "Nome do Time"} — só para exibição na UI.
+            # Não é necessário para previsões e contém caracteres especiais (acentos)
+            # que causam ConnectionResetError no Gist com json=. Removido do cloud.
+            p = {k: v for k, v in params_d.items() if k != "nomes_times"}
             if p.get("calibradores"):
                 cals_compact: dict = {}
                 for mercado, cal_d in p["calibradores"].items():
