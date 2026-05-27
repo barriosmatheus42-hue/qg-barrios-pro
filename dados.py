@@ -693,6 +693,67 @@ class JSONBinClient:
             return False
 
 
+class GistClient:
+    """
+    Backend de persistência via GitHub Gist.
+
+    Vantagens sobre JSONBin free:
+    - Limite 10 MB por arquivo (vs 100 KB no JSONBin free)
+    - 5.000 req/hora (vs poucos/dia no JSONBin free)
+    - Gratuito sem upgrade
+    - Integra ao GitHub que o projeto já usa
+
+    Configuração (Streamlit Cloud secrets):
+        GITHUB_TOKEN = "ghp_..."    # Personal Access Token com escopo 'gist'
+        GIST_ID      = "abc123..."  # ID do Gist criado via setup_gist.py
+
+    Interface idêntica ao JSONBinClient (ler/escrever) — DadosManager
+    usa qualquer um dos dois sem modificação.
+    """
+
+    FILENAME = "banco_barrios.json"
+
+    def __init__(self, token: str, gist_id: str):
+        if not token or not gist_id:
+            raise ValueError("GITHUB_TOKEN ou GIST_ID vazios")
+        self.token   = token
+        self.gist_id = gist_id
+        self.url     = f"https://api.github.com/gists/{gist_id}"
+        self.headers = {
+            "Authorization": f"token {token}",
+            "Accept":        "application/vnd.github.v3+json",
+            "Content-Type":  "application/json",
+        }
+
+    def ler(self, timeout: int = 15) -> dict:
+        try:
+            res = requests.get(self.url, headers=self.headers, timeout=timeout)
+            if res.status_code == 200:
+                conteudo = (
+                    res.json()
+                    .get("files", {})
+                    .get(self.FILENAME, {})
+                    .get("content", "{}")
+                )
+                return json.loads(conteudo) or {}
+            log.warning(f"Gist ler: HTTP {res.status_code} — {res.text[:200]}")
+        except Exception as e:
+            log.warning(f"Falha ao ler Gist: {e}")
+        return {}
+
+    def escrever(self, dados: dict, timeout: int = 30) -> bool:
+        payload = {"files": {self.FILENAME: {"content": json.dumps(dados)}}}
+        try:
+            res = requests.patch(self.url, headers=self.headers, json=payload, timeout=timeout)
+            if res.status_code == 200:
+                return True
+            log.warning(f"Gist escrever: HTTP {res.status_code} — {res.text[:200]}")
+            return False
+        except requests.RequestException as e:
+            log.warning(f"Falha ao escrever Gist: {e}")
+            return False
+
+
 # =========================================================================
 # 5. MANAGER PRINCIPAL (orquestrador)
 # =========================================================================
@@ -766,12 +827,17 @@ class DadosManager:
     def __init__(
         self,
         api_key: str,
-        jsonbin_key: str,
-        jsonbin_id: str,
+        jsonbin_key: str = "",
+        jsonbin_id: str = "",
         diretorio_local: str = ".",
+        storage_client=None,   # GistClient ou JSONBinClient (prioridade sobre key/id)
     ):
         self.api = ApiSportsClient(api_key)
-        self.jsonbin = JSONBinClient(jsonbin_key, jsonbin_id)
+        # Prioridade: storage_client injetado → JSONBin por key/id
+        if storage_client is not None:
+            self.jsonbin = storage_client
+        else:
+            self.jsonbin = JSONBinClient(jsonbin_key, jsonbin_id)
         self.dir = Path(diretorio_local)
         self._banco: Optional[BancoQG] = None
         # None = nenhum save tentado nesta sessão; True = último OK; False = último falhou
@@ -1446,21 +1512,44 @@ def criar_dados_manager_de_secrets(secrets_dict: dict, diretorio_local: str = ".
     """
     Constrói DadosManager a partir de um dict tipo st.secrets.
 
-    Espera as chaves:
-        - API_KEY_PRO (ou API_SPORTS_KEY)
-        - JSONBIN_KEY
-        - JSONBIN_BIN_ID
+    Backends suportados (em ordem de prioridade):
+
+    1. GitHub Gist (recomendado — 10 MB grátis, sem limite de tamanho):
+        GITHUB_TOKEN = "ghp_..."    # PAT com escopo 'gist'
+        GIST_ID      = "abc123..."  # ID do Gist (criado via setup_gist.py)
+
+    2. JSONBin (legado — plano free tem limite de 100 KB):
+        JSONBIN_KEY    = "$2a$..."
+        JSONBIN_BIN_ID = "64abc..."
+
+    API-Sports (obrigatório em ambos os casos):
+        API_KEY_PRO = "..."   (ou API_SPORTS_KEY)
     """
     api_key = secrets_dict.get("API_KEY_PRO") or secrets_dict.get("API_SPORTS_KEY")
-    jsonbin_key = secrets_dict.get("JSONBIN_KEY")
-    jsonbin_id = secrets_dict.get("JSONBIN_BIN_ID")
-
     if not api_key:
         raise ValueError("Falta API_KEY_PRO (ou API_SPORTS_KEY) em secrets")
-    if not jsonbin_key or not jsonbin_id:
-        raise ValueError("Faltam JSONBIN_KEY e/ou JSONBIN_BIN_ID em secrets")
 
-    return DadosManager(api_key, jsonbin_key, jsonbin_id, diretorio_local)
+    # GitHub Gist tem prioridade — sem limite de tamanho
+    github_token = secrets_dict.get("GITHUB_TOKEN", "")
+    gist_id      = secrets_dict.get("GIST_ID", "")
+    if github_token and gist_id:
+        log.info("Persistência: GitHub Gist (sem limite de tamanho)")
+        client = GistClient(github_token, gist_id)
+        return DadosManager(api_key, storage_client=client,
+                            diretorio_local=diretorio_local)
+
+    # Fallback: JSONBin (plano free limitado a 100 KB)
+    jsonbin_key = secrets_dict.get("JSONBIN_KEY", "")
+    jsonbin_id  = secrets_dict.get("JSONBIN_BIN_ID", "")
+    if jsonbin_key and jsonbin_id:
+        log.info("Persistência: JSONBin (plano free — limite 100 KB)")
+        return DadosManager(api_key, jsonbin_key, jsonbin_id, diretorio_local)
+
+    raise ValueError(
+        "Falta configuração de persistência em secrets. "
+        "Defina GITHUB_TOKEN + GIST_ID (recomendado) "
+        "ou JSONBIN_KEY + JSONBIN_BIN_ID (legado)."
+    )
 
 
 def criar_dados_manager_de_env(diretorio_local: str = ".") -> DadosManager:
