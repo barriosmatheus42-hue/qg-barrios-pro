@@ -1223,13 +1223,42 @@ with st.sidebar:
         help="Sincroniza banca, calibrações e picks com o cloud imediatamente.",
     ):
         with st.spinner("Sincronizando com cloud..."):
-            _save_ok = dm.salvar_banco(banco)
+            try:
+                _save_ok = dm.salvar_banco(banco)
+            except Exception as _exc_save:
+                _save_ok = False
+                dm.ultimo_save_jsonbin_ok = False
+                dm.ultimo_save_erro = f"{type(_exc_save).__name__}: {_exc_save}"
         if _save_ok:
             st.toast("✅ Cloud sincronizado com sucesso!", icon="☁️")
             st.rerun()
         else:
-            _err_msg = getattr(dm, "ultimo_save_erro", "") or "verifique a conexão"
-            st.error(f"❌ Falha ao sincronizar: {_err_msg}")
+            _err_msg = getattr(dm, "ultimo_save_erro", "") or "erro desconhecido"
+            st.error(f"❌ Falha ao sincronizar: `{_err_msg}`")
+
+    # ── Teste de conexão Gist (diagnóstico) ──────────────────────────
+    if st.button("🔍 Testar Conexão Cloud", use_container_width=True,
+                 help="Envia payload mínimo ao cloud para diagnosticar falhas de rede/auth."):
+        import json as _json
+        _client = getattr(dm, "jsonbin", None)
+        if _client is None:
+            st.error("❌ Sem client de cloud configurado.")
+        else:
+            _url    = getattr(_client, "url", "?")
+            _hdrs   = getattr(_client, "headers", {})
+            _fname  = getattr(_client, "FILENAME", "banco_barrios.json")
+            st.caption(f"URL: `{_url}`")
+            with st.spinner("Testando..."):
+                try:
+                    import requests as _req
+                    _tb = _json.dumps({"files": {_fname: {"content": '{"_ping":true}'}}}).encode("utf-8")
+                    _r  = _req.patch(_url, headers=_hdrs, data=_tb, timeout=15)
+                    if _r.status_code == 200:
+                        st.success(f"✅ HTTP {_r.status_code} — Gist OK! O save deveria funcionar.")
+                    else:
+                        st.error(f"❌ HTTP {_r.status_code}: {_r.text[:300]}")
+                except Exception as _e:
+                    st.error(f"❌ Exceção: `{type(_e).__name__}: {_e}`")
 
     st.divider()
 
