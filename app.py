@@ -1251,6 +1251,14 @@ with st.sidebar:
     if st.button("🔍 Testar Conexão Cloud", use_container_width=True,
                  help="Envia payload mínimo ao cloud para diagnosticar falhas de rede/auth."):
         import json as _json
+        # Mostra o que o app lê dos secrets (sem expor valores completos)
+        _gh_tok = st.secrets.get("GITHUB_TOKEN", "")
+        _gh_id  = st.secrets.get("GIST_ID", "")
+        st.write(f"**Secrets lidos:**")
+        st.write(f"- GITHUB_TOKEN: `{'✅ presente (' + _gh_tok[:8] + '...)' if _gh_tok else '❌ AUSENTE'}`")
+        st.write(f"- GIST_ID: `{'✅ ' + _gh_id if _gh_id else '❌ AUSENTE'}`")
+        st.write(f"- Backend detectado: `{_backend_tipo}`")
+        st.divider()
         _client = getattr(dm, "jsonbin", None)
         if _client is None:
             st.error("❌ Sem client de cloud configurado.")
@@ -1258,14 +1266,14 @@ with st.sidebar:
             _url    = getattr(_client, "url", "?")
             _hdrs   = getattr(_client, "headers", {})
             _fname  = getattr(_client, "FILENAME", "banco_barrios.json")
-            st.caption(f"URL: `{_url}`")
-            with st.spinner("Testando..."):
+            st.caption(f"URL usada: `{_url}`")
+            with st.spinner("Testando PATCH..."):
                 try:
                     import requests as _req
                     _tb = _json.dumps({"files": {_fname: {"content": '{"_ping":true}'}}}).encode("utf-8")
                     _r  = _req.patch(_url, headers=_hdrs, data=_tb, timeout=15)
                     if _r.status_code == 200:
-                        st.success(f"✅ HTTP {_r.status_code} — Gist OK! O save deveria funcionar.")
+                        st.success(f"✅ HTTP {_r.status_code} — Cloud OK!")
                     else:
                         st.error(f"❌ HTTP {_r.status_code}: {_r.text[:300]}")
                 except Exception as _e:
