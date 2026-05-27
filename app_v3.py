@@ -98,12 +98,15 @@ PESO_KELLY       = 0.15
 # =========================================================================
 # 2. INICIALIZAÇÃO DO MANAGER
 # =========================================================================
-# Cache key inclui o número de ligas: quando LIGAS_SUPORTADAS cresce (novas
-# ligas adicionadas), a key muda → @st.cache_resource descarta o objeto
-# antigo e cria um DadosManager novo com o código atualizado.
-# Isso evita que o manager "envelhecido" sirva LIGAS_SUPORTADAS velha mesmo
-# após deploy de novo código no Streamlit Cloud.
-_MANAGER_CACHE_KEY = f"manager-{len(LIGAS_SUPORTADAS)}-ligas"
+# Cache key inclui: nº de ligas + backend (gist|jsonbin).
+# Muda automaticamente quando LIGAS_SUPORTADAS cresce OU quando
+# as credenciais de persistência mudam (ex: JSONBin → Gist),
+# forçando um novo DadosManager com o cliente correto.
+_backend_tipo = (
+    "gist" if (st.secrets.get("GITHUB_TOKEN") and st.secrets.get("GIST_ID"))
+    else "jsonbin"
+)
+_MANAGER_CACHE_KEY = f"manager-{len(LIGAS_SUPORTADAS)}-ligas-{_backend_tipo}"
 
 
 @st.cache_resource
@@ -1162,7 +1165,8 @@ for _rk, _rv in _risk_defaults.items():
 
 with st.sidebar:
     st.markdown("## 👑 QG Barrios PRO V3")
-    st.caption("Motor: Dixon-Coles (MLE) · v5-kelly-portfolio · fix-delta-bootstrap · 72 ligas")
+    _backend_label = "☁️ Gist" if _backend_tipo == "gist" else "⚠️ JSONBin"
+    st.caption(f"Motor: Dixon-Coles (MLE) · v5-kelly-portfolio · 72 ligas · {_backend_label}")
 
     # ── Créditos API ─────────────────────────────────────────────────
     try:
