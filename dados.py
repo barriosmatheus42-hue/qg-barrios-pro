@@ -716,9 +716,10 @@ class GistClient:
     def __init__(self, token: str, gist_id: str):
         if not token or not gist_id:
             raise ValueError("GITHUB_TOKEN ou GIST_ID vazios")
-        self.token   = token
-        self.gist_id = gist_id
-        self.url     = f"https://api.github.com/gists/{gist_id}"
+        self.token      = token
+        self.gist_id    = gist_id
+        self.url        = f"https://api.github.com/gists/{gist_id}"
+        self.last_error = ""   # último erro de escrever() — "" = sem erro
         self.headers = {
             "Authorization": f"token {token}",
             "Accept":        "application/vnd.github.v3+json",
@@ -745,12 +746,14 @@ class GistClient:
         # ensure_ascii=True: converte acentos/Unicode para \uXXXX
         # evita ConnectionResetError que ocorre quando json=payload
         # re-serializa strings com caracteres não-ASCII (ex: nomes de times).
+        self.last_error = ""
         try:
             content_str = json.dumps(dados, ensure_ascii=True)
             body = json.dumps(
                 {"files": {self.FILENAME: {"content": content_str}}}
             ).encode("utf-8")
         except Exception as e:
+            self.last_error = f"Serialização: {e}"
             log.warning(f"Gist: erro ao serializar payload: {e}")
             return False
         h = {**self.headers, "Content-Type": "application/json"}
@@ -758,10 +761,13 @@ class GistClient:
             res = requests.patch(self.url, headers=h, data=body, timeout=timeout)
             if res.status_code == 200:
                 return True
+            self.last_error = f"HTTP {res.status_code}: {res.text[:200]}"
             log.warning(f"Gist escrever: HTTP {res.status_code} — {res.text[:200]}")
             return False
-        except requests.RequestException as e:
-            log.warning(f"Falha ao escrever Gist: {e}")
+        except Exception as e:
+            # Captura ConnectionResetError, ProtocolError, RequestException, etc.
+            self.last_error = f"{type(e).__name__}: {e}"
+            log.warning(f"Falha ao escrever Gist ({type(e).__name__}): {e}")
             return False
 
 
@@ -853,6 +859,8 @@ class DadosManager:
         self._banco: Optional[BancoQG] = None
         # None = nenhum save tentado nesta sessão; True = último OK; False = último falhou
         self.ultimo_save_jsonbin_ok: Optional[bool] = None
+        # Mensagem do último erro de save (vazio quando OK ou não salvo ainda)
+        self.ultimo_save_erro: str = ""
 
     # ----------------------------------------------------------------
     # Banco completo
@@ -966,10 +974,11 @@ class DadosManager:
         ok = self.jsonbin.escrever(nuvem)
 
         # Retry com payload mínimo se primeiro attempt falhar (fallback de segurança
-        # para JSONBin planos free com limite 512KB — params_ligas sem calibradores).
+        # para planos free com limite de tamanho — params_ligas sem calibradores).
         if not ok:
+            _err1 = getattr(self.jsonbin, "last_error", "")
             log.warning(
-                "JSONBin: tentativa 1 falhou. Retentando sem calibradores "
+                f"Cloud: tentativa 1 falhou ({_err1}). Retentando sem calibradores "
                 "(payload mínimo: banca + picks + times dict + calibrado_em)."
             )
             params_min: dict = {}
@@ -987,12 +996,16 @@ class DadosManager:
             }
             ok = self.jsonbin.escrever(nuvem_min)
             if ok:
-                log.info("JSONBin: retry mínimo OK. Calibradores não persistidos na nuvem.")
+                log.info("Cloud: retry mínimo OK. Calibradores não persistidos na nuvem.")
             else:
+                _err2 = getattr(self.jsonbin, "last_error", "")
+                self.ultimo_save_erro = _err2 or _err1 or "erro desconhecido"
                 log.error(
-                    "CRÍTICO — JSONBin: ambas tentativas falharam. "
+                    f"CRÍTICO — Cloud: ambas tentativas falharam ({self.ultimo_save_erro}). "
                     "Params calibrados serão perdidos no próximo restart do Streamlit Cloud."
                 )
+        else:
+            self.ultimo_save_erro = ""
 
         self.ultimo_save_jsonbin_ok = ok
         self._banco = b

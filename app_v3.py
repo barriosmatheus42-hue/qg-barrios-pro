@@ -1191,7 +1191,7 @@ with st.sidebar:
         help="Informe o saldo atual da sua conta. Salvo automaticamente no cloud ao alterar.",
     )
     st.session_state["_saldo_atual"] = banca_atual
-    # Persiste no JSONBin para sobreviver ao reload/restart do Streamlit Cloud
+    # Persiste no cloud para sobreviver ao reload/restart do Streamlit Cloud
     if abs(banca_atual - float(banco.banca_inicial or 0.0)) > 0.01:
         banco.banca_inicial = banca_atual
         st.session_state["banco"] = banco
@@ -1204,12 +1204,14 @@ with st.sidebar:
             st.warning(f"⚠️ Erro ao salvar banca: {_e}")
 
     # ── Status de sincronização com o cloud ──────────────────────────────
-    _cloud_ok = dm.ultimo_save_jsonbin_ok
+    _cloud_ok  = dm.ultimo_save_jsonbin_ok
+    _cloud_err = getattr(dm, "ultimo_save_erro", "")
     if _cloud_ok is False:
+        _msg_erro = f"\n\n`{_cloud_err}`" if _cloud_err else ""
         st.error(
             "☁️❌ **Última gravação no cloud falhou.**\n\n"
             "Dados desta sessão podem ser perdidos ao reiniciar. "
-            "Use o botão abaixo para tentar novamente."
+            "Use o botão abaixo para tentar novamente." + _msg_erro
         )
     elif _cloud_ok is None:
         st.caption("☁️⏳ Não salvo nesta sessão — use o botão abaixo para sincronizar.")
@@ -1218,7 +1220,7 @@ with st.sidebar:
     if st.button(
         "💾 Salvar no Cloud" if _cloud_ok else "💾 Forçar Salvar no Cloud",
         use_container_width=True,
-        help="Sincroniza banca, calibrações e picks com o JSONBin imediatamente.",
+        help="Sincroniza banca, calibrações e picks com o cloud imediatamente.",
     ):
         with st.spinner("Sincronizando com cloud..."):
             _save_ok = dm.salvar_banco(banco)
@@ -1226,7 +1228,8 @@ with st.sidebar:
             st.toast("✅ Cloud sincronizado com sucesso!", icon="☁️")
             st.rerun()
         else:
-            st.error("❌ Falha ao sincronizar. Verifique conexão ou quota do JSONBin.")
+            _err_msg = getattr(dm, "ultimo_save_erro", "") or "verifique a conexão"
+            st.error(f"❌ Falha ao sincronizar: {_err_msg}")
 
     st.divider()
 
@@ -1969,10 +1972,11 @@ with tab_analise:
                         if dm.ultimo_save_jsonbin_ok:
                             st.success(f"{l_nome} calibrada e salva na nuvem! Recarregando...")
                         else:
+                            _ce = getattr(dm, "ultimo_save_erro", "") or "verifique conexão"
                             st.warning(
-                                f"⚠️ {l_nome} calibrada mas **falhou ao salvar no JSONBin**. "
+                                f"⚠️ {l_nome} calibrada mas **falhou ao salvar no cloud** ({_ce}). "
                                 "Os params estão no arquivo local — serão perdidos no próximo restart. "
-                                "Verifique a quota do JSONBin ou tente novamente."
+                                "Clique em 'Forçar Salvar no Cloud' no sidebar para tentar novamente."
                             )
                         st.session_state["banco"] = dm.carregar_banco(força_recarregar=True)
                         st.rerun()
