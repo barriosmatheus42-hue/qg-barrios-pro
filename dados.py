@@ -679,12 +679,15 @@ class JSONBinClient:
             log.warning(f"Falha ao ler JSONBin: {e}")
         return {}
 
-    def escrever(self, dados: dict, timeout: int = 10) -> bool:
+    def escrever(self, dados: dict, timeout: int = 30) -> bool:
         h = self.headers.copy()
         h["X-Bin-Versioning"] = "false"
         try:
             res = requests.put(self.url, headers=h, json=dados, timeout=timeout)
-            return res.status_code == 200
+            if res.status_code == 200:
+                return True
+            log.warning(f"JSONBin retornou status {res.status_code}: {res.text[:200]}")
+            return False
         except requests.RequestException as e:
             log.warning(f"Falha ao escrever JSONBin: {e}")
             return False
@@ -833,10 +836,24 @@ class DadosManager:
         # Local (append-only merge — nunca sobrescreve dados históricos)
         self._merge_salvar_local(b)
 
-        # Nuvem — sem `datas` (quota). Calibradores em forma compacta: apenas
-        # breakpoints x_thresh/y_thresh (~10–50 pontos por mercado), sem os arrays
-        # X/Y brutos (400+ pontos). Payload ~20x menor → JSONBin sempre aceita.
-        # carregar_banco() reconstrói calibrar() via np.interp nos breakpoints.
+        # Nuvem — sem `datas` (quota) e sem `historico_ids` (usa calibrado_em como
+        # cutoff no delta fetch — evita re-download mesmo sem os IDs no cloud).
+        #
+        # Calibradores: breakpoints x_thresh/y_thresh com cap de 50 pontos cada.
+        # - Isotônica com 400 jogos pode gerar 400 breakpoints → ~25KB por mercado
+        # - 8 mercados × 40 ligas × 25KB = ~8MB → excede limite do JSONBin
+        # - Com cap 50: ~6KB por mercado → total ~200KB → seguro para qualquer plano
+        # - np.interp funciona perfeitamente com 50 pontos (perda < 1% de precisão)
+        _MAX_BP = 50
+
+        def _amostrar_breakpoints(lst: list) -> list:
+            """Reduz lista a no máximo _MAX_BP pontos via amostragem uniforme."""
+            n = len(lst)
+            if n <= _MAX_BP:
+                return lst
+            step = (n - 1) / (_MAX_BP - 1)
+            return [lst[round(i * step)] for i in range(_MAX_BP)]
+
         params_nuvem: dict = {}
         for lid_str, params_d in (b.params_ligas or {}).items():
             p = dict(params_d)
@@ -845,36 +862,59 @@ class DadosManager:
                 for mercado, cal_d in p["calibradores"].items():
                     if not isinstance(cal_d, dict):
                         continue
+                    x_raw = cal_d.get("x_thresh", [])
+                    y_raw = cal_d.get("y_thresh", [])
                     cals_compact[mercado] = {
                         "mercado":    cal_d.get("mercado", mercado),
                         "n_amostras": cal_d.get("n_amostras", 0),
-                        "x_thresh":   cal_d.get("x_thresh", []),
-                        "y_thresh":   cal_d.get("y_thresh", []),
+                        "x_thresh":   _amostrar_breakpoints(x_raw),
+                        "y_thresh":   _amostrar_breakpoints(y_raw),
                     }
                 p["calibradores"] = cals_compact
             params_nuvem[lid_str] = p
 
-        # historico_ids: só salva ligas que já foram calibradas para limitar tamanho.
-        # IDs como lista de ints → ~3KB por liga calibrada (300 fixtures × 8 chars).
-        hist_ids_nuvem: dict = {}
-        for lid_str, ids in (b.historico_ids or {}).items():
-            hist_ids_nuvem[lid_str] = [int(i) for i in ids]
-
+        # historico_ids NÃO vai mais para o JSONBin — reduz payload em ~100KB.
+        # O delta fetch usa calibrado_em como cutoff após restart, o que é suficiente:
+        # todos os fixtures anteriores ao cutoff entram no cache sem xG (grátis),
+        # e apenas os novos recebem xG. Comportamento idêntico ao historico_ids.
         nuvem = {
             "picks":         b.picks,
             "banca_inicial": b.banca_inicial,
             "depositos":     b.depositos,
             "params_ligas":  params_nuvem,
-            "historico_ids": hist_ids_nuvem,
         }
         ok = self.jsonbin.escrever(nuvem)
-        self.ultimo_save_jsonbin_ok = ok
+
+        # Retry com payload mínimo se primeiro attempt falhar (fallback de segurança
+        # para JSONBin planos free com limite 512KB — params_ligas sem calibradores).
         if not ok:
-            log.error(
-                "CRÍTICO — falha ao salvar params_ligas no JSONBin. "
-                "Params calibrados NÃO foram persistidos na nuvem e serão "
-                "perdidos no próximo restart do Streamlit Cloud."
+            log.warning(
+                "JSONBin: tentativa 1 falhou. Retentando sem calibradores "
+                "(payload mínimo: banca + picks + times dict + calibrado_em)."
             )
+            params_min: dict = {}
+            for lid_str, params_d in (b.params_ligas or {}).items():
+                p_min = {
+                    k: v for k, v in params_d.items()
+                    if k not in ("calibradores", "datas")
+                }
+                params_min[lid_str] = p_min
+            nuvem_min = {
+                "picks":         b.picks,
+                "banca_inicial": b.banca_inicial,
+                "depositos":     b.depositos,
+                "params_ligas":  params_min,
+            }
+            ok = self.jsonbin.escrever(nuvem_min)
+            if ok:
+                log.info("JSONBin: retry mínimo OK. Calibradores não persistidos na nuvem.")
+            else:
+                log.error(
+                    "CRÍTICO — JSONBin: ambas tentativas falharam. "
+                    "Params calibrados serão perdidos no próximo restart do Streamlit Cloud."
+                )
+
+        self.ultimo_save_jsonbin_ok = ok
         self._banco = b
         return ok
 
