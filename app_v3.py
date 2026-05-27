@@ -1203,6 +1203,17 @@ with st.sidebar:
             dm.ultimo_save_jsonbin_ok = False
             st.warning(f"⚠️ Erro ao salvar banca: {_e}")
 
+    # ── Novo Gist auto-criado — mostra ID para atualizar nos secrets ────
+    _novo_gist = getattr(getattr(dm, "jsonbin", None), "novo_gist_id", "")
+    if _novo_gist:
+        st.warning(
+            "⚠️ **Novo Gist criado automaticamente!**\n\n"
+            "O Gist anterior não foi encontrado (404). Um novo foi criado. "
+            "Para persistir após restart, atualize o secret `GIST_ID` no Streamlit Cloud:\n\n"
+            f"```\nGIST_ID = \"{_novo_gist}\"\n```\n\n"
+            "_(App → Settings → Secrets → editar GIST_ID → Save)_"
+        )
+
     # ── Status de sincronização com o cloud ──────────────────────────────
     _cloud_ok  = dm.ultimo_save_jsonbin_ok
     _cloud_err = getattr(dm, "ultimo_save_erro", "")

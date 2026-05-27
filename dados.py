@@ -716,15 +716,47 @@ class GistClient:
     def __init__(self, token: str, gist_id: str):
         if not token or not gist_id:
             raise ValueError("GITHUB_TOKEN ou GIST_ID vazios")
-        self.token      = token
-        self.gist_id    = gist_id
-        self.url        = f"https://api.github.com/gists/{gist_id}"
-        self.last_error = ""   # último erro de escrever() — "" = sem erro
+        self.token         = token
+        self.gist_id       = gist_id
+        self.url           = f"https://api.github.com/gists/{gist_id}"
+        self.last_error    = ""   # último erro de escrever() — "" = sem erro
+        self.novo_gist_id  = ""   # preenchido quando Gist 404 é auto-recriado
         self.headers = {
             "Authorization": f"token {token}",
             "Accept":        "application/vnd.github.v3+json",
             "Content-Type":  "application/json",
         }
+
+    def _criar_gist_novo(self, conteudo_inicial: str = "{}") -> bool:
+        """
+        Cria um novo Gist privado quando o ID atual retorna 404.
+        Atualiza self.gist_id, self.url e self.novo_gist_id para o novo ID.
+        O novo ID deve ser colado em GIST_ID nos secrets do Streamlit Cloud.
+        """
+        payload_body = json.dumps({
+            "description": "QG Barrios PRO — banco de dados (banca, picks, calibrações)",
+            "public": False,
+            "files": {self.FILENAME: {"content": conteudo_inicial}},
+        }).encode("utf-8")
+        try:
+            res = requests.post(
+                "https://api.github.com/gists",
+                headers=self.headers,
+                data=payload_body,
+                timeout=30,
+            )
+            if res.status_code == 201:
+                novo_id = res.json()["id"]
+                self.gist_id      = novo_id
+                self.url          = f"https://api.github.com/gists/{novo_id}"
+                self.novo_gist_id = novo_id
+                log.warning(f"Gist 404 → criado NOVO Gist automaticamente: {novo_id}")
+                return True
+            log.warning(f"Falha ao auto-criar Gist: HTTP {res.status_code} — {res.text[:200]}")
+            return False
+        except Exception as e:
+            log.warning(f"Falha ao auto-criar Gist ({type(e).__name__}): {e}")
+            return False
 
     def ler(self, timeout: int = 15) -> dict:
         try:
@@ -737,6 +769,11 @@ class GistClient:
                     .get("content", "{}")
                 )
                 return json.loads(conteudo) or {}
+            if res.status_code == 404:
+                log.warning("Gist ler: 404 — Gist não encontrado. Auto-criando novo Gist...")
+                if self._criar_gist_novo():
+                    log.info("Gist ler: novo Gist criado. Retornando dados vazios.")
+                return {}
             log.warning(f"Gist ler: HTTP {res.status_code} — {res.text[:200]}")
         except Exception as e:
             log.warning(f"Falha ao ler Gist: {e}")
@@ -761,6 +798,17 @@ class GistClient:
             res = requests.patch(self.url, headers=h, data=body, timeout=timeout)
             if res.status_code == 200:
                 return True
+            if res.status_code == 404:
+                # Gist foi deletado — recria e tenta de novo
+                log.warning("Gist escrever: 404 — auto-criando novo Gist e retentando...")
+                if self._criar_gist_novo():
+                    res2 = requests.patch(self.url, headers=h, data=body, timeout=timeout)
+                    if res2.status_code == 200:
+                        return True
+                    self.last_error = f"HTTP {res2.status_code} após auto-criar: {res2.text[:200]}"
+                    return False
+                self.last_error = "404 — falha ao auto-criar Gist novo"
+                return False
             self.last_error = f"HTTP {res.status_code}: {res.text[:200]}"
             log.warning(f"Gist escrever: HTTP {res.status_code} — {res.text[:200]}")
             return False
