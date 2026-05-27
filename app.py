@@ -1192,9 +1192,37 @@ with st.sidebar:
         banco.banca_inicial = banca_atual
         st.session_state["banco"] = banco
         try:
-            dm.salvar_banco(banco)
-        except Exception:
-            pass  # non-critical — session_state já retém o valor durante a sessão
+            ok = dm.salvar_banco(banco)
+            if not ok:
+                st.warning("⚠️ Banca salva localmente, mas falhou no cloud. Use o botão abaixo.")
+        except Exception as _e:
+            dm.ultimo_save_jsonbin_ok = False
+            st.warning(f"⚠️ Erro ao salvar banca: {_e}")
+
+    # ── Status de sincronização com o cloud ──────────────────────────────
+    _cloud_ok = dm.ultimo_save_jsonbin_ok
+    if _cloud_ok is False:
+        st.error(
+            "☁️❌ **Última gravação no cloud falhou.**\n\n"
+            "Dados desta sessão podem ser perdidos ao reiniciar. "
+            "Use o botão abaixo para tentar novamente."
+        )
+    elif _cloud_ok is None:
+        st.caption("☁️⏳ Não salvo nesta sessão — use o botão abaixo para sincronizar.")
+    else:
+        st.caption("☁️✅ Cloud sincronizado")
+    if st.button(
+        "💾 Salvar no Cloud" if _cloud_ok else "💾 Forçar Salvar no Cloud",
+        use_container_width=True,
+        help="Sincroniza banca, calibrações e picks com o JSONBin imediatamente.",
+    ):
+        with st.spinner("Sincronizando com cloud..."):
+            _save_ok = dm.salvar_banco(banco)
+        if _save_ok:
+            st.toast("✅ Cloud sincronizado com sucesso!", icon="☁️")
+            st.rerun()
+        else:
+            st.error("❌ Falha ao sincronizar. Verifique conexão ou quota do JSONBin.")
 
     st.divider()
 
@@ -1266,6 +1294,18 @@ n_calibradas = len(banco.params_ligas)
 col_h1, col_h2 = st.columns(2)
 col_h1.metric("Ligas calibradas", f"{n_calibradas}/{len(LIGAS_SUPORTADAS)}")
 col_h2.metric("Banca atual", f"R$ {banca_atual:.2f}")
+
+# ── Aviso de sessão potencialmente stale ─────────────────────────────────────
+# Se o app acabou de carregar (dm nunca salvou nesta sessão), mostra um lembrete
+# para o usuário confirmar que os dados estão corretos antes de operar.
+if dm.ultimo_save_jsonbin_ok is None:
+    st.warning(
+        "⚠️ **Sessão nova carregada do cloud.** "
+        f"Verifique se a banca (R$ {banca_atual:.2f}) e as {n_calibradas} ligas calibradas "
+        "estão corretas. Se os valores parecerem antigos, ajuste a banca no sidebar e clique "
+        "**'💾 Salvar no Cloud'** para sincronizar. "
+        "_(Este aviso some após o primeiro save da sessão.)_"
+    )
 
 st.divider()
 

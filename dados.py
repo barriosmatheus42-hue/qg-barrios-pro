@@ -771,7 +771,8 @@ class DadosManager:
         self.jsonbin = JSONBinClient(jsonbin_key, jsonbin_id)
         self.dir = Path(diretorio_local)
         self._banco: Optional[BancoQG] = None
-        self.ultimo_save_jsonbin_ok: bool = True  # False quando JSONBin rejeita o payload
+        # None = nenhum save tentado nesta sessão; True = último OK; False = último falhou
+        self.ultimo_save_jsonbin_ok: Optional[bool] = None
 
     # ----------------------------------------------------------------
     # Banco completo
