@@ -475,9 +475,11 @@ class ApiSportsClient:
             "h_shots_on": None, "h_shots_total": None,
             "h_possession": None, "h_corners": None,
             "h_yellows": None, "h_saves": None, "h_fouls": None,
+            "h_blocked_shots": None, "h_shots_offgoal": None, "h_passes_pct": None,
             "a_shots_on": None, "a_shots_total": None,
             "a_possession": None, "a_corners": None,
             "a_yellows": None, "a_saves": None, "a_fouls": None,
+            "a_blocked_shots": None, "a_shots_offgoal": None, "a_passes_pct": None,
         }
         try:
             res = requests.get(
@@ -525,6 +527,12 @@ class ApiSportsClient:
                         d["shots_insidebox"] = int(v)
                     elif t == "Offsides":
                         d["offsides"] = int(v)
+                    elif t == "Blocked Shots":
+                        d["blocked_shots"] = int(v)
+                    elif t == "Shots off Goal":
+                        d["shots_offgoal"] = int(v)
+                    elif t == "Passes %":
+                        d["passes_pct"] = float(str(v).replace("%", "").strip())
                 except (TypeError, ValueError):
                     pass
             return d
@@ -552,6 +560,9 @@ class ApiSportsClient:
             "h_goals_prevented":    h.get("goals_prevented"),
             "h_shots_insidebox":    h.get("shots_insidebox"),
             "h_offsides":           h.get("offsides"),
+            "h_blocked_shots":      h.get("blocked_shots"),
+            "h_shots_offgoal":      h.get("shots_offgoal"),
+            "h_passes_pct":         h.get("passes_pct"),
             "a_shots_on":           a.get("shots_on"),
             "a_shots_total":        a.get("shots_total"),
             "a_possession":         a.get("possession"),
@@ -562,6 +573,9 @@ class ApiSportsClient:
             "a_goals_prevented":    a.get("goals_prevented"),
             "a_shots_insidebox":    a.get("shots_insidebox"),
             "a_offsides":           a.get("offsides"),
+            "a_blocked_shots":      a.get("blocked_shots"),
+            "a_shots_offgoal":      a.get("shots_offgoal"),
+            "a_passes_pct":         a.get("passes_pct"),
         }
 
     # ----------------------------------------------------------------
@@ -1242,9 +1256,11 @@ class DadosManager:
                             "h_shots_on", "h_shots_total", "h_possession", "h_corners",
                             "h_yellows", "h_saves", "h_fouls",
                             "h_goals_prevented", "h_shots_insidebox", "h_offsides",
+                            "h_blocked_shots", "h_shots_offgoal", "h_passes_pct",
                             "a_shots_on", "a_shots_total", "a_possession", "a_corners",
                             "a_yellows", "a_saves", "a_fouls",
                             "a_goals_prevented", "a_shots_insidebox", "a_offsides",
+                            "a_blocked_shots", "a_shots_offgoal", "a_passes_pct",
                         ]:
                             _df_pre[_col] = None
                         _df_pre["season_year"] = season
@@ -1288,9 +1304,11 @@ class DadosManager:
                 "h_shots_on", "h_shots_total", "h_possession", "h_corners",
                 "h_yellows", "h_saves", "h_fouls",
                 "h_goals_prevented", "h_shots_insidebox", "h_offsides",
+                "h_blocked_shots", "h_shots_offgoal", "h_passes_pct",
                 "a_shots_on", "a_shots_total", "a_possession", "a_corners",
                 "a_yellows", "a_saves", "a_fouls",
                 "a_goals_prevented", "a_shots_insidebox", "a_offsides",
+                "a_blocked_shots", "a_shots_offgoal", "a_passes_pct",
             ]:
                 df_novos[col] = [s.get(col) for s in stats_list]
             df_novos["season_year"] = season

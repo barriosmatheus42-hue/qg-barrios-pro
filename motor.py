@@ -223,6 +223,10 @@ class ParametrosLiga:
     # {mercado_str: MarketCalibrator} — treinados offline (Dossiê v8 — Passo 4).
     # Chave ausente = mercado sem calibrador (usa prob bruta).
     # Não é serializado por asdict() — to_dict() o trata manualmente.
+    scout_medias: dict = field(default_factory=dict)
+    # {team_id (int): {stat_avg: float|None}} — médias de scout por time calculadas
+    # durante calibrar_liga(). Persiste no Gist e serve de fallback quando
+    # historico_ligas local está vazio após restart do Streamlit Cloud.
 
     def to_dict(self) -> dict:
         # Construção manual (substitui asdict) para serializar calibradores
@@ -243,6 +247,7 @@ class ParametrosLiga:
             "raio_x_times":       self.raio_x_times,
             "xg_ativo":           self.xg_ativo,
             "calibradores":       {k: v.to_dict() for k, v in self.calibradores.items()},
+            "scout_medias":       {str(k): v for k, v in self.scout_medias.items()},
         }
 
     @classmethod
@@ -252,11 +257,12 @@ class ParametrosLiga:
         nomes_times = {int(k): v for k, v in nomes_raw.items()} if nomes_raw else {}
         raio_x_raw = d.get("raio_x_times", {})
         raio_x_times = {int(k): v for k, v in raio_x_raw.items()} if raio_x_raw else {}
-        # Backward-compatible: entradas antigas sem calibradores retornam dict vazio
+        # Backward-compatible: entradas antigas sem calibradores/scout_medias retornam dict vazio
         calibradores = {
             k: MarketCalibrator.from_dict(v)
             for k, v in d.get("calibradores", {}).items()
         }
+        scout_medias = {int(k): v for k, v in d.get("scout_medias", {}).items()}
         return cls(
             league_id=d["league_id"],
             season=d["season"],
@@ -273,6 +279,7 @@ class ParametrosLiga:
             raio_x_times=raio_x_times,
             xg_ativo=d.get("xg_ativo", False),
             calibradores=calibradores,
+            scout_medias=scout_medias,
         )
 
 
@@ -359,6 +366,39 @@ def _neg_log_likelihood(
 
     log_lik = pesos * (log_p_home + log_p_away + log_tau)
     return -np.sum(log_lik)
+
+
+def _calcular_scout_medias(df: pd.DataFrame, times_dict: dict) -> dict:
+    """
+    Calcula médias de scout por time a partir dos dados de calibração.
+
+    Retorna {team_id (int): {stat_avg: float|None}} com médias globais
+    (casa + fora) de cada stat de scout. Persistido em ParametrosLiga.scout_medias
+    para servir de fallback quando historico_ligas local está vazio após restart.
+    """
+    _scout_cols = [
+        "shots_on", "shots_total", "possession", "corners",
+        "yellows", "saves", "fouls",
+        "goals_prevented", "shots_insidebox", "offsides",
+        "blocked_shots", "shots_offgoal", "passes_pct",
+    ]
+    result: dict = {}
+    for tid in times_dict:
+        tid = int(tid)
+        stats: dict = {}
+        for col in _scout_cols:
+            h_col = f"h_{col}"
+            a_col = f"a_{col}"
+            vals: list = []
+            if h_col in df.columns:
+                home_vals = df.loc[df["home_id"] == tid, h_col]
+                vals.extend(pd.to_numeric(home_vals, errors="coerce").dropna().tolist())
+            if a_col in df.columns:
+                away_vals = df.loc[df["away_id"] == tid, a_col]
+                vals.extend(pd.to_numeric(away_vals, errors="coerce").dropna().tolist())
+            stats[f"{col}_avg"] = round(float(sum(vals) / len(vals)), 4) if vals else None
+        result[tid] = stats
+    return result
 
 
 def calibrar_liga(
@@ -628,6 +668,10 @@ def calibrar_liga(
         raio_x_times=raio_x,
         xg_ativo=xg_ativo,
     )
+
+    # Médias de scout por time: persistem no Gist para fallback após restart do cloud.
+    # df aqui já está filtrado pelos times válidos — apenas times no modelo final.
+    params_final.scout_medias = _calcular_scout_medias(df, times_dict)
 
     # Calibrador isotônico 1X2 HOME (H1-HOME-Only, validado no laboratório com +8.8% ROI).
     # Treinado em-amostra sobre os mesmos dados do D-C; armazenado em

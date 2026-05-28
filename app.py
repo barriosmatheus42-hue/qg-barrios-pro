@@ -283,7 +283,7 @@ def avaliar_heuristicas(
 
     # ── H5: UNDER_25 na zona cinzenta ────────────────────────────────
     if mercado == "UNDER_25" and 1.85 <= xg_total < 2.00:
-        adj -= 6.0
+        adj -= 10.0
         notas.append(f"xG total próximo do limiar (λ+μ={xg_total:.2f})")
 
     # ── H6: OVER_25 com margem estreita ──────────────────────────────
@@ -592,10 +592,10 @@ def avaliar_heuristicas(
         # HC17: Empate Recorrente — histórico de empates recentes corrobora DRAW
         if tem_forma and mercado == "DRAW":
             if h_draws_last5 >= 2 and a_draws_last5 >= 2:
-                adj += 6.0
+                adj += 4.0
                 notas.append(f"Empate recorrente: H {h_draws_last5}E, A {a_draws_last5}E em {h_n_last5}j")
             elif h_draws_last5 + a_draws_last5 >= 5:
-                adj += 4.0
+                adj += 3.0
                 notas.append(f"Times propensos ao empate (H={h_draws_last5}, A={a_draws_last5} em {h_n_last5}j)")
 
         # HC_BTTS_DEF v2: Bloqueio escalonado de BTTS_NO por ataque visitante letal
@@ -724,7 +724,7 @@ def avaliar_heuristicas(
         if mercado == "DRAW" and tem_forma and ratio < 1.60:
             if h_draws_last5 >= 2 or a_draws_last5 >= 2:
                 if (h_wins_last5 + h_draws_last5) >= 3 and (a_wins_last5 + a_draws_last5) >= 3:
-                    adj += 7.0
+                    adj += 4.0
                     notas.append(f"Forma equilibrada (H={h_wins_last5}V+{h_draws_last5}E, A={a_wins_last5}V+{a_draws_last5}E) — empate plausível")
 
         # HC29: HOME/1X/OVER_25 — mandante prolífico e invicto recente
@@ -890,6 +890,61 @@ def avaliar_heuristicas(
                         adj += 4.0
                         notas.append(f"Scout: jogo conservador (H={h_off:.1f}/A={a_off:.1f} impedimentos/j) — Under favorecido")
 
+            # HSC11: Blocked Shots — defesas ativas bloqueando remates
+            # Muitos bloqueios = defesa organizada, baixo xG convertido → Under/BTTS_NO sinal.
+            # Poucos bloqueios = defesas passivas, mais chances perigosas chegam ao alvo.
+            h_blk = ctx.get("h_blocked_shots_avg")
+            a_blk = ctx.get("a_blocked_shots_avg")
+            if h_blk is not None and a_blk is not None:
+                blk_total = h_blk + a_blk
+                if blk_total >= 7.0:
+                    if mercado in ("UNDER_25", "BTTS_NO"):
+                        adj += 5.0
+                        notas.append(f"Scout: defesas bloqueando muito ({blk_total:.1f} bloqueios/j) — Under/BTTS_NO corroborado")
+                    elif mercado in ("OVER_25", "BTTS_YES"):
+                        adj -= 4.0
+                        notas.append(f"Scout: defesas ativas ({blk_total:.1f} bloqueios/j) — Over penalizado")
+                elif blk_total <= 2.5:
+                    if mercado in ("OVER_25", "BTTS_YES"):
+                        adj += 4.0
+                        notas.append(f"Scout: poucas defesas com bloqueio ({blk_total:.1f}/j) — Over favorecido")
+
+            # HSC12: Shots off Goal — chutes que erram o alvo (ineficiência ofensiva)
+            # Alto índice = atacantes desperdiçando oportunidades → baixa conversão real.
+            # Contexto: compare com shots_on para ver a eficiência de mira.
+            h_sog_off = ctx.get("h_shots_offgoal_avg")
+            a_sog_off = ctx.get("a_shots_offgoal_avg")
+            if h_sog_off is not None and a_sog_off is not None and h_shots is not None and a_shots is not None:
+                h_miss_rate = h_sog_off / h_shots if h_shots > 0 else None
+                a_miss_rate = a_sog_off / a_shots if a_shots > 0 else None
+                if h_miss_rate is not None and a_miss_rate is not None:
+                    if h_miss_rate >= 0.50 and a_miss_rate >= 0.50:
+                        if mercado in ("UNDER_25", "BTTS_NO"):
+                            adj += 4.0
+                            notas.append(f"Scout: alta taxa de erros de mira (H={h_miss_rate:.0%}/A={a_miss_rate:.0%}) — Under reforçado")
+                        elif mercado in ("OVER_25", "BTTS_YES"):
+                            adj -= 4.0
+                            notas.append(f"Scout: atacantes imprecisos (H={h_miss_rate:.0%}/A={a_miss_rate:.0%} fora do alvo) — Over penalizado")
+
+            # HSC13: Passes % — controle e qualidade de jogo
+            # Time com alta taxa de passes (≥75%) domina o jogo mas pode ser conservador.
+            # Desequilíbrio grande (≥20pp) indica dominância que pode converter em gols.
+            h_pct = ctx.get("h_passes_pct_avg")
+            a_pct = ctx.get("a_passes_pct_avg")
+            if h_pct is not None and a_pct is not None:
+                pct_gap = abs(h_pct - a_pct)
+                if pct_gap >= 20.0:
+                    dom_side = "mandante" if h_pct > a_pct else "visitante"
+                    if mercado in ("HOME", "1X") and h_pct > a_pct:
+                        adj += 4.0
+                        notas.append(f"Scout: mandante domina a bola ({h_pct:.0f}% vs {a_pct:.0f}%) — HOME/1X favorecido")
+                    elif mercado in ("AWAY", "X2") and a_pct > h_pct:
+                        adj += 4.0
+                        notas.append(f"Scout: visitante domina a bola ({a_pct:.0f}% vs {h_pct:.0f}%) — AWAY/X2 favorecido")
+                    elif mercado == "DRAW":
+                        adj -= 4.0
+                        notas.append(f"Scout: desequilíbrio de posse ({pct_gap:.0f}pp) — empate menos provável")
+
     # ── Detecção de conflito de sinais ───────────────────────────────────────
     # Proxy: há notas que indicam bônus E notas que indicam penalidade (≥3 regras disparadas)
     _kw_pos = ("Fortaleza", "Rolo", "Invencib", "Ferro", "Muralha", "Impulso",
@@ -946,10 +1001,12 @@ def extrair_forma_times(
         "h_corners_avg": None, "h_yellows_avg": None, "h_saves_avg": None, "h_fouls_avg": None,
         "h_shots_per_goal": None,
         "h_goals_prevented_avg": None, "h_shots_insidebox_avg": None, "h_offsides_avg": None,
+        "h_blocked_shots_avg": None, "h_shots_offgoal_avg": None, "h_passes_pct_avg": None,
         "a_shots_on_avg": None, "a_shots_total_avg": None, "a_possession_avg": None,
         "a_corners_avg": None, "a_yellows_avg": None, "a_saves_avg": None, "a_fouls_avg": None,
         "a_shots_per_goal": None,
         "a_goals_prevented_avg": None, "a_shots_insidebox_avg": None, "a_offsides_avg": None,
+        "a_blocked_shots_avg": None, "a_shots_offgoal_avg": None, "a_passes_pct_avg": None,
     }
     try:
         if df_liga is None or df_liga.empty:
@@ -1051,6 +1108,9 @@ def extrair_forma_times(
                 "h_goals_prevented": "goals_prevented",
                 "h_shots_insidebox": "shots_insidebox",
                 "h_offsides": "offsides",
+                "h_blocked_shots": "blocked_shots",
+                "h_shots_offgoal": "shots_offgoal",
+                "h_passes_pct": "passes_pct",
             }
             rename_a = {
                 "a_shots_on": "shots_on", "a_shots_total": "shots_total",
@@ -1059,11 +1119,15 @@ def extrair_forma_times(
                 "a_goals_prevented": "goals_prevented",
                 "a_shots_insidebox": "shots_insidebox",
                 "a_offsides": "offsides",
+                "a_blocked_shots": "blocked_shots",
+                "a_shots_offgoal": "shots_offgoal",
+                "a_passes_pct": "passes_pct",
             }
 
             cols_scout = [
                 "shots_on", "shots_total", "possession", "corners", "yellows", "saves", "fouls",
                 "goals_prevented", "shots_insidebox", "offsides",
+                "blocked_shots", "shots_offgoal", "passes_pct",
             ]
 
             h_scout = home_rows.rename(columns={k: v for k, v in rename_h.items() if k in home_rows.columns})
@@ -2221,6 +2285,21 @@ with tab_analise:
         dc_ctx.update(
             extrair_forma_times(_forma_dfs.get(l_id, pd.DataFrame()), h_id, a_id)
         )
+        # Scout fallback: quando historico local está vazio (restart do Streamlit Cloud),
+        # injeta médias pré-computadas do params.scout_medias para ativar HSC1-HSC10.
+        _sm = params.scout_medias
+        if _sm:
+            _scout_stats = [
+                "shots_on_avg", "shots_total_avg", "possession_avg",
+                "corners_avg", "yellows_avg", "saves_avg", "fouls_avg",
+                "goals_prevented_avg", "shots_insidebox_avg", "offsides_avg",
+                "blocked_shots_avg", "shots_offgoal_avg", "passes_pct_avg",
+            ]
+            for _stat in _scout_stats:
+                if dc_ctx.get(f"h_{_stat}") is None:
+                    dc_ctx[f"h_{_stat}"] = _sm.get(h_id, {}).get(_stat)
+                if dc_ctx.get(f"a_{_stat}") is None:
+                    dc_ctx[f"a_{_stat}"] = _sm.get(a_id, {}).get(_stat)
         previsoes[f_id]["dc_ctx"] = dc_ctx
     banco.datas[data_str]["previsoes"] = previsoes
     dm.salvar_banco(banco)
