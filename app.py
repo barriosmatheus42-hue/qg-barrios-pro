@@ -78,13 +78,13 @@ EV_CONFIG_PROD  = EvConfig(ev_min_over=5.0,  ev_min_under=20.0)
 # Isotônico aplicado APENAS em HOME — DRAW/AWAY usam probabilidade pura RAW do D-C.
 _1X2_MERCADOS   = {"HOME", "DRAW", "AWAY", "1X", "X2", "12"}
 
-_EV_MIN: dict   = {"HOME": 10.0, "DRAW": 28.0, "AWAY": 7.0,  "1X": 8.0,  "X2": 8.0,  "12": 8.0}
-_EV_MAX: dict   = {"HOME": 15.0, "DRAW": 80.0, "AWAY": 22.0, "1X": 18.0, "X2": 18.0, "12": 18.0}
+_EV_MIN: dict   = {"HOME": 20.0, "DRAW": 28.0, "AWAY": 7.0,  "1X": 8.0,  "X2": 8.0,  "12": 8.0}
+_EV_MAX: dict   = {"HOME": 50.0, "DRAW": 80.0, "AWAY": 22.0, "1X": 18.0, "X2": 18.0, "12": 18.0}
 _PROB_MIN: dict = {"HOME": 45.0, "DRAW": 22.0, "AWAY": 28.0, "1X": 65.0, "X2": 65.0, "12": 65.0}
 _ODD_MIN: dict  = {"HOME": 1.80, "DRAW": 2.80, "AWAY": 1.60, "1X": 1.25, "X2": 1.25, "12": 1.25}
-# Teto de odd por mercado — controla variância sem cortar EV. DRAW=6.50 elimina bets
-# tipo "loteria" (hit rate ~14%) onde o D-C está no limite de calibração confiável.
-_ODD_MAX: dict  = {"HOME": 3.50, "DRAW": 6.50, "AWAY": 5.00, "1X": 2.50, "X2": 2.50, "12": 2.50}
+# Teto de odd por mercado — controla variância sem cortar EV. DRAW=4.99 elimina bets
+# com odd>=5 (backtest: 1/14 wins, -42.5% ROI) onde D-C está fora da faixa de calibração.
+_ODD_MAX: dict  = {"HOME": 3.50, "DRAW": 4.99, "AWAY": 5.00, "1X": 2.50, "X2": 2.50, "12": 2.50}
 
 # Ranking de qualidade — sem número fixo
 SCORE_MINIMO_RANKING = 60   # limiar de qualidade mínima; 35-59 = marginal, geralmente ruído
@@ -2279,6 +2279,14 @@ with tab_analise:
                     if comp.get("divergencia_pp", 0.0) < _BTTS_MIN_DIV_PP:
                         continue
 
+                # ── Regra 3b — UNDER_25: zona morta EV 25-30% ───────────────
+                # Backtest V4 (52 picks, EV>=20%): HR 34.6%, ROI -27.27% — pior
+                # sub-faixa de EV para UNDER. Faixas vizinhas são lucrativas:
+                # EV 20-25% ROI +0.7% e EV >30% ROI +18.0%. O D-C oscila entre
+                # sinal e ruído exatamente nesta janela para mercados UNDER.
+                if mercado == "UNDER_25" and 25.0 <= comp["ev_pct"] < 30.0:
+                    continue
+
                 if score < SCORE_MINIMO_RANKING:
                     continue
 
@@ -2722,6 +2730,14 @@ with tab_analise:
                             # odd 3.0–4.0: EV ≥ 15% + modelo 20% acima do implícito
                             if ev < 15.0 or _conf_ratio < 1.20:
                                 continue
+
+                    # ── Regra 5 — DRAW: zona morta EV 30-40% ──────────────────
+                    # Backtest: 0 wins em 9 picks (30-35%: 7 picks; 35-40%: 2 picks).
+                    # O D-C superestima probabilidade de empate quando há forte desequilíbrio
+                    # λ/μ — o EV aparece alto por artefato, não por borda real.
+                    # Faixas adjacentes (25-30% e >40%) têm ROI positivo confirmado.
+                    if mercado == "DRAW" and 30.0 <= ev < 40.0:
+                        continue
 
                     stake_mo = calcular_stake_final(
                         comp.get("kelly_fracao", 0), banca_atual, piso_kelly, teto_pct
