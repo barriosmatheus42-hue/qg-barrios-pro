@@ -380,6 +380,13 @@ def avaliar_heuristicas(
                 adj += 8.0
                 notas.append(f"Jogo equilibrado (CBI={cbi:.2f})")
 
+        # HC30: DRAW ─ Liga goleadora reduz empiricamente a taxa de empate
+        # Ligas com média >2.80 gols/j têm abertura ofensiva que torna empates raros.
+        # Penalidade complementa H4 (que age no desequilíbrio λ/μ).
+        if mercado == "DRAW" and media > 2.80:
+            adj -= 6.0
+            notas.append(f"Liga goleadora (méd={media:.2f}g/j) — empate estruturalmente menos provável")
+
         # HC4: BTTS_YES ─ Contexto ofensivo mútuo
         if mercado == "BTTS_YES":
             if alpha_a > 0.95 and beta_h > 1.05:
@@ -823,6 +830,66 @@ def avaliar_heuristicas(
                         adj += 6.0
                         notas.append(f"Scout: goleiros muito ativos (H={h_sav:.1f}, A={a_sav:.1f} defesas/j) — jogo aberto")
 
+            # HSC8: Goals Prevented — valor real do goleiro acima do xG
+            # API entrega `goals_prevented` = gols evitados além da expectativa.
+            # GK com média ≥0.8/j está sistematicamente salvando mais que xG prevê →
+            # defesa real é melhor que o D-C estima só pelos gols sofridos.
+            h_gprev = ctx.get("h_goals_prevented_avg")
+            a_gprev = ctx.get("a_goals_prevented_avg")
+            if h_gprev is not None and a_gprev is not None:
+                if h_gprev >= 0.8 and mercado in ("UNDER_25", "BTTS_NO"):
+                    adj += 8.0
+                    notas.append(f"Scout: goleiro mandante de impacto ({h_gprev:.2f} gols prev/j) — Under/BTTS_NO reforçado")
+                elif h_gprev >= 0.8 and mercado == "AWAY":
+                    adj -= 5.0
+                    notas.append(f"Scout: goleiro mandante ativo ({h_gprev:.2f} prev/j) — AWAY mais difícil")
+                if a_gprev >= 0.8 and mercado in ("UNDER_25", "BTTS_NO"):
+                    adj += 8.0
+                    notas.append(f"Scout: goleiro visitante de impacto ({a_gprev:.2f} gols prev/j)")
+                elif a_gprev >= 0.8 and mercado == "HOME":
+                    adj -= 5.0
+                    notas.append(f"Scout: goleiro visitante ativo ({a_gprev:.2f} prev/j) — HOME mais difícil")
+                if h_gprev >= 0.6 and a_gprev >= 0.6 and mercado in ("UNDER_25", "BTTS_NO"):
+                    adj += 5.0
+                    notas.append(f"Scout: ambos goleiros acima do esperado (H={h_gprev:.2f}, A={a_gprev:.2f} prev/j)")
+
+            # HSC9: Qualidade de Finalização — proporção de chutes dentro da área
+            # Alta proporção (>60%) = mais finalizações de boa posição = mais gols prováveis.
+            # Baixa proporção (<40%) = equipes chutando de longe = defesas mais seguras.
+            h_sib = ctx.get("h_shots_insidebox_avg")
+            a_sib = ctx.get("a_shots_insidebox_avg")
+            h_tot_s = ctx.get("h_shots_total_avg")
+            a_tot_s = ctx.get("a_shots_total_avg")
+            if h_sib is not None and a_sib is not None and h_tot_s and a_tot_s:
+                h_sib_r = h_sib / h_tot_s if h_tot_s > 0 else 0
+                a_sib_r = a_sib / a_tot_s if a_tot_s > 0 else 0
+                if h_sib_r >= 0.60 and a_sib_r >= 0.60:
+                    if mercado in ("OVER_25", "BTTS_YES"):
+                        adj += 7.0
+                        notas.append(f"Scout: alta qualidade de finalizações (H={h_sib_r:.0%}/A={a_sib_r:.0%} inside box)")
+                elif h_sib_r <= 0.40 and a_sib_r <= 0.40:
+                    if mercado in ("UNDER_25", "BTTS_NO"):
+                        adj += 5.0
+                        notas.append(f"Scout: chutes de baixa qualidade (H={h_sib_r:.0%}/A={a_sib_r:.0%} inside box) — Under favorecido")
+
+            # HSC10: Offsides — agressividade da linha ofensiva
+            # Times com ≥3.5 impedimentos/j jogam com linha alta e tentam pressionar →
+            # jogo mais aberto, mais oportunidades para ambos → Over/BTTS_YES sinal.
+            h_off = ctx.get("h_offsides_avg")
+            a_off = ctx.get("a_offsides_avg")
+            if h_off is not None and a_off is not None:
+                if h_off >= 3.5 and a_off >= 3.5:
+                    if mercado in ("OVER_25", "BTTS_YES"):
+                        adj += 6.0
+                        notas.append(f"Scout: linhas ofensivas agressivas (H={h_off:.1f}/A={a_off:.1f} impedimentos/j) — jogo aberto")
+                    elif mercado == "UNDER_25":
+                        adj -= 5.0
+                        notas.append(f"Scout: ambas equipes atacam alto (H={h_off:.1f}/A={a_off:.1f} offside/j) — Under em risco")
+                elif h_off <= 1.5 and a_off <= 1.5:
+                    if mercado in ("UNDER_25", "BTTS_NO"):
+                        adj += 4.0
+                        notas.append(f"Scout: jogo conservador (H={h_off:.1f}/A={a_off:.1f} impedimentos/j) — Under favorecido")
+
     # ── Detecção de conflito de sinais ───────────────────────────────────────
     # Proxy: há notas que indicam bônus E notas que indicam penalidade (≥3 regras disparadas)
     _kw_pos = ("Fortaleza", "Rolo", "Invencib", "Ferro", "Muralha", "Impulso",
@@ -878,9 +945,11 @@ def extrair_forma_times(
         "h_shots_on_avg": None, "h_shots_total_avg": None, "h_possession_avg": None,
         "h_corners_avg": None, "h_yellows_avg": None, "h_saves_avg": None, "h_fouls_avg": None,
         "h_shots_per_goal": None,
+        "h_goals_prevented_avg": None, "h_shots_insidebox_avg": None, "h_offsides_avg": None,
         "a_shots_on_avg": None, "a_shots_total_avg": None, "a_possession_avg": None,
         "a_corners_avg": None, "a_yellows_avg": None, "a_saves_avg": None, "a_fouls_avg": None,
         "a_shots_per_goal": None,
+        "a_goals_prevented_avg": None, "a_shots_insidebox_avg": None, "a_offsides_avg": None,
     }
     try:
         if df_liga is None or df_liga.empty:
@@ -979,14 +1048,23 @@ def extrair_forma_times(
                 "h_shots_on": "shots_on", "h_shots_total": "shots_total",
                 "h_possession": "possession", "h_corners": "corners",
                 "h_yellows": "yellows", "h_saves": "saves", "h_fouls": "fouls",
+                "h_goals_prevented": "goals_prevented",
+                "h_shots_insidebox": "shots_insidebox",
+                "h_offsides": "offsides",
             }
             rename_a = {
                 "a_shots_on": "shots_on", "a_shots_total": "shots_total",
                 "a_possession": "possession", "a_corners": "corners",
                 "a_yellows": "yellows", "a_saves": "saves", "a_fouls": "fouls",
+                "a_goals_prevented": "goals_prevented",
+                "a_shots_insidebox": "shots_insidebox",
+                "a_offsides": "offsides",
             }
 
-            cols_scout = ["shots_on", "shots_total", "possession", "corners", "yellows", "saves", "fouls"]
+            cols_scout = [
+                "shots_on", "shots_total", "possession", "corners", "yellows", "saves", "fouls",
+                "goals_prevented", "shots_insidebox", "offsides",
+            ]
 
             h_scout = home_rows.rename(columns={k: v for k, v in rename_h.items() if k in home_rows.columns})
             a_scout = away_rows.rename(columns={k: v for k, v in rename_a.items() if k in away_rows.columns})

@@ -519,6 +519,12 @@ class ApiSportsClient:
                         d["saves"] = int(v)
                     elif t == "Fouls":
                         d["fouls"] = int(v)
+                    elif t == "goals_prevented":
+                        d["goals_prevented"] = float(v)
+                    elif t == "Shots insidebox":
+                        d["shots_insidebox"] = int(v)
+                    elif t == "Offsides":
+                        d["offsides"] = int(v)
                 except (TypeError, ValueError):
                     pass
             return d
@@ -534,22 +540,28 @@ class ApiSportsClient:
         a = team_stats.get(away_team_id, {})
 
         return {
-            "xg_home":       h.get("xg"),
-            "xg_away":       a.get("xg"),
-            "h_shots_on":    h.get("shots_on"),
-            "h_shots_total": h.get("shots_total"),
-            "h_possession":  h.get("possession"),
-            "h_corners":     h.get("corners"),
-            "h_yellows":     h.get("yellows"),
-            "h_saves":       h.get("saves"),
-            "h_fouls":       h.get("fouls"),
-            "a_shots_on":    a.get("shots_on"),
-            "a_shots_total": a.get("shots_total"),
-            "a_possession":  a.get("possession"),
-            "a_corners":     a.get("corners"),
-            "a_yellows":     a.get("yellows"),
-            "a_saves":       a.get("saves"),
-            "a_fouls":       a.get("fouls"),
+            "xg_home":              h.get("xg"),
+            "xg_away":              a.get("xg"),
+            "h_shots_on":           h.get("shots_on"),
+            "h_shots_total":        h.get("shots_total"),
+            "h_possession":         h.get("possession"),
+            "h_corners":            h.get("corners"),
+            "h_yellows":            h.get("yellows"),
+            "h_saves":              h.get("saves"),
+            "h_fouls":              h.get("fouls"),
+            "h_goals_prevented":    h.get("goals_prevented"),
+            "h_shots_insidebox":    h.get("shots_insidebox"),
+            "h_offsides":           h.get("offsides"),
+            "a_shots_on":           a.get("shots_on"),
+            "a_shots_total":        a.get("shots_total"),
+            "a_possession":         a.get("possession"),
+            "a_corners":            a.get("corners"),
+            "a_yellows":            a.get("yellows"),
+            "a_saves":              a.get("saves"),
+            "a_fouls":              a.get("fouls"),
+            "a_goals_prevented":    a.get("goals_prevented"),
+            "a_shots_insidebox":    a.get("shots_insidebox"),
+            "a_offsides":           a.get("offsides"),
         }
 
     # ----------------------------------------------------------------
@@ -1229,8 +1241,10 @@ class DadosManager:
                             "xg_home", "xg_away",
                             "h_shots_on", "h_shots_total", "h_possession", "h_corners",
                             "h_yellows", "h_saves", "h_fouls",
+                            "h_goals_prevented", "h_shots_insidebox", "h_offsides",
                             "a_shots_on", "a_shots_total", "a_possession", "a_corners",
                             "a_yellows", "a_saves", "a_fouls",
+                            "a_goals_prevented", "a_shots_insidebox", "a_offsides",
                         ]:
                             _df_pre[_col] = None
                         _df_pre["season_year"] = season
@@ -1273,8 +1287,10 @@ class DadosManager:
                 "xg_home", "xg_away",
                 "h_shots_on", "h_shots_total", "h_possession", "h_corners",
                 "h_yellows", "h_saves", "h_fouls",
+                "h_goals_prevented", "h_shots_insidebox", "h_offsides",
                 "a_shots_on", "a_shots_total", "a_possession", "a_corners",
                 "a_yellows", "a_saves", "a_fouls",
+                "a_goals_prevented", "a_shots_insidebox", "a_offsides",
             ]:
                 df_novos[col] = [s.get(col) for s in stats_list]
             df_novos["season_year"] = season
