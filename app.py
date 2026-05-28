@@ -2287,7 +2287,8 @@ with tab_analise:
         )
         # Scout fallback: quando historico local está vazio (restart do Streamlit Cloud),
         # injeta médias pré-computadas do params.scout_medias para ativar HSC1-HSC10.
-        _sm = params.scout_medias
+        # getattr: compatibilidade com params antigos do Gist sem o campo scout_medias.
+        _sm = getattr(params, "scout_medias", {})
         if _sm:
             _scout_stats = [
                 "shots_on_avg", "shots_total_avg", "possession_avg",
