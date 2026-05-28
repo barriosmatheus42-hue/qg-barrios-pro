@@ -2258,6 +2258,27 @@ with tab_analise:
                             and _ctx_hb.get("a_n_last5", 0) >= 4):
                         continue
 
+                # ── Regra 1 — BTTS_YES: xG mínimo de AMBOS os times ──────────
+                # Se o time mais fraco tem λ ou μ < 0.75, o próprio D-C diz que ele
+                # raramente marca. Calibrador sobre probabilidade baixa = ruído.
+                # Threshold derivado do modelo, não arbitrário: P(time marca) ≈ 1-e^(-λ);
+                # λ=0.75 → P(marca) ≈ 53% — abaixo disso BTTS_YES é apostolar.
+                _BTTS_MIN_XG_TIME = 0.75
+                if mercado == "BTTS_YES":
+                    _lam = float(prev.get("lambda") or 0.0)
+                    _mu  = float(prev.get("mu")     or 0.0)
+                    if min(_lam, _mu) < _BTTS_MIN_XG_TIME:
+                        continue
+
+                # ── Regra 2 — BTTS: divergência mínima real ──────────────────
+                # EV de 5-8% com divergência < 4pp significa modelo e mercado
+                # quase de acordo — sem borda real, só variância. Exige desacordo
+                # genuíno entre o D-C e o bookmaker para justificar a entrada.
+                _BTTS_MIN_DIV_PP = 4.0
+                if mercado in ("BTTS_YES", "BTTS_NO"):
+                    if comp.get("divergencia_pp", 0.0) < _BTTS_MIN_DIV_PP:
+                        continue
+
                 if score < SCORE_MINIMO_RANKING:
                     continue
 
@@ -2290,6 +2311,10 @@ with tab_analise:
 
         # 3. Ranking final: score desc
         ranking = sorted(melhor_por_jogo.values(), key=lambda x: x["score"], reverse=True)
+
+        # Fixture IDs selecionados pelo Sniper — usados para dedup cross-aba
+        # (Estrategista não exibirá o mesmo jogo que já aparece aqui)
+        _sniper_fixture_ids = {p["fixture_id"] for p in ranking}
 
         # ── Kelly Portfólio: armazena total e reescala stakes ────────────
         _kelly_sum_gols = sum(p["kelly"] for p in ranking)
@@ -2681,6 +2706,23 @@ with tab_analise:
                             and eff_odd_mn <= odd_mkt <= odd_mx):
                         continue
 
+                    # ── Regra 3 — RF direto: exigência crescente para odds altas ──
+                    # Para resultados raros (odd > 3.0), o calibrador tem menos amostras
+                    # e os erros têm impacto maior. A margem de segurança cresce com a
+                    # variância: cada tier exige EV maior E que o modelo seja ao menos
+                    # 25% mais confiante que o mercado implícito.
+                    if mercado in ("HOME", "DRAW", "AWAY"):
+                        _prob_impl = (100.0 / odd_mkt) if odd_mkt > 0 else 100.0
+                        _conf_ratio = prob_pct / _prob_impl if _prob_impl > 0 else 0.0
+                        if odd_mkt > 4.0:
+                            # odd > 4.0: EV ≥ 20% + modelo 25% acima do implícito
+                            if ev < 20.0 or _conf_ratio < 1.25:
+                                continue
+                        elif odd_mkt > 3.0:
+                            # odd 3.0–4.0: EV ≥ 15% + modelo 20% acima do implícito
+                            if ev < 15.0 or _conf_ratio < 1.20:
+                                continue
+
                     stake_mo = calcular_stake_final(
                         comp.get("kelly_fracao", 0), banca_atual, piso_kelly, teto_pct
                     )
@@ -2732,6 +2774,27 @@ with tab_analise:
                 if fid not in melhor_mo or _ev_dedup > melhor_mo[fid].get("_ev_dedup", melhor_mo[fid]["ev"]):
                     melhor_mo[fid] = c
             ranking_mo = sorted(melhor_mo.values(), key=lambda x: x["ev"], reverse=True)
+
+            # ── Regra 4 — Deduplicação cross-aba (Sniper ↔ Estrategista) ─
+            # Um mesmo jogo não pode aparecer nas duas abas — dobra a exposição
+            # ao mesmo resultado sem diversificação real. Sniper tem prioridade
+            # (foi computado primeiro); Estrategista remove o fixture se já está lá.
+            _sniper_ids = getattr(st.session_state, "_sniper_fixture_ids_local", None)
+            # _sniper_fixture_ids é variável local definida na seção Sniper acima
+            try:
+                _cross_excluir = _sniper_fixture_ids  # noqa: F821
+            except NameError:
+                _cross_excluir = set()
+            if _cross_excluir:
+                _antes_cross = len(ranking_mo)
+                ranking_mo = [p for p in ranking_mo
+                              if p["fixture_id"] not in _cross_excluir]
+                _removidos_cross = _antes_cross - len(ranking_mo)
+                if _removidos_cross:
+                    st.caption(
+                        f"ℹ️ {_removidos_cross} jogo(s) removido(s) por duplicidade "
+                        "com o Sniper de Gols (dedup cross-aba)."
+                    )
 
             # ── Kelly Portfólio: armazena total e reescala stakes ────────
             _kelly_sum_mo = sum(p["kelly"] for p in ranking_mo)
