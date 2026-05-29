@@ -2934,20 +2934,29 @@ with tab_analise:
                         "heur_nota":    heur_nota_mo,
                     })
 
-            # Deduplicação: um mercado por jogo (maior EV dentro da faixa aprovada)
-            # Anti-phantom-DRAW: quando DRAW EV >40%, aplica desconto de 15pp para fins de
-            # deduplicação — EV muito alto em DRAW geralmente indica D-C superestimando,
-            # e outros mercados do jogo (AWAY/HOME) devem ter preferência se aprovados.
-            melhor_mo: dict[str, dict] = {}
+            # Deduplicação — dois tracks independentes por fixture:
+            #   • Direto  (HOME/DRAW/AWAY): melhor EV por jogo
+            #   • DC      (1X/X2/12):       melhor EV por jogo
+            # Um mesmo jogo pode ter UM pick em cada track — são mercados distintos
+            # (HOME só ganha na vitória; 1X ganha em vitória OU empate). Tracks separados
+            # garantem que um DC não seja silenciado por um HOME de maior EV do mesmo jogo.
+            # Anti-phantom-DRAW: desconto de 15pp no EV de DRAW>40% para fins de dedup.
+            _DC_MARKETS = {"1X", "X2", "12"}
+            melhor_direto: dict[str, dict] = {}
+            melhor_dc:     dict[str, dict] = {}
             for c in candidatos_mo:
                 fid = c["fixture_id"]
                 _ev_dedup = c["ev"]
                 if c["mercado"] == "DRAW" and _ev_dedup > 40.0:
-                    _ev_dedup -= 15.0  # desconto anti-phantom para fins de dedup apenas
+                    _ev_dedup -= 15.0
                 c["_ev_dedup"] = _ev_dedup
-                if fid not in melhor_mo or _ev_dedup > melhor_mo[fid].get("_ev_dedup", melhor_mo[fid]["ev"]):
-                    melhor_mo[fid] = c
-            ranking_mo = sorted(melhor_mo.values(), key=lambda x: x["ev"], reverse=True)
+                _track = melhor_dc if c["mercado"] in _DC_MARKETS else melhor_direto
+                if fid not in _track or _ev_dedup > _track[fid].get("_ev_dedup", _track[fid]["ev"]):
+                    _track[fid] = c
+            ranking_mo = sorted(
+                list(melhor_direto.values()) + list(melhor_dc.values()),
+                key=lambda x: x["ev"], reverse=True,
+            )
 
             # ── Regra 4 — Deduplicação cross-aba (Sniper ↔ Estrategista) ─
             # Um mesmo jogo não pode aparecer nas duas abas — dobra a exposição
