@@ -71,14 +71,14 @@ MARGEM_BOOKMAKER_DEFAULT = 1.05
 # GapConfig: sem gap para Over (D-C biasado já filtra), gap 0.5 para Under
 # EvConfig:  EV>=20% para Under elimina falsos positivos estruturais do D-C
 GAP_CONFIG_PROD = GapConfig(gap_over_min=0.0, gap_under_min=0.5)
-EV_CONFIG_PROD  = EvConfig(ev_min_over=5.0,  ev_min_under=20.0)
+EV_CONFIG_PROD  = EvConfig(ev_min_over=3.0,  ev_min_under=20.0)
 
 # ── Filtros 1X2 / Dupla Chance (H1-HOME-Only, homologados no laboratório V6) ──
 # Faixas de EV validadas por análise granular de 2349 picks / 12 janelas walk-forward.
 # Isotônico aplicado APENAS em HOME — DRAW/AWAY usam probabilidade pura RAW do D-C.
 _1X2_MERCADOS   = {"HOME", "DRAW", "AWAY", "1X", "X2", "12"}
 
-_EV_MIN: dict   = {"HOME": 20.0, "DRAW": 28.0, "AWAY": 7.0,  "1X": 8.0,  "X2": 8.0,  "12": 8.0}
+_EV_MIN: dict   = {"HOME": 5.0,  "DRAW": 28.0, "AWAY": 3.0,  "1X": 3.0,  "X2": 3.0,  "12": 3.0}
 _EV_MAX: dict   = {"HOME": 50.0, "DRAW": 80.0, "AWAY": 22.0, "1X": 18.0, "X2": 18.0, "12": 18.0}
 _PROB_MIN: dict = {"HOME": 45.0, "DRAW": 22.0, "AWAY": 28.0, "1X": 65.0, "X2": 65.0, "12": 65.0}
 _ODD_MIN: dict  = {"HOME": 1.80, "DRAW": 2.80, "AWAY": 1.60, "1X": 1.25, "X2": 1.25, "12": 1.25}
@@ -1192,6 +1192,205 @@ def extrair_forma_times(
         }
     except Exception:
         return _vazio
+
+
+def _render_pick_contexto(p: dict) -> None:
+    """
+    Expander de análise de contexto por pick — usado no Sniper e no Estrategista.
+    Não faz chamadas de API: usa apenas dados já presentes no pick dict (dc_ctx, heur_nota, etc.).
+
+    Blocos:
+      1. Competição + flags (Copa, dados parciais, cobertura baixa, fase eliminatória)
+      2. Forma recente + H2H (últimos 5j de cada time + histórico de confrontos)
+      3. Argumentos do modelo (pro/contra, parsed do heur_nota)
+      4. Scout stats (chutes, posse, escanteios — quando disponíveis)
+      5. Dados internos do modelo D-C (λ, μ, ρ, n_jogos calibração)
+    """
+    with st.expander("🔍 Análise de Contexto", expanded=False):
+        _ctx  = p.get("dc_ctx") or {}
+        _liga = p.get("liga", "—")
+        _lr   = p.get("league_round", "")
+        _lt   = p.get("league_type", "League")
+        _jogo = p.get("jogo", "H v A")
+
+        if " v " in _jogo:
+            home_name, away_name = _jogo.split(" v ", 1)
+            home_name = home_name.strip()
+            away_name = away_name.strip()
+        else:
+            home_name, away_name = "Casa", "Fora"
+
+        # ── Bloco 1: Competição e flags ──────────────────────────────
+        _copa_kw = ("cup", "copa", "coupe", "pokal", "league cup", "fa cup",
+                    "champions", "europa", "conference", "libertadores",
+                    "sulamericana", "concacaf", "afc", "world cup",
+                    "nations league", "eliminatória", "qualifier")
+        _is_copa = (_lt == "Cup") or any(kw in _liga.lower() for kw in _copa_kw)
+        _knockout_kw = ("final", "semi-final", "quarter", "round of", "knockout",
+                        "mata-mata", "oitavas", "quartas", "semifinal", "eliminação")
+        _is_knockout = any(kw in _lr.lower() for kw in _knockout_kw)
+        _is_group = any(kw in _lr.lower() for kw in ("group", "grupo", "fase de grupos", "fase de grupo"))
+
+        st.markdown(f"**🏆 {_liga}** · `{_lr or '—'}`")
+
+        _flags = []
+        if _is_copa:
+            _flags.append("⚠️ COPA / TORNEIO")
+        if not p.get("cobertura_ok", True):
+            _flags.append("⚠️ DADOS PARCIAIS")
+        if p.get("cal_marginal", False):
+            _flags.append("⚠️ COBERTURA BAIXA (<40j)")
+        if _flags:
+            st.warning("  ·  ".join(_flags))
+
+        if _is_knockout:
+            st.info("🔄 **Fase eliminatória** — verifique o resultado do 1º jogo se aplicável")
+        elif _is_group:
+            st.caption("📋 Fase de grupos — considere a situação de classificação de cada time")
+
+        st.divider()
+
+        # ── Bloco 2: Forma recente + H2H ────────────────────────────
+        _h_n5 = int(_ctx.get("h_n_last5", 0))
+        _a_n5 = int(_ctx.get("a_n_last5", 0))
+
+        col_h, col_a = st.columns(2)
+        with col_h:
+            st.markdown(f"**{home_name}**")
+            if _h_n5 >= 3:
+                _hw  = int(_ctx.get("h_wins_last5",    0))
+                _hd  = int(_ctx.get("h_draws_last5",   0))
+                _hl  = int(_ctx.get("h_losses_last5",  0))
+                _hgf = int(_ctx.get("h_gf_last5",      0))
+                _hga = int(_ctx.get("h_ga_last5",      0))
+                _hws = int(_ctx.get("h_win_streak",    0))
+                _hsm = int(_ctx.get("h_sem_marcar",    0))
+                _hcs = int(_ctx.get("h_cs_streak_casa",0))
+                st.caption(f"Últimos {_h_n5}j: **{_hw}V {_hd}E {_hl}D** · {_hgf}G+ / {_hga}G-")
+                if _hws >= 3:
+                    st.success(f"🔥 {_hws} vitórias seguidas")
+                elif _hws >= 2:
+                    st.info(f"📈 {_hws} vitórias seguidas")
+                if _hsm >= 2:
+                    st.warning(f"❌ Seca: {_hsm}j sem marcar")
+                if _hcs >= 2:
+                    st.success(f"🧱 {_hcs} clean sheets em casa")
+            else:
+                st.caption("Dados insuficientes (<3j)")
+
+        with col_a:
+            st.markdown(f"**{away_name}**")
+            if _a_n5 >= 3:
+                _aw  = int(_ctx.get("a_wins_last5",   0))
+                _ad  = int(_ctx.get("a_draws_last5",  0))
+                _al  = int(_ctx.get("a_losses_last5", 0))
+                _agf = int(_ctx.get("a_gf_last5",     0))
+                _aga = int(_ctx.get("a_ga_last5",     0))
+                _aws = int(_ctx.get("a_win_streak",   0))
+                _asm = int(_ctx.get("a_sem_marcar",   0))
+                st.caption(f"Últimos {_a_n5}j: **{_aw}V {_ad}E {_al}D** · {_agf}G+ / {_aga}G-")
+                if _aws >= 3:
+                    st.success(f"🔥 {_aws} vitórias seguidas")
+                elif _aws >= 2:
+                    st.info(f"📈 {_aws} vitórias seguidas")
+                if _asm >= 2:
+                    st.warning(f"❌ Seca: {_asm}j sem marcar")
+            else:
+                st.caption("Dados insuficientes (<3j)")
+
+        _h2h_tot = int(_ctx.get("h2h_total", 0))
+        if _h2h_tot >= 3:
+            _h2h_h = int(_ctx.get("h2h_h_wins", 0))
+            _h2h_a = int(_ctx.get("h2h_a_wins", 0))
+            _h2h_e = _h2h_tot - _h2h_h - _h2h_a
+            st.caption(
+                f"**H2H** ({_h2h_tot}j): {home_name[:14]} **{_h2h_h}V** · {_h2h_e}E · "
+                f"**{_h2h_a}V** {away_name[:14]}"
+            )
+
+        st.divider()
+
+        # ── Bloco 3: Argumentos do modelo ───────────────────────────
+        _hnota = p.get("heur_nota", "Contexto OK")
+        _hadj  = p.get("heur_adj", 0.0)
+        st.markdown("**Argumentos do modelo**")
+        _pos_kw = ("fortaleza", "dominan", "vitórias", "vit.", "rolo", "letal",
+                   "compressor", "superior", "h2h favorece", "ρ negativo",
+                   "goleadora", "sólid", "mando invicto", "zebra", "ataque bem",
+                   "clean sheets", "liga propensa ao empate reforça", "alta convicção",
+                   "favorecido", "muito alto", "muito baixo")
+        _neg_kw = ("queda", "risco", "frágil", "inoperante", "seca", "desequilíbrio",
+                   "cansado", "contradiz", "ameaça", "sem marcar", "poucos jogos",
+                   "ilusória", "zona cinzenta", "limiar", "baixo potencial",
+                   "fragilizado", "raramente marca", "incerteza", "penaliza")
+        if "·" in _hnota:
+            _parts = [s.strip() for s in _hnota.split("·") if s.strip()]
+        elif _hnota and _hnota not in ("Contexto OK", ""):
+            _parts = [_hnota]
+        else:
+            _parts = []
+
+        if _parts:
+            for _part in _parts:
+                _pl = _part.lower()
+                if any(kw in _pl for kw in _pos_kw):
+                    st.success(f"✅ {_part}")
+                elif any(kw in _pl for kw in _neg_kw):
+                    st.warning(f"❌ {_part}")
+                else:
+                    st.info(f"🔬 {_part}")
+        else:
+            st.caption("Nenhuma regra contextual disparada — sinal puramente estatístico")
+
+        st.divider()
+
+        # ── Bloco 4: Scout Stats ─────────────────────────────────────
+        _scout_map = [
+            ("shots_on_avg",      "Chutes no alvo"),
+            ("shots_total_avg",   "Chutes totais"),
+            ("possession_avg",    "Posse %"),
+            ("corners_avg",       "Escanteios"),
+            ("blocked_shots_avg", "Bloqueados"),
+            ("shots_offgoal_avg", "Fora do alvo"),
+            ("saves_avg",         "Defesas GK"),
+            ("fouls_avg",         "Faltas"),
+        ]
+        _scout_rows = [
+            (label, _ctx.get(f"h_{k}"), _ctx.get(f"a_{k}"))
+            for k, label in _scout_map
+            if _ctx.get(f"h_{k}") is not None or _ctx.get(f"a_{k}") is not None
+        ]
+        if _scout_rows:
+            st.markdown("**Scout stats** (médias da temporada)")
+            _cs1, _cs2, _cs3 = st.columns([3, 1, 1])
+            _cs1.caption("**Stat**")
+            _cs2.caption(f"**{home_name[:10]}**")
+            _cs3.caption(f"**{away_name[:10]}**")
+            for _slabel, _hv, _av in _scout_rows:
+                _cs1.caption(_slabel)
+                _cs2.caption(f"{_hv:.1f}" if _hv is not None else "—")
+                _cs3.caption(f"{_av:.1f}" if _av is not None else "—")
+        else:
+            st.caption("Scout stats indisponíveis (requer histórico local carregado)")
+
+        st.divider()
+
+        # ── Bloco 5: Dados internos do modelo D-C ───────────────────
+        _lam = float(p.get("xg_lam") or _ctx.get("alpha_h") or 1.0)
+        _mu  = float(p.get("xg_mu")  or _ctx.get("alpha_a") or 1.0)
+        _xgt = float(p.get("xg_total") or (_lam + _mu))
+        _rho = float(_ctx.get("rho", -0.05))
+        _nj_h = int(_ctx.get("n_jogos_h", 0))
+        _nj_a = int(_ctx.get("n_jogos_a", 0))
+        _media = float(_ctx.get("media_liga_gols", 0.0))
+        st.markdown("**Modelo Dixon-Coles**")
+        _dm1, _dm2, _dm3 = st.columns(3)
+        _dm1.metric("λ (casa)", f"{_lam:.2f}")
+        _dm2.metric("μ (fora)", f"{_mu:.2f}")
+        _dm3.metric("xG total", f"{_xgt:.2f}")
+        _dm1.caption(f"ρ = {_rho:.3f} {'(liga empate)' if _rho < -0.08 else ''}")
+        _dm2.caption(f"Calibração: {_nj_h}j casa / {_nj_a}j fora")
+        _dm3.caption(f"Média liga: {_media:.2f} g/j" if _media > 0 else "—")
 
 
 def consultar_gemini(picks_aprovados: list[dict]) -> str:
@@ -2341,8 +2540,8 @@ with tab_analise:
         # ainda não tem validação suficiente. BTTS_YES/OVER_15 abertas mas com pisos conservadores.
         # DC (1X/X2/12) mantido desativado enquanto DRAW (componente) não tem backtest sólido.
         _GOLS_ODD_MIN = {
-            "OVER_15":   1.50, "OVER_25":  1.50, "OVER_35":  1.55,
-            "UNDER_15":  1.55, "UNDER_25": 1.50, "UNDER_35": 1.30,
+            "OVER_15":   1.28, "OVER_25":  1.50, "OVER_35":  1.55,
+            "UNDER_15":  1.40, "UNDER_25": 1.50, "UNDER_35": 1.30,
             "BTTS_YES":  1.55, "BTTS_NO":  1.60,
         }
         # Mercados que respeitam o slider global (validados por backtest)
@@ -2445,6 +2644,71 @@ with tab_analise:
                 if mercado == "UNDER_25" and 25.0 <= comp["ev_pct"] < 30.0:
                     continue
 
+                # ── Regra 2b — BTTS_YES: λ mandante + suporte comportamental ─
+                # Regra 1 já bloqueia min(λ,μ)<0.75. Esta regra acrescenta:
+                # (a) mandante com ofensividade real: λ ≥ 0.85
+                # (b) quando há dados de forma (≥3j): nenhum dos dois em seca
+                #     de 2+ jogos e ambos com ≥3 gols marcados nos últimos 5j
+                if mercado == "BTTS_YES":
+                    _ctx_b2 = prev.get("dc_ctx") or {}
+                    _lam_b2 = float(prev.get("lambda") or 0.0)
+                    if _lam_b2 < 0.85:
+                        continue
+                    if _ctx_b2:
+                        _h_n5_b2 = int(_ctx_b2.get("h_n_last5", 0))
+                        _a_n5_b2 = int(_ctx_b2.get("a_n_last5", 0))
+                        if _h_n5_b2 >= 3 and _a_n5_b2 >= 3:
+                            if (int(_ctx_b2.get("h_sem_marcar", 0)) >= 2
+                                    or int(_ctx_b2.get("a_sem_marcar", 0)) >= 2):
+                                continue
+                            if (int(_ctx_b2.get("h_gf_last5", 0)) < 3
+                                    or int(_ctx_b2.get("a_gf_last5", 0)) < 3):
+                                continue
+
+                # ── Regra 2c — BTTS_NO: contexto defensivo obrigatório ───────
+                # BTTS_NO sem contexto defensivo claro = aposta contra tendência.
+                # xG_total ≥ 2.1: ambos ofensivos, BTTS_NO estruturalmente fraco.
+                # Quando há forma (≥3j): exige ao menos 1 time com ≤2 gols em 5j
+                # (ataque inoperante) OU mandante com ≥2 clean sheets em casa.
+                if mercado == "BTTS_NO":
+                    if xg_total_prev >= 2.1:
+                        continue
+                    _ctx_bn2 = prev.get("dc_ctx") or {}
+                    if _ctx_bn2:
+                        _h_n5_bn = int(_ctx_bn2.get("h_n_last5", 0))
+                        _a_n5_bn = int(_ctx_bn2.get("a_n_last5", 0))
+                        if _h_n5_bn >= 3 and _a_n5_bn >= 3:
+                            _h_gf_bn = int(_ctx_bn2.get("h_gf_last5", 0))
+                            _a_gf_bn = int(_ctx_bn2.get("a_gf_last5", 0))
+                            _h_cs_bn = int(_ctx_bn2.get("h_cs_streak_casa", 0))
+                            if not (_h_gf_bn <= 2 or _a_gf_bn <= 2 or _h_cs_bn >= 2):
+                                continue
+
+                # ── Regra 4 — OVER_15: condição estrutural ───────────────────
+                # Odd piso 1.50→1.28 desbloqueia mercado (odds reais: 1.10-1.35).
+                # Sem condição estrutural, qualquer EV positivo trivial dispararia.
+                # xG_total ≥ 2.2: jogo com expectativa ofensiva clara.
+                # Forma: ambos com ≥3 gols nos últimos 5j quando dados disponíveis.
+                if mercado == "OVER_15":
+                    if xg_total_prev < 2.2:
+                        continue
+                    _ctx_o15 = prev.get("dc_ctx") or {}
+                    if _ctx_o15:
+                        _h_n5_o15 = int(_ctx_o15.get("h_n_last5", 0))
+                        _a_n5_o15 = int(_ctx_o15.get("a_n_last5", 0))
+                        if _h_n5_o15 >= 3 and _a_n5_o15 >= 3:
+                            if (int(_ctx_o15.get("h_gf_last5", 0)) < 3
+                                    or int(_ctx_o15.get("a_gf_last5", 0)) < 3):
+                                continue
+
+                # ── Regra 4b — UNDER_15: condição estrutural ─────────────────
+                # Odd piso 1.55→1.40. Under 1.5 só faz sentido quando o modelo
+                # projeta jogo de baixíssima marcação: xG_total < 1.20.
+                # H5c já penaliza score quando xG ≥ 1.40; este filtro hard-bloqueia
+                # entradas onde o D-C não tem convicção de goleada defensiva.
+                if mercado == "UNDER_15" and xg_total_prev >= 1.20:
+                    continue
+
                 if score < SCORE_MINIMO_RANKING:
                     continue
 
@@ -2452,6 +2716,10 @@ with tab_analise:
                     "fixture_id":   f_id,
                     "jogo":         jogo_nome,
                     "liga":         liga_nome_j,
+                    "league_type":  j["league"].get("type", "League"),
+                    "league_round": j["league"].get("round", ""),
+                    "home_id":      j["teams"]["home"]["id"],
+                    "away_id":      j["teams"]["away"]["id"],
                     "mercado":      mercado,
                     "odd":          odd_val,
                     "prob_modelo":  prob_modelo,
@@ -2465,6 +2733,10 @@ with tab_analise:
                     "cal_marginal": _cal_marginal,
                     "heur_adj":     heur_adj,
                     "heur_nota":    heur_nota,
+                    "xg_lam":       float(prev.get("lambda")   or 0.0),
+                    "xg_mu":        float(prev.get("mu")       or 0.0),
+                    "xg_total":     float(prev.get("xg_total") or 0.0),
+                    "dc_ctx":       prev.get("dc_ctx"),
                 })
 
         # 2. Deduplicação por jogo: mantém apenas o mercado de maior score por fixture
@@ -2564,6 +2836,8 @@ with tab_analise:
                     st.warning(f"⬇️ {_hnota}")
                 else:
                     st.info(f"🔬 Contexto OK — sem regras de forma disparadas")
+                # Botão de análise de contexto por pick
+                _render_pick_contexto(p)
 
             # ── Consultora Gemini ────────────────────────────────────────
             st.markdown("#### 🤖 Consultora IA (Gemini)")
@@ -2811,11 +3085,24 @@ with tab_analise:
                     "X2": (1.22, 1.68),   # X2 barato demais = visitante esmagador (aposte direto)
                     "12": (1.18, 2.50),   # 12 mantém range normal
                 }
-                _DC_EV_MIN = {"1X": 5.0, "X2": 5.0, "12": 8.0}  # menor pq direção ancora o risco
+                _DC_EV_MIN = {"1X": 3.0, "X2": 3.0, "12": 3.0}  # menor pq direção ancora o risco
+
+                # Auto-conversão DRAW→DC ─────────────────────────────────────
+                # DRAW removido como pick direto: D-C superestima empate quando λ/μ
+                # imbalanced (phantom-draw). Quando o sinal seria forte, roteamos para
+                # 1X (se mandante favorito) ou X2 (se visitante tem força), tornando a
+                # aposta menos especulativa e mais ancorada em direção.
+                _draw_comp_ac = comparar_com_mercado(p_draw, odd_d, overround)
+                _draw_ev_ac   = _draw_comp_ac.get("ev_pct", 0)
+                _draw_signal  = (
+                    _draw_ev_ac >= 28.0
+                    and p_draw >= 22.0
+                    and 2.80 <= odd_d <= 4.99
+                    and not (30.0 <= _draw_ev_ac < 40.0)
+                )
 
                 candidatos_jogo = [
                     ("HOME", p_home, odd_h),
-                    ("DRAW", p_draw, odd_d),
                     ("AWAY", p_away, odd_a),
                     ("1X",  prev["mercados"]["1X"],  odd_1x),
                     ("X2",  prev["mercados"]["X2"],  odd_x2),
@@ -2831,21 +3118,31 @@ with tab_analise:
                     # Thresholds e labels devem usar a mesma escala.
                     _dc_label = ""  # label extra para UI
                     if mercado == "1X":
-                        # Âncora: mandante favorito. Sem isso, 1X é aposta cega no empate.
-                        if p_home < 50.0:
+                        # Âncora normal: mandante favorito (P>50%).
+                        # Auto-conversão DRAW: relaxa para P>40% quando sinal de empate forte.
+                        _p_home_min = 40.0 if _draw_signal else 50.0
+                        if p_home < _p_home_min:
                             continue
                         sw_lo, sw_hi = _DC_SWEET["1X"]
                         if not (sw_lo <= odd_mkt <= sw_hi):
                             continue
-                        _dc_label = f"🏠→🛡️ Mandante+Seguro (P_home={p_home:.1f}%)"
+                        if _draw_signal and p_home < 50.0:
+                            _dc_label = f"🔄 DRAW→1X (sinal empate convertido, P_home={p_home:.1f}%)"
+                        else:
+                            _dc_label = f"🏠→🛡️ Mandante+Seguro (P_home={p_home:.1f}%)"
                     elif mercado == "X2":
-                        # Âncora: visitante com força real. X2 com visitante fraco é puro DRAW.
-                        if p_away < 32.0:
+                        # Âncora normal: visitante com força real (P>32%).
+                        # Auto-conversão DRAW: relaxa para P>28% quando sinal de empate forte.
+                        _p_away_min = 28.0 if _draw_signal else 32.0
+                        if p_away < _p_away_min:
                             continue
                         sw_lo, sw_hi = _DC_SWEET["X2"]
                         if not (sw_lo <= odd_mkt <= sw_hi):
                             continue
-                        _dc_label = f"✈️→🛡️ Visitante+Seguro (P_away={p_away:.1f}%)"
+                        if _draw_signal and p_away < 32.0:
+                            _dc_label = f"🔄 DRAW→X2 (sinal empate convertido, P_away={p_away:.1f}%)"
+                        else:
+                            _dc_label = f"✈️→🛡️ Visitante+Seguro (P_away={p_away:.1f}%)"
 
                     comp = comparar_com_mercado(prob_pct, odd_mkt, overround)
                     if "erro" in comp:
@@ -2920,6 +3217,10 @@ with tab_analise:
                         "fixture_id":   f_id,
                         "jogo":         jogo_nome,
                         "liga":         liga_nome_j,
+                        "league_type":  j["league"].get("type", "League"),
+                        "league_round": j["league"].get("round", ""),
+                        "home_id":      j["teams"]["home"]["id"],
+                        "away_id":      j["teams"]["away"]["id"],
                         "mercado":      mercado,
                         "odd":          odd_mkt,
                         "prob_modelo":  prob_pct,
@@ -2932,6 +3233,10 @@ with tab_analise:
                         "overround":    round(overround, 4),
                         "heur_adj":     heur_adj_mo,
                         "heur_nota":    heur_nota_mo,
+                        "xg_lam":       float(prev.get("lambda")   or 0.0),
+                        "xg_mu":        float(prev.get("mu")       or 0.0),
+                        "xg_total":     float(prev.get("xg_total") or 0.0),
+                        "dc_ctx":       prev.get("dc_ctx"),
                     })
 
             # Deduplicação — dois tracks independentes por fixture:
@@ -3067,6 +3372,8 @@ with tab_analise:
                         st.warning(f"⬇️ {_hnota_mo}")
                     else:
                         st.info(f"🔬 {_hnota_mo if _hnota_mo != 'Contexto OK' else 'Contexto OK — sem regras de forma disparadas'}")
+                    # Botão de análise de contexto por pick
+                    _render_pick_contexto(p)
 
                 # Picks diretos (HOME/DRAW/AWAY)
                 for i, p in enumerate(_ranking_direto, 1):

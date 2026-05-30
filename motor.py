@@ -1062,14 +1062,14 @@ MERCADOS_PRODUCAO: frozenset = frozenset({
 })
 
 EV_MIN_POR_MERCADO: dict = {
-    "OVER_15":  5.0,
-    "OVER_25":  5.0,
-    "OVER_35":  5.0,
-    "UNDER_15": 5.0,
-    "UNDER_25": 10.0,   # mercado estrela — exige convicção maior (Seção 5.2)
-    "UNDER_35": 8.0,
-    "BTTS_YES": 5.0,
-    "BTTS_NO":  8.0,
+    "OVER_15":  2.0,   # piso baixado: mercado travado em 1.10-1.35; estrutural filtra
+    "OVER_25":  3.0,
+    "OVER_35":  3.0,
+    "UNDER_15": 2.0,   # piso baixado: estrutural xG_total<1.20 filtra
+    "UNDER_25": 10.0,  # mercado estrela — exige convicção maior (Seção 5.2)
+    "UNDER_35": 3.0,
+    "BTTS_YES": 3.0,   # estrutural λ/μ + forma filtra em app_v3
+    "BTTS_NO":  3.0,   # estrutural xG_total<2.1 + defesa filtra em app_v3
 }
 
 PROB_MIN_POR_MERCADO: dict = {

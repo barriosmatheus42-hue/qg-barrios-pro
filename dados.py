@@ -680,6 +680,41 @@ class ApiSportsClient:
 
         return odds
 
+    # ----------------------------------------------------------------
+    # Endpoint: classificação de uma liga / copa (standings)
+    # ----------------------------------------------------------------
+    def buscar_standings(self, league_id: int, season: int) -> list[dict]:
+        """
+        Retorna grupos de classificação da liga/copa.
+        Cada elemento é uma lista de dicts com: rank, team, points, goalsDiff, form, etc.
+
+        Ligas domésticas: retorna 1 grupo (tabela única).
+        Copas com grupos (Champions, etc.): retorna N grupos (um por grupo).
+        Custo: 1 crédito por chamada. Cache recomendado de 24h no app.
+
+        Retorna lista vazia em caso de erro ou liga sem standings disponíveis.
+        """
+        self.trava_saldo(1)
+        try:
+            res = requests.get(
+                f"{BASE_URL}/standings",
+                headers=self.headers,
+                params={"league": league_id, "season": season},
+                timeout=TIMEOUT_API,
+            )
+            data = res.json()
+            if data.get("errors"):
+                log.warning(f"standings({league_id}, {season}) erros: {data['errors']}")
+                return []
+            response = data.get("response", [])
+            if not response:
+                return []
+            standings_raw = response[0].get("league", {}).get("standings", [])
+            return standings_raw  # list of groups; each group is list of team rows
+        except Exception as e:
+            log.warning(f"Falha buscar_standings({league_id}, {season}): {e}")
+            return []
+
 
 # =========================================================================
 # 4. CLIENT JSONBIN (banco + parâmetros de ligas)
@@ -1611,6 +1646,10 @@ class DadosManager:
 
     def buscar_odds_jogo(self, fixture_id: int) -> dict:
         return self.api.buscar_odds_jogo(fixture_id)
+
+    def buscar_standings(self, league_id: int, season: int) -> list[dict]:
+        """Classificação de uma liga/copa. Cache de 24h recomendado no app."""
+        return self.api.buscar_standings(league_id, season)
 
 
 # =========================================================================
