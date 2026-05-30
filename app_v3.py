@@ -1300,7 +1300,8 @@ def _render_pick_contexto(p: dict) -> None:
                 st.divider()
                 _is_grp_copa = len(_stds) > 1
                 _form_icons  = {"W": "🟢", "D": "🟡", "L": "🔴"}
-                st.markdown("**Posição na tabela**")
+                _desc_ignorar = {"main round", "main group", "regular season", ""}
+                st.markdown("**📊 Posição na tabela**")
                 _sc1, _sc2 = st.columns(2)
                 for _scol, _row, _gi_val, _tname in (
                     (_sc1, _home_row, _home_gi, home_name),
@@ -1319,18 +1320,23 @@ def _render_pick_contexto(p: dict) -> None:
                             _l    = _all.get("lose", 0)
                             _gf   = (_all.get("goals") or {}).get("for",     0)
                             _ga   = (_all.get("goals") or {}).get("against", 0)
-                            _grp_str = f" · Gr.{chr(65+_gi_val)}" if _is_grp_copa and _gi_val is not None else ""
+                            _grp_str = f" · Grupo {chr(65+_gi_val)}" if _is_grp_copa and _gi_val is not None else ""
                             st.markdown(f"**{_tname}**")
-                            st.markdown(f"**#{_rk}**{_grp_str} · **{_pts}pts** · DG {_gd:+d}")
-                            st.caption(f"{_pld}j: {_w}V {_d}E {_l}D · {_gf}G+ {_ga}G-")
+                            st.markdown(f"**{_rk}º lugar**{_grp_str} · **{_pts} pontos** · Saldo de gols: {_gd:+d}")
+                            st.markdown(f"{_pld} jogos jogados: **{_w}** vitórias · **{_d}** empates · **{_l}** derrotas")
+                            st.markdown(f"Gols: **{_gf}** marcados · **{_ga}** sofridos")
                             if _form:
                                 _fi = "".join(_form_icons.get(c, c) for c in _form[-5:])
-                                st.caption(f"Forma: {_fi}")
+                                st.markdown(
+                                    f"Últimas 5 partidas: {_fi}  \n"
+                                    f"<small>🟢 vitória &nbsp;·&nbsp; 🟡 empate &nbsp;·&nbsp; 🔴 derrota</small>",
+                                    unsafe_allow_html=True,
+                                )
                             _desc = _row.get("description", "")
-                            if _desc:
-                                st.caption(f"_{_desc}_")
+                            if _desc and _desc.lower() not in _desc_ignorar:
+                                st.markdown(f"📌 _{_desc}_")
                         else:
-                            st.caption(f"**{_tname[:20]}** — posição não disponível")
+                            st.markdown(f"*{_tname[:20]} — posição não disponível*")
 
         # ── Bloco 3: Forma + H2H (só se tiver dados) ────────────────
         if _has_form or _has_h2h:
@@ -1347,7 +1353,10 @@ def _render_pick_contexto(p: dict) -> None:
                     _hws = int(_ctx.get("h_win_streak",    0))
                     _hsm = int(_ctx.get("h_sem_marcar",    0))
                     _hcs = int(_ctx.get("h_cs_streak_casa",0))
-                    st.caption(f"Últimos {_h_n5}j: **{_hw}V {_hd}E {_hl}D** · {_hgf}G+ / {_hga}G-")
+                    st.markdown(
+                        f"Últimos **{_h_n5} jogos:** **{_hw}** vitórias · **{_hd}** empates · **{_hl}** derrotas  \n"
+                        f"{_hgf} gols marcados · {_hga} gols sofridos"
+                    )
                     if _hws >= 3:
                         st.success(f"🔥 {_hws} vitórias seguidas")
                     elif _hws >= 2:
@@ -1357,7 +1366,7 @@ def _render_pick_contexto(p: dict) -> None:
                     if _hcs >= 2:
                         st.success(f"🧱 {_hcs} clean sheets em casa")
                 else:
-                    st.caption("Sem dados de forma")
+                    st.markdown("*Sem dados de forma disponíveis*")
             with col_a:
                 st.markdown(f"**{away_name}**")
                 if _a_n5 >= 3:
@@ -1368,7 +1377,10 @@ def _render_pick_contexto(p: dict) -> None:
                     _aga = int(_ctx.get("a_ga_last5",     0))
                     _aws = int(_ctx.get("a_win_streak",   0))
                     _asm = int(_ctx.get("a_sem_marcar",   0))
-                    st.caption(f"Últimos {_a_n5}j: **{_aw}V {_ad}E {_al}D** · {_agf}G+ / {_aga}G-")
+                    st.markdown(
+                        f"Últimos **{_a_n5} jogos:** **{_aw}** vitórias · **{_ad}** empates · **{_al}** derrotas  \n"
+                        f"{_agf} gols marcados · {_aga} gols sofridos"
+                    )
                     if _aws >= 3:
                         st.success(f"🔥 {_aws} vitórias seguidas")
                     elif _aws >= 2:
@@ -1376,14 +1388,15 @@ def _render_pick_contexto(p: dict) -> None:
                     if _asm >= 2:
                         st.warning(f"❌ Seca: {_asm}j sem marcar")
                 else:
-                    st.caption("Sem dados de forma")
+                    st.markdown("*Sem dados de forma disponíveis*")
             if _has_h2h:
                 _h2h_h = int(_ctx.get("h2h_h_wins", 0))
                 _h2h_a = int(_ctx.get("h2h_a_wins", 0))
                 _h2h_e = _h2h_tot - _h2h_h - _h2h_a
-                st.caption(
-                    f"**H2H** ({_h2h_tot}j): {home_name[:14]} **{_h2h_h}V** · "
-                    f"{_h2h_e}E · **{_h2h_a}V** {away_name[:14]}"
+                st.markdown(
+                    f"**⚔️ Confronto direto ({_h2h_tot} partidas):** "
+                    f"{home_name} **{_h2h_h}** vitórias · **{_h2h_e}** empates · "
+                    f"**{_h2h_a}** vitórias {away_name}"
                 )
 
         # ── Bloco 3: Argumentos (só se tiver regras disparadas) ──────
@@ -1412,14 +1425,15 @@ def _render_pick_contexto(p: dict) -> None:
         if _has_scout:
             st.divider()
             st.markdown("**Scout stats** (médias da temporada)")
-            _cs1, _cs2, _cs3 = st.columns([3, 1, 1])
-            _cs1.caption("**Stat**")
-            _cs2.caption(f"**{home_name[:10]}**")
-            _cs3.caption(f"**{away_name[:10]}**")
+            _tbl = [
+                f"| Estatística | {home_name[:15]} | {away_name[:15]} |",
+                "|:---|:---:|:---:|",
+            ]
             for _slabel, _hv, _av in _scout_rows:
-                _cs1.caption(_slabel)
-                _cs2.caption(f"{_hv:.1f}" if _hv is not None else "—")
-                _cs3.caption(f"{_av:.1f}" if _av is not None else "—")
+                _hv_s = f"{_hv:.1f}" if _hv is not None else "—"
+                _av_s = f"{_av:.1f}" if _av is not None else "—"
+                _tbl.append(f"| {_slabel} | {_hv_s} | {_av_s} |")
+            st.markdown("\n".join(_tbl))
 
         # Aviso compacto único quando não há dados locais (forma + scout + heur)
         if not _has_form and not _has_h2h and not _has_heur and not _has_scout:
@@ -1439,9 +1453,9 @@ def _render_pick_contexto(p: dict) -> None:
         _dm1.metric("λ (casa)", f"{_lam:.2f}")
         _dm2.metric("μ (fora)", f"{_mu:.2f}")
         _dm3.metric("xG total", f"{_xgt:.2f}")
-        _dm1.caption(f"ρ = {_rho:.3f} {'· liga empate' if _rho < -0.08 else ''}")
-        _dm2.caption(f"Cal.: {_nj_h}j casa / {_nj_a}j fora")
-        _dm3.caption(f"Méd. liga: {_media:.2f} g/j" if _media > 0 else "—")
+        _dm1.markdown(f"ρ = **{_rho:.3f}**{'  · propensão a empate' if _rho < -0.08 else ''}")
+        _dm2.markdown(f"Calibrado em **{_nj_h}** jogos (casa) / **{_nj_a}** jogos (fora)")
+        _dm3.markdown(f"Média de gols da liga: **{_media:.2f}** por jogo" if _media > 0 else "—")
 
 
 @st.cache_data(ttl=21600, show_spinner=False)
