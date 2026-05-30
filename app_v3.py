@@ -1197,14 +1197,8 @@ def extrair_forma_times(
 def _render_pick_contexto(p: dict) -> None:
     """
     Expander de análise de contexto por pick — usado no Sniper e no Estrategista.
-    Não faz chamadas de API: usa apenas dados já presentes no pick dict (dc_ctx, heur_nota, etc.).
-
-    Blocos:
-      1. Competição + flags (Copa, dados parciais, cobertura baixa, fase eliminatória)
-      2. Forma recente + H2H (últimos 5j de cada time + histórico de confrontos)
-      3. Argumentos do modelo (pro/contra, parsed do heur_nota)
-      4. Scout stats (chutes, posse, escanteios — quando disponíveis)
-      5. Dados internos do modelo D-C (λ, μ, ρ, n_jogos calibração)
+    Não faz chamadas de API: usa apenas dados já presentes no pick dict.
+    Renderiza apenas blocos com conteúdo real — sem espaço vazio quando não há histórico local.
     """
     with st.expander("🔍 Análise de Contexto", expanded=False):
         _ctx  = p.get("dc_ctx") or {}
@@ -1220,16 +1214,57 @@ def _render_pick_contexto(p: dict) -> None:
         else:
             home_name, away_name = "Casa", "Fora"
 
-        # ── Bloco 1: Competição e flags ──────────────────────────────
+        # ── Pré-computar disponibilidade de cada bloco ───────────────
+        _h_n5    = int(_ctx.get("h_n_last5", 0))
+        _a_n5    = int(_ctx.get("a_n_last5", 0))
+        _has_form = _h_n5 >= 3 or _a_n5 >= 3
+        _h2h_tot = int(_ctx.get("h2h_total", 0))
+        _has_h2h = _h2h_tot >= 3
+
+        _hnota = p.get("heur_nota", "Contexto OK")
+        if "·" in _hnota:
+            _parts = [s.strip() for s in _hnota.split("·") if s.strip()]
+        elif _hnota and _hnota not in ("Contexto OK", ""):
+            _parts = [_hnota]
+        else:
+            _parts = []
+        _has_heur = bool(_parts)
+
+        _scout_map = [
+            ("shots_on_avg",      "Chutes no alvo"),
+            ("shots_total_avg",   "Chutes totais"),
+            ("possession_avg",    "Posse %"),
+            ("corners_avg",       "Escanteios"),
+            ("blocked_shots_avg", "Bloqueados"),
+            ("shots_offgoal_avg", "Fora do alvo"),
+            ("saves_avg",         "Defesas GK"),
+            ("fouls_avg",         "Faltas"),
+        ]
+        _scout_rows = [
+            (label, _ctx.get(f"h_{k}"), _ctx.get(f"a_{k}"))
+            for k, label in _scout_map
+            if _ctx.get(f"h_{k}") is not None or _ctx.get(f"a_{k}") is not None
+        ]
+        _has_scout = bool(_scout_rows)
+
+        # ── Bloco 1: Competição e flags (sempre renderiza) ───────────
         _copa_kw = ("cup", "copa", "coupe", "pokal", "league cup", "fa cup",
                     "champions", "europa", "conference", "libertadores",
                     "sulamericana", "concacaf", "afc", "world cup",
                     "nations league", "eliminatória", "qualifier")
         _is_copa = (_lt == "Cup") or any(kw in _liga.lower() for kw in _copa_kw)
-        _knockout_kw = ("final", "semi-final", "quarter", "round of", "knockout",
-                        "mata-mata", "oitavas", "quartas", "semifinal", "eliminação")
-        _is_knockout = any(kw in _lr.lower() for kw in _knockout_kw)
-        _is_group = any(kw in _lr.lower() for kw in ("group", "grupo", "fase de grupos", "fase de grupo"))
+
+        # "final" sozinho pode ser a última rodada de liga regular (ex: J1 "Final" = rodada 34).
+        # Só detecta eliminatória em termos compostos ou context Copa confirmada.
+        _lr_lower = _lr.lower()
+        _is_knockout = any(kw in _lr_lower for kw in (
+            "semi-final", "quarter-final", "quarter final", "round of",
+            "knockout", "mata-mata", "oitavas", "quartas", "semifinal",
+            "eliminação", "1/4", "1/8", "1/16",
+        )) or (_is_copa and _lr_lower in ("final",))
+        _is_group = any(kw in _lr_lower for kw in (
+            "group", "grupo", "fase de grupos", "fase de grupo",
+        ))
 
         st.markdown(f"**🏆 {_liga}** · `{_lr or '—'}`")
 
@@ -1248,89 +1283,73 @@ def _render_pick_contexto(p: dict) -> None:
         elif _is_group:
             st.caption("📋 Fase de grupos — considere a situação de classificação de cada time")
 
-        st.divider()
+        # ── Bloco 2: Forma + H2H (só se tiver dados) ────────────────
+        if _has_form or _has_h2h:
+            st.divider()
+            col_h, col_a = st.columns(2)
+            with col_h:
+                st.markdown(f"**{home_name}**")
+                if _h_n5 >= 3:
+                    _hw  = int(_ctx.get("h_wins_last5",    0))
+                    _hd  = int(_ctx.get("h_draws_last5",   0))
+                    _hl  = int(_ctx.get("h_losses_last5",  0))
+                    _hgf = int(_ctx.get("h_gf_last5",      0))
+                    _hga = int(_ctx.get("h_ga_last5",      0))
+                    _hws = int(_ctx.get("h_win_streak",    0))
+                    _hsm = int(_ctx.get("h_sem_marcar",    0))
+                    _hcs = int(_ctx.get("h_cs_streak_casa",0))
+                    st.caption(f"Últimos {_h_n5}j: **{_hw}V {_hd}E {_hl}D** · {_hgf}G+ / {_hga}G-")
+                    if _hws >= 3:
+                        st.success(f"🔥 {_hws} vitórias seguidas")
+                    elif _hws >= 2:
+                        st.info(f"📈 {_hws} vitórias seguidas")
+                    if _hsm >= 2:
+                        st.warning(f"❌ Seca: {_hsm}j sem marcar")
+                    if _hcs >= 2:
+                        st.success(f"🧱 {_hcs} clean sheets em casa")
+                else:
+                    st.caption("Sem dados de forma")
+            with col_a:
+                st.markdown(f"**{away_name}**")
+                if _a_n5 >= 3:
+                    _aw  = int(_ctx.get("a_wins_last5",   0))
+                    _ad  = int(_ctx.get("a_draws_last5",  0))
+                    _al  = int(_ctx.get("a_losses_last5", 0))
+                    _agf = int(_ctx.get("a_gf_last5",     0))
+                    _aga = int(_ctx.get("a_ga_last5",     0))
+                    _aws = int(_ctx.get("a_win_streak",   0))
+                    _asm = int(_ctx.get("a_sem_marcar",   0))
+                    st.caption(f"Últimos {_a_n5}j: **{_aw}V {_ad}E {_al}D** · {_agf}G+ / {_aga}G-")
+                    if _aws >= 3:
+                        st.success(f"🔥 {_aws} vitórias seguidas")
+                    elif _aws >= 2:
+                        st.info(f"📈 {_aws} vitórias seguidas")
+                    if _asm >= 2:
+                        st.warning(f"❌ Seca: {_asm}j sem marcar")
+                else:
+                    st.caption("Sem dados de forma")
+            if _has_h2h:
+                _h2h_h = int(_ctx.get("h2h_h_wins", 0))
+                _h2h_a = int(_ctx.get("h2h_a_wins", 0))
+                _h2h_e = _h2h_tot - _h2h_h - _h2h_a
+                st.caption(
+                    f"**H2H** ({_h2h_tot}j): {home_name[:14]} **{_h2h_h}V** · "
+                    f"{_h2h_e}E · **{_h2h_a}V** {away_name[:14]}"
+                )
 
-        # ── Bloco 2: Forma recente + H2H ────────────────────────────
-        _h_n5 = int(_ctx.get("h_n_last5", 0))
-        _a_n5 = int(_ctx.get("a_n_last5", 0))
-
-        col_h, col_a = st.columns(2)
-        with col_h:
-            st.markdown(f"**{home_name}**")
-            if _h_n5 >= 3:
-                _hw  = int(_ctx.get("h_wins_last5",    0))
-                _hd  = int(_ctx.get("h_draws_last5",   0))
-                _hl  = int(_ctx.get("h_losses_last5",  0))
-                _hgf = int(_ctx.get("h_gf_last5",      0))
-                _hga = int(_ctx.get("h_ga_last5",      0))
-                _hws = int(_ctx.get("h_win_streak",    0))
-                _hsm = int(_ctx.get("h_sem_marcar",    0))
-                _hcs = int(_ctx.get("h_cs_streak_casa",0))
-                st.caption(f"Últimos {_h_n5}j: **{_hw}V {_hd}E {_hl}D** · {_hgf}G+ / {_hga}G-")
-                if _hws >= 3:
-                    st.success(f"🔥 {_hws} vitórias seguidas")
-                elif _hws >= 2:
-                    st.info(f"📈 {_hws} vitórias seguidas")
-                if _hsm >= 2:
-                    st.warning(f"❌ Seca: {_hsm}j sem marcar")
-                if _hcs >= 2:
-                    st.success(f"🧱 {_hcs} clean sheets em casa")
-            else:
-                st.caption("Dados insuficientes (<3j)")
-
-        with col_a:
-            st.markdown(f"**{away_name}**")
-            if _a_n5 >= 3:
-                _aw  = int(_ctx.get("a_wins_last5",   0))
-                _ad  = int(_ctx.get("a_draws_last5",  0))
-                _al  = int(_ctx.get("a_losses_last5", 0))
-                _agf = int(_ctx.get("a_gf_last5",     0))
-                _aga = int(_ctx.get("a_ga_last5",     0))
-                _aws = int(_ctx.get("a_win_streak",   0))
-                _asm = int(_ctx.get("a_sem_marcar",   0))
-                st.caption(f"Últimos {_a_n5}j: **{_aw}V {_ad}E {_al}D** · {_agf}G+ / {_aga}G-")
-                if _aws >= 3:
-                    st.success(f"🔥 {_aws} vitórias seguidas")
-                elif _aws >= 2:
-                    st.info(f"📈 {_aws} vitórias seguidas")
-                if _asm >= 2:
-                    st.warning(f"❌ Seca: {_asm}j sem marcar")
-            else:
-                st.caption("Dados insuficientes (<3j)")
-
-        _h2h_tot = int(_ctx.get("h2h_total", 0))
-        if _h2h_tot >= 3:
-            _h2h_h = int(_ctx.get("h2h_h_wins", 0))
-            _h2h_a = int(_ctx.get("h2h_a_wins", 0))
-            _h2h_e = _h2h_tot - _h2h_h - _h2h_a
-            st.caption(
-                f"**H2H** ({_h2h_tot}j): {home_name[:14]} **{_h2h_h}V** · {_h2h_e}E · "
-                f"**{_h2h_a}V** {away_name[:14]}"
-            )
-
-        st.divider()
-
-        # ── Bloco 3: Argumentos do modelo ───────────────────────────
-        _hnota = p.get("heur_nota", "Contexto OK")
-        _hadj  = p.get("heur_adj", 0.0)
-        st.markdown("**Argumentos do modelo**")
-        _pos_kw = ("fortaleza", "dominan", "vitórias", "vit.", "rolo", "letal",
-                   "compressor", "superior", "h2h favorece", "ρ negativo",
-                   "goleadora", "sólid", "mando invicto", "zebra", "ataque bem",
-                   "clean sheets", "liga propensa ao empate reforça", "alta convicção",
-                   "favorecido", "muito alto", "muito baixo")
-        _neg_kw = ("queda", "risco", "frágil", "inoperante", "seca", "desequilíbrio",
-                   "cansado", "contradiz", "ameaça", "sem marcar", "poucos jogos",
-                   "ilusória", "zona cinzenta", "limiar", "baixo potencial",
-                   "fragilizado", "raramente marca", "incerteza", "penaliza")
-        if "·" in _hnota:
-            _parts = [s.strip() for s in _hnota.split("·") if s.strip()]
-        elif _hnota and _hnota not in ("Contexto OK", ""):
-            _parts = [_hnota]
-        else:
-            _parts = []
-
-        if _parts:
+        # ── Bloco 3: Argumentos (só se tiver regras disparadas) ──────
+        if _has_heur:
+            st.divider()
+            st.markdown("**Argumentos do modelo**")
+            _pos_kw = ("fortaleza", "dominan", "vitórias", "vit.", "rolo", "letal",
+                       "compressor", "superior", "h2h favorece", "ρ negativo",
+                       "goleadora", "sólid", "mando invicto", "zebra", "ataque bem",
+                       "clean sheets", "liga propensa ao empate reforça", "alta convicção",
+                       "favorecido", "muito alto", "muito baixo")
+            _neg_kw = ("queda", "risco", "frágil", "inoperante", "seca", "desequilíbrio",
+                       "cansado", "contradiz", "ameaça", "sem marcar", "poucos jogos",
+                       "ilusória", "zona cinzenta", "limiar", "baixo potencial",
+                       "fragilizado", "raramente marca", "incerteza", "penaliza")
             for _part in _parts:
                 _pl = _part.lower()
                 if any(kw in _pl for kw in _pos_kw):
@@ -1339,28 +1358,10 @@ def _render_pick_contexto(p: dict) -> None:
                     st.warning(f"❌ {_part}")
                 else:
                     st.info(f"🔬 {_part}")
-        else:
-            st.caption("Nenhuma regra contextual disparada — sinal puramente estatístico")
 
-        st.divider()
-
-        # ── Bloco 4: Scout Stats ─────────────────────────────────────
-        _scout_map = [
-            ("shots_on_avg",      "Chutes no alvo"),
-            ("shots_total_avg",   "Chutes totais"),
-            ("possession_avg",    "Posse %"),
-            ("corners_avg",       "Escanteios"),
-            ("blocked_shots_avg", "Bloqueados"),
-            ("shots_offgoal_avg", "Fora do alvo"),
-            ("saves_avg",         "Defesas GK"),
-            ("fouls_avg",         "Faltas"),
-        ]
-        _scout_rows = [
-            (label, _ctx.get(f"h_{k}"), _ctx.get(f"a_{k}"))
-            for k, label in _scout_map
-            if _ctx.get(f"h_{k}") is not None or _ctx.get(f"a_{k}") is not None
-        ]
-        if _scout_rows:
+        # ── Bloco 4: Scout stats (só se tiver dados) ─────────────────
+        if _has_scout:
+            st.divider()
             st.markdown("**Scout stats** (médias da temporada)")
             _cs1, _cs2, _cs3 = st.columns([3, 1, 1])
             _cs1.caption("**Stat**")
@@ -1370,16 +1371,17 @@ def _render_pick_contexto(p: dict) -> None:
                 _cs1.caption(_slabel)
                 _cs2.caption(f"{_hv:.1f}" if _hv is not None else "—")
                 _cs3.caption(f"{_av:.1f}" if _av is not None else "—")
-        else:
-            st.caption("Scout stats indisponíveis (requer histórico local carregado)")
 
+        # Aviso compacto único quando não há dados locais (forma + scout + heur)
+        if not _has_form and not _has_h2h and not _has_heur and not _has_scout:
+            st.caption("📂 Histórico local não carregado — forma, scout e H2H requerem dados locais")
+
+        # ── Bloco 5: Modelo D-C (sempre renderiza) ───────────────────
         st.divider()
-
-        # ── Bloco 5: Dados internos do modelo D-C ───────────────────
-        _lam = float(p.get("xg_lam") or _ctx.get("alpha_h") or 1.0)
-        _mu  = float(p.get("xg_mu")  or _ctx.get("alpha_a") or 1.0)
-        _xgt = float(p.get("xg_total") or (_lam + _mu))
-        _rho = float(_ctx.get("rho", -0.05))
+        _lam  = float(p.get("xg_lam")   or _ctx.get("alpha_h") or 1.0)
+        _mu   = float(p.get("xg_mu")    or _ctx.get("alpha_a") or 1.0)
+        _xgt  = float(p.get("xg_total") or (_lam + _mu))
+        _rho  = float(_ctx.get("rho", -0.05))
         _nj_h = int(_ctx.get("n_jogos_h", 0))
         _nj_a = int(_ctx.get("n_jogos_a", 0))
         _media = float(_ctx.get("media_liga_gols", 0.0))
@@ -1388,9 +1390,9 @@ def _render_pick_contexto(p: dict) -> None:
         _dm1.metric("λ (casa)", f"{_lam:.2f}")
         _dm2.metric("μ (fora)", f"{_mu:.2f}")
         _dm3.metric("xG total", f"{_xgt:.2f}")
-        _dm1.caption(f"ρ = {_rho:.3f} {'(liga empate)' if _rho < -0.08 else ''}")
-        _dm2.caption(f"Calibração: {_nj_h}j casa / {_nj_a}j fora")
-        _dm3.caption(f"Média liga: {_media:.2f} g/j" if _media > 0 else "—")
+        _dm1.caption(f"ρ = {_rho:.3f} {'· liga empate' if _rho < -0.08 else ''}")
+        _dm2.caption(f"Cal.: {_nj_h}j casa / {_nj_a}j fora")
+        _dm3.caption(f"Méd. liga: {_media:.2f} g/j" if _media > 0 else "—")
 
 
 def consultar_gemini(picks_aprovados: list[dict]) -> str:
