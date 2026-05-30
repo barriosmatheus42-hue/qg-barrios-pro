@@ -1444,19 +1444,17 @@ def _render_pick_contexto(p: dict) -> None:
         _dm3.caption(f"Méd. liga: {_media:.2f} g/j" if _media > 0 else "—")
 
 
-def _buscar_standings_cached(league_id: int, season: int) -> list[list[dict]]:
+@st.cache_data(ttl=21600, show_spinner=False)
+def _buscar_standings_cached(league_id: int, season: int) -> list:
     """
-    Retorna standings da liga/copa. Cache em session_state (1 chamada por liga por sessão).
+    Retorna standings da liga/copa. Cache de 6h (21600s) para refletir rodadas do dia.
     Retorna lista de grupos: ligas domésticas = 1 grupo; Copas com grupos = N grupos.
-    Custo: 1 crédito por liga na primeira chamada da sessão.
+    Custo: 1 crédito por liga por cache miss (~4×/dia máximo).
     """
-    _key = f"_std_{league_id}_{season}"
-    if _key not in st.session_state:
-        try:
-            st.session_state[_key] = dm.buscar_standings(league_id, season)
-        except Exception:
-            st.session_state[_key] = []
-    return st.session_state.get(_key, [])
+    try:
+        return dm.buscar_standings(league_id, season)
+    except Exception:
+        return []
 
 
 def consultar_gemini(picks_aprovados: list[dict]) -> str:
@@ -2783,7 +2781,7 @@ with tab_analise:
                     "jogo":          jogo_nome,
                     "liga":          liga_nome_j,
                     "league_id":     l_id_j,
-                    "league_season": detectar_temporada_atual(),
+                    "league_season": j["league"].get("season", detectar_temporada_atual()),
                     "league_type":   j["league"].get("type", "League"),
                     "league_round":  j["league"].get("round", ""),
                     "home_id":       j["teams"]["home"]["id"],
@@ -3286,7 +3284,7 @@ with tab_analise:
                         "jogo":          jogo_nome,
                         "liga":          liga_nome_j,
                         "league_id":     l_id,
-                        "league_season": detectar_temporada_atual(),
+                        "league_season": j["league"].get("season", detectar_temporada_atual()),
                         "league_type":   j["league"].get("type", "League"),
                         "league_round":  j["league"].get("round", ""),
                         "home_id":       j["teams"]["home"]["id"],
