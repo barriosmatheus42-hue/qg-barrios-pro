@@ -1283,7 +1283,56 @@ def _render_pick_contexto(p: dict) -> None:
         elif _is_group:
             st.caption("📋 Fase de grupos — considere a situação de classificação de cada time")
 
-        # ── Bloco 2: Forma + H2H (só se tiver dados) ────────────────
+        # ── Bloco 2: Posição na tabela (standings) ──────────────────
+        _l_id_ctx  = p.get("league_id")
+        _l_sea_ctx = p.get("league_season", detectar_temporada_atual())
+        if _l_id_ctx:
+            _stds = _buscar_standings_cached(int(_l_id_ctx), _l_sea_ctx)
+            _home_row, _away_row, _home_gi, _away_gi = None, None, None, None
+            for _gi, _grp in enumerate(_stds):
+                for _row in _grp:
+                    _tid = _row.get("team", {}).get("id")
+                    if _tid == p.get("home_id"):
+                        _home_row, _home_gi = _row, _gi
+                    elif _tid == p.get("away_id"):
+                        _away_row, _away_gi = _row, _gi
+            if _home_row or _away_row:
+                st.divider()
+                _is_grp_copa = len(_stds) > 1
+                _form_icons  = {"W": "🟢", "D": "🟡", "L": "🔴"}
+                st.markdown("**Posição na tabela**")
+                _sc1, _sc2 = st.columns(2)
+                for _scol, _row, _gi_val, _tname in (
+                    (_sc1, _home_row, _home_gi, home_name),
+                    (_sc2, _away_row, _away_gi, away_name),
+                ):
+                    with _scol:
+                        if _row:
+                            _rk   = _row.get("rank", "?")
+                            _pts  = _row.get("points", 0)
+                            _gd   = _row.get("goalsDiff", 0)
+                            _form = _row.get("form", "")
+                            _all  = _row.get("all", {})
+                            _pld  = _all.get("played", 0)
+                            _w    = _all.get("win",  0)
+                            _d    = _all.get("draw", 0)
+                            _l    = _all.get("lose", 0)
+                            _gf   = (_all.get("goals") or {}).get("for",     0)
+                            _ga   = (_all.get("goals") or {}).get("against", 0)
+                            _grp_str = f" · Gr.{chr(65+_gi_val)}" if _is_grp_copa and _gi_val is not None else ""
+                            st.markdown(f"**{_tname}**")
+                            st.markdown(f"**#{_rk}**{_grp_str} · **{_pts}pts** · DG {_gd:+d}")
+                            st.caption(f"{_pld}j: {_w}V {_d}E {_l}D · {_gf}G+ {_ga}G-")
+                            if _form:
+                                _fi = "".join(_form_icons.get(c, c) for c in _form[-5:])
+                                st.caption(f"Forma: {_fi}")
+                            _desc = _row.get("description", "")
+                            if _desc:
+                                st.caption(f"_{_desc}_")
+                        else:
+                            st.caption(f"**{_tname[:20]}** — posição não disponível")
+
+        # ── Bloco 3: Forma + H2H (só se tiver dados) ────────────────
         if _has_form or _has_h2h:
             st.divider()
             col_h, col_a = st.columns(2)
@@ -1393,6 +1442,21 @@ def _render_pick_contexto(p: dict) -> None:
         _dm1.caption(f"ρ = {_rho:.3f} {'· liga empate' if _rho < -0.08 else ''}")
         _dm2.caption(f"Cal.: {_nj_h}j casa / {_nj_a}j fora")
         _dm3.caption(f"Méd. liga: {_media:.2f} g/j" if _media > 0 else "—")
+
+
+def _buscar_standings_cached(league_id: int, season: int) -> list[list[dict]]:
+    """
+    Retorna standings da liga/copa. Cache em session_state (1 chamada por liga por sessão).
+    Retorna lista de grupos: ligas domésticas = 1 grupo; Copas com grupos = N grupos.
+    Custo: 1 crédito por liga na primeira chamada da sessão.
+    """
+    _key = f"_std_{league_id}_{season}"
+    if _key not in st.session_state:
+        try:
+            st.session_state[_key] = dm.buscar_standings(league_id, season)
+        except Exception:
+            st.session_state[_key] = []
+    return st.session_state.get(_key, [])
 
 
 def consultar_gemini(picks_aprovados: list[dict]) -> str:
@@ -2715,14 +2779,16 @@ with tab_analise:
                     continue
 
                 candidatos.append({
-                    "fixture_id":   f_id,
-                    "jogo":         jogo_nome,
-                    "liga":         liga_nome_j,
-                    "league_type":  j["league"].get("type", "League"),
-                    "league_round": j["league"].get("round", ""),
-                    "home_id":      j["teams"]["home"]["id"],
-                    "away_id":      j["teams"]["away"]["id"],
-                    "mercado":      mercado,
+                    "fixture_id":    f_id,
+                    "jogo":          jogo_nome,
+                    "liga":          liga_nome_j,
+                    "league_id":     l_id_j,
+                    "league_season": detectar_temporada_atual(),
+                    "league_type":   j["league"].get("type", "League"),
+                    "league_round":  j["league"].get("round", ""),
+                    "home_id":       j["teams"]["home"]["id"],
+                    "away_id":       j["teams"]["away"]["id"],
+                    "mercado":       mercado,
                     "odd":          odd_val,
                     "prob_modelo":  prob_modelo,
                     "prob_mercado": comp["prob_mercado_pct"],
@@ -3216,13 +3282,15 @@ with tab_analise:
                         heur_nota_mo = f"{_dc_label} · {heur_nota_mo}"
 
                     candidatos_mo.append({
-                        "fixture_id":   f_id,
-                        "jogo":         jogo_nome,
-                        "liga":         liga_nome_j,
-                        "league_type":  j["league"].get("type", "League"),
-                        "league_round": j["league"].get("round", ""),
-                        "home_id":      j["teams"]["home"]["id"],
-                        "away_id":      j["teams"]["away"]["id"],
+                        "fixture_id":    f_id,
+                        "jogo":          jogo_nome,
+                        "liga":          liga_nome_j,
+                        "league_id":     l_id,
+                        "league_season": detectar_temporada_atual(),
+                        "league_type":   j["league"].get("type", "League"),
+                        "league_round":  j["league"].get("round", ""),
+                        "home_id":       j["teams"]["home"]["id"],
+                        "away_id":       j["teams"]["away"]["id"],
                         "mercado":      mercado,
                         "odd":          odd_mkt,
                         "prob_modelo":  prob_pct,
