@@ -1247,6 +1247,12 @@ def _render_pick_contexto(p: dict) -> None:
         ]
         _has_scout = bool(_scout_rows)
 
+        # ── Pré-buscar standings (necessário para detectar mata-mata por grupos) ─
+        _l_id_ctx  = p.get("league_id")
+        _l_sea_ctx = p.get("league_season", detectar_temporada_atual())
+        _stds = _buscar_standings_cached(int(_l_id_ctx), _l_sea_ctx) if _l_id_ctx else []
+        _n_grupos = len(_stds)
+
         # ── Bloco 1: Competição e flags (sempre renderiza) ───────────
         _copa_kw = ("cup", "copa", "coupe", "pokal", "league cup", "fa cup",
                     "champions", "europa", "conference", "libertadores",
@@ -1254,14 +1260,17 @@ def _render_pick_contexto(p: dict) -> None:
                     "nations league", "eliminatória", "qualifier")
         _is_copa = (_lt == "Cup") or any(kw in _liga.lower() for kw in _copa_kw)
 
-        # "final" sozinho pode ser a última rodada de liga regular (ex: J1 "Final" = rodada 34).
-        # Só detecta eliminatória em termos compostos ou context Copa confirmada.
+        # "final" sozinho pode ser a última rodada regular (ex: J1 "Final" = rodada 34).
+        # Mas se a liga tem múltiplos grupos nos standings, a "Final" é o jogo
+        # entre os vencedores de grupo — isso é mata-mata real.
         _lr_lower = _lr.lower()
         _is_knockout = any(kw in _lr_lower for kw in (
             "semi-final", "quarter-final", "quarter final", "round of",
             "knockout", "mata-mata", "oitavas", "quartas", "semifinal",
             "eliminação", "1/4", "1/8", "1/16",
-        )) or (_is_copa and _lr_lower in ("final",))
+        )) or (_is_copa and _lr_lower in ("final",)) or (
+            _n_grupos > 1 and _lr_lower in ("final", "championship", "grand final")
+        )
         _is_group = any(kw in _lr_lower for kw in (
             "group", "grupo", "fase de grupos", "fase de grupo",
         ))
@@ -1284,10 +1293,7 @@ def _render_pick_contexto(p: dict) -> None:
             st.caption("📋 Fase de grupos — considere a situação de classificação de cada time")
 
         # ── Bloco 2: Posição na tabela (standings) ──────────────────
-        _l_id_ctx  = p.get("league_id")
-        _l_sea_ctx = p.get("league_season", detectar_temporada_atual())
         if _l_id_ctx:
-            _stds = _buscar_standings_cached(int(_l_id_ctx), _l_sea_ctx)
             _home_row, _away_row, _home_gi, _away_gi = None, None, None, None
             for _gi, _grp in enumerate(_stds):
                 for _row in _grp:
