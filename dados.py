@@ -1627,6 +1627,69 @@ class DadosManager:
             return self.carregar_banco()
         return self._banco
 
+    def bootstrap_copa_mundo_2026(self, season: int = 2026) -> ParametrosLiga:
+        """
+        Bootstrap de calibração para Copa do Mundo 2026 (league_id=1).
+
+        Combina os registros históricos de todas as Eliminatórias já no cache local
+        (CAF/AFC/CONCACAF/UEFA/CONMEBOL) mais os jogos da própria Copa 2026, se existirem.
+        Executa calibrar_copa_mundo() sobre o pool combinado e força home_advantage=1.0
+        (campo neutro — praticamente todos os jogos de Copa são em estádio neutro).
+
+        Custo: 0 créditos (usa apenas cache local — sem chamadas à API).
+        Requisito: ao menos uma Eliminatória deve ter sido calibrada previamente.
+        """
+        banco = self.carregar_banco()
+
+        ELIMINATORIAS: list[int] = [29, 30, 31, 32, 34]  # CAF, AFC, CONCACAF, UEFA, CONMEBOL
+
+        registros: list[dict] = []
+        nomes_times: dict[int, str] = {}
+
+        for el_id in ELIMINATORIAS:
+            cache_el = banco.historico_ligas.get(str(el_id), {})
+            registros.extend(cache_el.get("registros", []))
+            params_el = banco.params_ligas.get(str(el_id), {})
+            for tid_str, nome in params_el.get("nomes_times", {}).items():
+                nomes_times[int(tid_str)] = nome
+
+        # Inclui jogos da própria Copa 2026 se já existirem no cache (pós-início do torneio)
+        cache_wc = banco.historico_ligas.get("1", {})
+        registros.extend(cache_wc.get("registros", []))
+
+        if not registros:
+            raise ValueError(
+                "Nenhuma Eliminatória tem dados no cache local. "
+                "Calibre pelo menos uma Eliminatória (IDs 29, 30, 31, 32, 34) antes."
+            )
+
+        df = pd.DataFrame(registros)
+        df = df.drop_duplicates(subset=["fixture_id"])
+
+        params = calibrar_copa_mundo(
+            df,
+            league_id=1,
+            season=season,
+            nomes_times=nomes_times,
+            seasons_incluidas=[season - 1, season],
+            peso_xg=0.0,
+        )
+
+        # Campo neutro: WC jogos são em estádio neutro (exceto sedes vs próprios grupos,
+        # mas o ganho marginal de ajustar gamma por sede não justifica a complexidade).
+        params.home_advantage = 1.0
+
+        # Marca como bootstrap para a UI distinguir de calibração com jogos reais da Copa
+        params.calibrado_em = dt.datetime.now().isoformat() + "_bootstrap"
+
+        banco.params_ligas["1"] = params.to_dict()
+        self.salvar_banco(banco)
+        log.info(
+            f"Copa do Mundo 2026 bootstrapada: {params.n_jogos_calibracao} jogos, "
+            f"{len(params.times)} seleções, gamma={params.home_advantage:.3f}"
+        )
+        return params
+
     def calibrar_liga_avulsa(self, league_id: int, season: int) -> ParametrosLiga:
         """
         Fallback: calibra qualquer liga (mesmo fora de LIGAS_SUPORTADAS) sob demanda.
