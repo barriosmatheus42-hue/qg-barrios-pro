@@ -579,6 +579,61 @@ class ApiSportsClient:
         }
 
     # ----------------------------------------------------------------
+    # Endpoint: últimos N jogos finalizados de um time
+    # ----------------------------------------------------------------
+    def buscar_historico_time(self, team_id: int, n: int = 10) -> pd.DataFrame:
+        """
+        Retorna os últimos N jogos finalizados de um time via /fixtures?team=X&last=N*2.
+
+        Usado para análise D-C ad-hoc de times sem liga calibrada.
+        Custo: ~1 crédito (1 chamada à API).
+
+        Retorna DataFrame com: fixture_id, home_id, away_id, home_goals, away_goals, date.
+        """
+        self.trava_saldo(1)
+        _STATUS_FT = {"FT", "AET", "PEN", "AWD", "WO"}
+        try:
+            res = requests.get(
+                f"{BASE_URL}/fixtures",
+                headers=self.headers,
+                # Pede o dobro para garantir N finalizados após filtro de status
+                params={"team": team_id, "last": n * 2},
+                timeout=TIMEOUT_API,
+            )
+            data = res.json()
+            if data.get("errors"):
+                raise APIError(f"buscar_historico_time({team_id}): {data['errors']}")
+            jogos = data.get("response", [])
+        except requests.RequestException as e:
+            raise APIError(f"Falha de rede buscar_historico_time({team_id}): {e}") from e
+
+        registros = []
+        for j in jogos:
+            try:
+                if j["fixture"]["status"]["short"] not in _STATUS_FT:
+                    continue
+                gh = j["goals"]["home"]
+                ga = j["goals"]["away"]
+                if gh is None or ga is None:
+                    continue
+                registros.append({
+                    "fixture_id": j["fixture"]["id"],
+                    "home_id":    j["teams"]["home"]["id"],
+                    "away_id":    j["teams"]["away"]["id"],
+                    "home_goals": int(gh),
+                    "away_goals": int(ga),
+                    "date":       j["fixture"]["date"][:10],
+                })
+            except (KeyError, TypeError, ValueError):
+                continue
+            if len(registros) >= n:
+                break
+
+        return pd.DataFrame(registros) if registros else pd.DataFrame(
+            columns=["fixture_id", "home_id", "away_id", "home_goals", "away_goals", "date"]
+        )
+
+    # ----------------------------------------------------------------
     # Endpoint: odds de um jogo
     # ----------------------------------------------------------------
     def buscar_odds_jogo(self, fixture_id: int) -> dict:
@@ -1742,6 +1797,10 @@ class DadosManager:
     def buscar_standings(self, league_id: int, season: int) -> list[dict]:
         """Classificação de uma liga/copa. Cache de 24h recomendado no app."""
         return self.api.buscar_standings(league_id, season)
+
+    def buscar_historico_time(self, team_id: int, n: int = 10) -> pd.DataFrame:
+        """Últimos N jogos finalizados de um time. ~1 crédito. Delega para ApiSportsClient."""
+        return self.api.buscar_historico_time(team_id, n)
 
 
 # =========================================================================

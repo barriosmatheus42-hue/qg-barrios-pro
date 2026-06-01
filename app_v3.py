@@ -162,6 +162,37 @@ def filtrar_jogos_calibrados(agenda: list[dict],
     return calibrados, sem_cal
 
 
+def _estimar_params_adhoc(df_hist: "pd.DataFrame", team_id: int,
+                           media_global: float = 1.35) -> dict:
+    """
+    Estima alpha/beta D-C de um time a partir do histórico bruto (df com colunas
+    home_id, away_id, home_goals, away_goals).  Shrinkage s = n/(n+10).
+    Retorna dict {"alpha": float, "beta": float, "n_jogos": int}.
+    """
+    if df_hist is None or df_hist.empty:
+        return {"alpha": 1.0, "beta": 1.0, "n_jogos": 0}
+
+    gols_marcados, gols_sofridos = [], []
+    for _, r in df_hist.iterrows():
+        if r["home_id"] == team_id:
+            gols_marcados.append(r["home_goals"])
+            gols_sofridos.append(r["away_goals"])
+        elif r["away_id"] == team_id:
+            gols_marcados.append(r["away_goals"])
+            gols_sofridos.append(r["home_goals"])
+
+    n = len(gols_marcados)
+    if n == 0:
+        return {"alpha": 1.0, "beta": 1.0, "n_jogos": 0}
+
+    s = n / (n + 10)  # shrinkage: com 10 jogos = 50% peso real, 50% prior
+    media_marc = sum(gols_marcados) / n
+    media_sofr = sum(gols_sofridos) / n
+    alpha = s * (media_marc / media_global) + (1 - s) * 1.0
+    beta  = s * (media_sofr / media_global) + (1 - s) * 1.0  # nota: beta = força defensiva (quanto adversário sofre vs média)
+    return {"alpha": max(0.2, alpha), "beta": max(0.2, beta), "n_jogos": n}
+
+
 def calcular_score_qualidade(
     ev_pct: float,
     divergencia_pp: float,
@@ -2528,180 +2559,197 @@ with tab_analise:
                 _times_todos_manual[_tid_int_m] = _tdata_m
 
     if sem_cal:
-        # Agrupa por liga
-        ligas_desc: dict[tuple, list] = {}
-        for j in sem_cal:
-            l = j.get("league", {})
-            key = (l.get("id", 0), l.get("name", "?"), l.get("country", "?"))
-            ligas_desc.setdefault(key, []).append(j)
-
         if "analise_manual" not in st.session_state:
             st.session_state["analise_manual"] = {}
         _am = st.session_state["analise_manual"]
 
-        # Conta quantos podem ser analisados com params cross-liga (custo = 1 cr. odds apenas)
         _n_analisaveis_cross = sum(
             1 for j in sem_cal
             if j["teams"]["home"]["id"] in _times_todos_manual
             and j["teams"]["away"]["id"] in _times_todos_manual
         )
-        _expander_titulo = (
-            f"🔭 {len(sem_cal)} jogos fora das ligas calibradas — "
-            f"{_n_analisaveis_cross} com params cross-liga disponíveis (1 cr. cada)"
+        st.markdown(
+            f"### 🔭 {len(sem_cal)} jogos fora das ligas calibradas"
+            f"  —  {_n_analisaveis_cross} com params cross-liga · restantes usam histórico da API"
+        )
+        st.caption(
+            "✅ = ambos os times com params cross-liga (0+odds cr.)  "
+            "⚠️ = 1 time sem params (1+odds cr.)  "
+            "❌ = ambos desconhecidos — busca histórico da API (2+odds cr.)"
         )
 
-        with st.expander(_expander_titulo, expanded=True):
-            for (l_id, l_nome, l_pais), jogos in sorted(ligas_desc.items(), key=lambda x: -len(x[1])):
-                col_desc1, col_desc2 = st.columns([3, 1])
-                col_desc1.write(f"**{l_nome}** ({l_pais}, ID {l_id}) — {len(jogos)} jogo(s)")
-                if col_desc2.button(
-                    "⚡ Calibrar liga",
-                    key=f"fallback_{l_id}",
-                    help=f"Busca o histórico completo desta liga e calibra D-C (máx {TIMEOUT_CALIBRACAO_SEGUNDOS}s)."
-                ):
-                    try:
-                        with st.spinner(f"Calibrando {l_nome} (ID {l_id})..."):
-                            dm.calibrar_liga_avulsa(l_id, season)
-                        if dm.ultimo_save_jsonbin_ok:
-                            st.success(f"{l_nome} calibrada e salva na nuvem! Recarregando...")
+        _sem_cal_sorted = sorted(sem_cal, key=lambda j: j["fixture"].get("date", ""))
+
+        for j_m in _sem_cal_sorted:
+            f_id_m      = str(j_m["fixture"]["id"])
+            l_m         = j_m.get("league", {})
+            l_id_m      = l_m.get("id", 0)
+            l_nome_m    = l_m.get("name", "?")
+            l_pais_m    = l_m.get("country", "?")
+            h_id_m      = j_m["teams"]["home"]["id"]
+            a_id_m      = j_m["teams"]["away"]["id"]
+            h_nome_m    = j_m["teams"]["home"]["name"]
+            a_nome_m    = j_m["teams"]["away"]["name"]
+            hora_m      = j_m["fixture"].get("date", "")[:16].replace("T", " ")[-5:]
+            jogo_str_m  = f"{h_nome_m} × {a_nome_m}"
+            odds_m      = cache_dia.get("odds", {}).get(f_id_m)
+            state_key_m = f"{data_str}_{f_id_m}"
+
+            h_found_m = h_id_m in _times_todos_manual
+            a_found_m = a_id_m in _times_todos_manual
+
+            if h_found_m and a_found_m:
+                _cob_icon = "✅"
+                _cob_tip  = "Ambos com params cross-liga — resultado confiável"
+            elif h_found_m or a_found_m:
+                _cob_icon = "⚠️"
+                _cob_tip  = "1 time sem params calibrados — resultado indicativo"
+            else:
+                _cob_icon = "❌"
+                _cob_tip  = "Ambos desconhecidos — buscará últimos 10 jogos de cada time na API"
+
+            custo_m  = (0 if odds_m else CUSTO_ESTIMADO_ODDS_JOGO)
+            custo_m += (0 if h_found_m else 1)
+            custo_m += (0 if a_found_m else 1)
+
+            col_j1, col_j2, col_j3, col_j4 = st.columns([1, 5, 1, 2])
+            col_j1.caption(f"`{hora_m}`")
+            col_j2.write(f"**{jogo_str_m}** · _{l_nome_m}_ ({l_pais_m})")
+            col_j3.write(_cob_icon, help=_cob_tip)
+
+            if col_j4.button(f"🔍 Analisar ({custo_m} cr.)", key=f"am_{f_id_m}", use_container_width=True):
+                try:
+                    if not odds_m:
+                        with st.spinner("Buscando odds (1 cr.)…"):
+                            odds_m = dm.buscar_odds_jogo(int(f_id_m))
+                        banco.datas.setdefault(data_str, {}).setdefault("odds", {})[f_id_m] = odds_m
+                        dm.salvar_banco(banco)
+
+                    _times_mini_m: dict = {}
+                    for _tid, _found, _nome_t in [
+                        (h_id_m, h_found_m, h_nome_m),
+                        (a_id_m, a_found_m, a_nome_m),
+                    ]:
+                        if _found:
+                            _times_mini_m[_tid] = _times_todos_manual[_tid]
                         else:
-                            _ce = getattr(dm, "ultimo_save_erro", "") or "verifique conexão"
-                            st.warning(
-                                f"⚠️ {l_nome} calibrada mas **falhou ao salvar no cloud** ({_ce}). "
-                                "Os params estão no arquivo local — serão perdidos no próximo restart. "
-                                "Clique em 'Forçar Salvar no Cloud' no sidebar para tentar novamente."
-                            )
-                        st.session_state["banco"] = dm.carregar_banco(força_recarregar=True)
-                        st.rerun()
-                    except TimeoutError as e:
-                        st.error(f"⏱️ Timeout: {e}")
-                    except Exception as e:
-                        st.error(f"Não foi possível calibrar {l_nome}: {e}")
+                            with st.spinner(f"Buscando histórico de {_nome_t} (1 cr.)…"):
+                                _df_hist = dm.buscar_historico_time(_tid, n=10)
+                            _times_mini_m[_tid] = _estimar_params_adhoc(_df_hist, _tid)
 
-                # ── Análise individual por jogo (usa params cross-liga) ──────
-                for j_m in jogos:
-                    f_id_m   = str(j_m["fixture"]["id"])
-                    h_id_m   = j_m["teams"]["home"]["id"]
-                    a_id_m   = j_m["teams"]["away"]["id"]
-                    h_nome_m = j_m["teams"]["home"]["name"]
-                    a_nome_m = j_m["teams"]["away"]["name"]
-                    hora_m   = j_m["fixture"].get("date", "")[:16].replace("T", " ")[-5:]
-                    jogo_str_m = f"{h_nome_m} × {a_nome_m}"
-                    odds_m   = cache_dia.get("odds", {}).get(f_id_m)
-                    state_key_m = f"{data_str}_{f_id_m}"
+                    _params_m = ParametrosLiga(
+                        league_id=l_id_m, season=season,
+                        times=_times_mini_m,
+                        home_advantage=1.0,
+                        rho=-0.05, xi=0.002, media_liga_gols=2.5,
+                    )
+                    _prev_m = prever_jogo(
+                        _params_m, h_id_m, a_id_m,
+                        aplicar_shrink=True, cobertura_minima=10,
+                        times_fallback=_times_todos_manual,
+                    )
+                    _am[state_key_m] = {
+                        "jogo":    jogo_str_m,
+                        "liga":    l_nome_m,
+                        "prev":    _prev_m,
+                        "odds":    odds_m or {},
+                        "h_found": h_found_m,
+                        "a_found": a_found_m,
+                    }
+                    st.rerun()
+                except CreditosInsuficientesError as e:
+                    st.error(f"Saldo insuficiente: {e}")
+                except Exception as e:
+                    st.error(f"Falha na análise de {jogo_str_m}: {e}")
 
-                    h_found_m = h_id_m in _times_todos_manual
-                    a_found_m = a_id_m in _times_todos_manual
-                    if h_found_m and a_found_m:
-                        _cob_icon = "✅"
-                        _cob_tip  = "Ambos com params cross-liga — resultado confiável"
-                    elif h_found_m or a_found_m:
-                        _cob_icon = "⚠️"
-                        _cob_tip  = "1 time usa média global — resultado indicativo"
+            if state_key_m in _am:
+                _res_m  = _am[state_key_m]
+                _prev_r = _res_m["prev"]
+                _odds_r = _res_m.get("odds") or {}
+                _mktrs  = _prev_r.get("mercados", {})
+                _lam_r  = float(_prev_r.get("lambda") or 1.3)
+                _mu_r   = float(_prev_r.get("mu")     or 1.0)
+                _cob_r  = _prev_r.get("cobertura_ok", False)
+                _hf_r   = _res_m.get("h_found", False)
+                _af_r   = _res_m.get("a_found", False)
+
+                with st.container():
+                    if _hf_r and _af_r:
+                        st.caption(
+                            "✅ **Análise cross-liga** — params de outros torneios calibrados. "
+                            "Confiabilidade: boa para seleções/clubes top."
+                        )
+                    elif _hf_r or _af_r:
+                        _time_sem = _res_m["jogo"].split("×")[0 if not _hf_r else 1].strip()
+                        st.caption(
+                            f"⚠️ **Análise parcial** — *{_time_sem}* estimado do histórico da API. "
+                            "Resultado indicativo."
+                        )
                     else:
-                        _cob_icon = "❌"
-                        _cob_tip  = "Sem params — resultado baseado em médias globais apenas"
+                        st.caption(
+                            "🆕 **Análise ad-hoc** — alpha/beta estimados dos últimos 10 jogos (shrinkage 50%). "
+                            "D-C calculado com dados reais. Confiabilidade: moderada."
+                        )
 
-                    custo_m = 0 if odds_m else CUSTO_ESTIMADO_ODDS_JOGO
-                    # Para ❌ sem dados, não vale gastar crédito de odds (resultado é ruído)
-                    if not h_found_m and not a_found_m:
-                        btn_label_m = f"🔍 Analisar* ({custo_m} cr.)"
-                    else:
-                        btn_label_m = f"🔍 Analisar ({custo_m} cr.)"
-                    col_j1, col_j2, col_j3 = st.columns([5, 1, 2])
-                    col_j1.write(f"　`{hora_m}` **{jogo_str_m}**")
-                    col_j2.write(_cob_icon, help=_cob_tip)
+                    _cr1, _cr2, _cr3, _cr4 = st.columns(4)
+                    _cr1.metric("λ Casa",    f"{_lam_r:.2f}")
+                    _cr2.metric("μ Fora",    f"{_mu_r:.2f}")
+                    _cr3.metric("xG Total",  f"{_lam_r + _mu_r:.2f}")
+                    _cr4.metric("Cobertura", "✅ OK" if _cob_r else "⚠️ Baixa")
+                    _cm1, _cm2, _cm3, _cm4 = st.columns(4)
+                    for _col_mk, _mk in zip(
+                        [_cm1, _cm2, _cm3, _cm4],
+                        ["OVER_25", "UNDER_25", "BTTS_YES", "HOME"],
+                    ):
+                        _prob_mk = _mktrs.get(_mk, 0)
+                        _odd_mk  = _odds_r.get(_mk, 0)
+                        if _odd_mk > 1.0:
+                            _ev_val = round((_prob_mk / 100) * _odd_mk * 100 - 100, 1)
+                            _ev_str = f"EV {_ev_val:+.1f}%  @{_odd_mk:.2f}"
+                        else:
+                            _ev_str = "sem odd"
+                        _col_mk.metric(_mk, f"{_prob_mk:.1f}%", _ev_str, delta_color="normal")
+                    if _prev_r.get("flags"):
+                        st.caption("🚩 " + " · ".join(_prev_r["flags"]))
+                st.divider()
 
-                    if col_j3.button(btn_label_m, key=f"am_{f_id_m}", use_container_width=True):
+        # Botões de calibração por liga ao final
+        st.markdown("---")
+        st.caption("**Calibrar uma liga completa** (histórico permanente — mais caro):")
+        _ligas_sem: dict[int, tuple[str, str]] = {}
+        for _j_s in sem_cal:
+            _l_s = _j_s.get("league", {})
+            _lid_s = _l_s.get("id", 0)
+            if _lid_s not in _ligas_sem:
+                _ligas_sem[_lid_s] = (_l_s.get("name", "?"), _l_s.get("country", "?"))
+        _ncols_cal = min(len(_ligas_sem), 3)
+        if _ncols_cal:
+            _cal_cols = st.columns(_ncols_cal)
+            for _ci, (_lid_s, (_lnome_s, _lpais_s)) in enumerate(_ligas_sem.items()):
+                with _cal_cols[_ci % _ncols_cal]:
+                    if st.button(
+                        f"⚡ Calibrar {_lnome_s}",
+                        key=f"fallback_{_lid_s}",
+                        use_container_width=True,
+                        help=f"Busca histórico completo da {_lnome_s} e calibra D-C (máx {TIMEOUT_CALIBRACAO_SEGUNDOS}s).",
+                    ):
                         try:
-                            if not odds_m:
-                                with st.spinner(f"Buscando odds (1 cr.)…"):
-                                    odds_m = dm.buscar_odds_jogo(int(f_id_m))
-                                banco.datas.setdefault(data_str, {}).setdefault("odds", {})[f_id_m] = odds_m
-                                dm.salvar_banco(banco)
-
-                            _times_mini_m = {
-                                _tid: (_times_todos_manual.get(_tid)
-                                       or {"alpha": 1.0, "beta": 1.0, "n_jogos": 0})
-                                for _tid in [h_id_m, a_id_m]
-                            }
-                            _params_m = ParametrosLiga(
-                                league_id=l_id, season=season,
-                                times=_times_mini_m,
-                                home_advantage=1.0,  # campo neutro p/ amistosos
-                                rho=-0.05, xi=0.002, media_liga_gols=2.5,
-                            )
-                            _prev_m = prever_jogo(
-                                _params_m, h_id_m, a_id_m,
-                                aplicar_shrink=True, cobertura_minima=10,
-                                times_fallback=_times_todos_manual,
-                            )
-                            _am[state_key_m] = {
-                                "jogo":    jogo_str_m,
-                                "liga":    l_nome,
-                                "prev":    _prev_m,
-                                "odds":    odds_m or {},
-                                "h_found": h_found_m,
-                                "a_found": a_found_m,
-                            }
-                            st.rerun()
-                        except CreditosInsuficientesError as e:
-                            st.error(f"Saldo insuficiente: {e}")
-                        except Exception as e:
-                            st.error(f"Falha na análise de {jogo_str_m}: {e}")
-
-                    # ── Exibe resultado inline se disponível ─────────────────
-                    if state_key_m in _am:
-                        _res_m   = _am[state_key_m]
-                        _prev_r  = _res_m["prev"]
-                        _odds_r  = _res_m.get("odds") or {}
-                        _mktrs   = _prev_r.get("mercados", {})
-                        _lam_r   = float(_prev_r.get("lambda") or 1.3)
-                        _mu_r    = float(_prev_r.get("mu")     or 1.0)
-                        _cob_r   = _prev_r.get("cobertura_ok", False)
-                        _hf_r    = _res_m.get("h_found", False)
-                        _af_r    = _res_m.get("a_found", False)
-
-                        with st.container():
-                            if _hf_r and _af_r:
-                                st.caption(
-                                    f"✅ **Análise cross-liga** — params de outros torneios calibrados. "
-                                    f"Confiabilidade: boa para seleções/clubes top. Não homologado para *{_res_m['liga']}*."
-                                )
-                            elif _hf_r or _af_r:
-                                _time_sem = _res_m['jogo'].split('×')[0 if not _hf_r else 1].strip()
-                                st.caption(
-                                    f"⚠️ **Análise parcial** — *{_time_sem}* usa média global. "
-                                    "Resultado indicativo. Para precisão: calibre a liga."
-                                )
+                            with st.spinner(f"Calibrando {_lnome_s} (ID {_lid_s})..."):
+                                dm.calibrar_liga_avulsa(_lid_s, season)
+                            if dm.ultimo_save_jsonbin_ok:
+                                st.success(f"{_lnome_s} calibrada e salva!")
                             else:
-                                st.caption(
-                                    f"❌ **Análise básica** — ambos os times sem dados calibrados. "
-                                    "Valores baseados em médias globais (xG≈2.5). "
-                                    "**Custo-benefício baixo** — prefira calibrar a liga se ela for recorrente."
+                                _ce_s = getattr(dm, "ultimo_save_erro", "") or "verifique conexão"
+                                st.warning(
+                                    f"⚠️ {_lnome_s} calibrada mas falhou ao salvar no cloud ({_ce_s}). "
+                                    "Use 'Forçar Salvar no Cloud' no sidebar."
                                 )
-
-                            _cr1, _cr2, _cr3, _cr4 = st.columns(4)
-                            _cr1.metric("λ Casa",   f"{_lam_r:.2f}")
-                            _cr2.metric("μ Fora",   f"{_mu_r:.2f}")
-                            _cr3.metric("xG Total", f"{_lam_r + _mu_r:.2f}")
-                            _cr4.metric("Cobertura", "✅ OK" if _cob_r else "⚠️ Baixa")
-                            _cm1, _cm2, _cm3, _cm4 = st.columns(4)
-                            for _col_mk, _mk in zip(
-                                [_cm1, _cm2, _cm3, _cm4],
-                                ["OVER_25", "UNDER_25", "BTTS_YES", "HOME"],
-                            ):
-                                _prob_mk = _mktrs.get(_mk, 0)
-                                _odd_mk  = _odds_r.get(_mk, 0)
-                                if _odd_mk > 1.0:
-                                    _ev_val = round((_prob_mk / 100) * _odd_mk * 100 - 100, 1)
-                                    _ev_str = f"EV {_ev_val:+.1f}%  @{_odd_mk:.2f}"
-                                else:
-                                    _ev_str = "sem odd"
-                                _col_mk.metric(_mk, f"{_prob_mk:.1f}%", _ev_str, delta_color="normal")
-                            if _prev_r.get("flags"):
-                                st.caption("🚩 " + " · ".join(_prev_r["flags"]))
-                        st.divider()
+                            st.session_state["banco"] = dm.carregar_banco(força_recarregar=True)
+                            st.rerun()
+                        except TimeoutError as e:
+                            st.error(f"⏱️ Timeout: {e}")
+                        except Exception as e:
+                            st.error(f"Não foi possível calibrar {_lnome_s}: {e}")
 
     if not calibrados:
         st.warning("Nenhuma liga calibrada cobre os jogos do dia. Vá para 'Calibração'.")
