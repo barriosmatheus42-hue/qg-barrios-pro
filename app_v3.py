@@ -2113,6 +2113,7 @@ with tab_calibracao:
         timeouts: list[str] = []
         tocadas = 0
         op_idx  = 0
+        _cal_detalhes: list[str] = []   # detalhes por liga calibrada com sucesso
 
         # Passo 2a: renova timestamps das ligas inativas (sem MLE, sem créditos)
         for lid in inativas:
@@ -2131,7 +2132,16 @@ with tab_calibracao:
             nome = LIGAS_SUPORTADAS.get(lid, f"Liga {lid}")
             status_box.info(f"[{op_idx+1}/{total_ops}] ⚙️ Calibrando **{nome}**…")
             try:
-                dm.obter_params_liga(lid, season, forcar_recalibracao=True)
+                _p = dm.obter_params_liga(lid, season, forcar_recalibracao=True)
+                _rx = getattr(_p, "raio_x_times", {}) or {}
+                _ultimo_j = max(
+                    (str(v.get("ultimo_jogo", ""))[:10]
+                     for v in _rx.values() if v.get("ultimo_jogo")),
+                    default="—",
+                )
+                _cal_detalhes.append(
+                    f"**{nome}** T{_p.season} · {_p.n_jogos_calibracao} jogos · último: {_ultimo_j}"
+                )
             except CreditosInsuficientesError as e:
                 status_box.error(f"🔴 Saldo insuficiente. Parando em **{nome}**: {e}")
                 break
@@ -2144,19 +2154,7 @@ with tab_calibracao:
 
         status_box.empty()
 
-        # Relatório final
-        _erros_cal  = [e for e in erros if "(touch)" not in e]
-        _n_ok_cal   = len(com_novos) - len(timeouts) - len(_erros_cal)
-        _partes_rel = []
-        if tocadas:
-            _partes_rel.append(f"{tocadas} liga(s) inativa(s) marcadas como Frescas")
-        if _n_ok_cal > 0:
-            _partes_rel.append(f"{_n_ok_cal} liga(s) recalibrada(s) com sucesso")
-        if aguardando:
-            _partes_rel.append(
-                f"{len(aguardando)} liga(s) aguardando início (sem dados na API — créditos preservados)"
-            )
-
+        # Relatório final detalhado
         if timeouts:
             st.warning(
                 f"⏱️ {len(timeouts)} liga(s) com timeout (MLE > {TIMEOUT_CALIBRACAO_SEGUNDOS}s):\n"
@@ -2164,9 +2162,19 @@ with tab_calibracao:
             )
         if erros:
             st.warning("⚠️ Falhas:\n" + "\n".join(f"• {e}" for e in erros))
-        if _partes_rel:
-            st.success("✅ " + " · ".join(_partes_rel) + ".")
-        elif not erros and not timeouts:
+        if aguardando:
+            st.info(
+                f"⏳ {len(aguardando)} liga(s) aguardando início (sem dados na API — créditos preservados):\n"
+                + "\n".join(f"• {LIGAS_SUPORTADAS.get(l, str(l))}" for l in aguardando)
+            )
+        if tocadas:
+            st.info(f"⏸️ {tocadas} liga(s) inativa(s) marcadas como Frescas (0 créditos).")
+        if _cal_detalhes:
+            st.success(
+                f"✅ {len(_cal_detalhes)} liga(s) calibrada(s):\n"
+                + "\n".join(f"• {d}" for d in _cal_detalhes)
+            )
+        if not _cal_detalhes and not erros and not timeouts and not tocadas and not aguardando:
             st.info("Nenhuma ação executada.")
 
         try:
@@ -2414,11 +2422,21 @@ with tab_calibracao:
             _timeouts_lote = []
             _total_lote   = len(_ligas_batch)
 
+            _lote_detalhes: list[str] = []
             for _i_l, _lid_l in enumerate(_ligas_batch):
                 _nome_l = LIGAS_SUPORTADAS.get(_lid_l, f"Liga {_lid_l}")
                 _stat_lote.info(f"[{_i_l+1}/{_total_lote}] Calibrando **{_nome_l}**…")
                 try:
-                    dm.obter_params_liga(_lid_l, season, forcar_recalibracao=True)
+                    _p_l = dm.obter_params_liga(_lid_l, season, forcar_recalibracao=True)
+                    _rx_l = getattr(_p_l, "raio_x_times", {}) or {}
+                    _ult_l = max(
+                        (str(v.get("ultimo_jogo", ""))[:10]
+                         for v in _rx_l.values() if v.get("ultimo_jogo")),
+                        default="—",
+                    )
+                    _lote_detalhes.append(
+                        f"**{_nome_l}** T{_p_l.season} · {_p_l.n_jogos_calibracao}j · último: {_ult_l}"
+                    )
                 except CreditosInsuficientesError as e:
                     _stat_lote.error(f"🔴 Saldo insuficiente. Parando em **{_nome_l}**: {e}")
                     break
@@ -2436,8 +2454,11 @@ with tab_calibracao:
                 )
             if _erros_lote:
                 st.warning("⚠️ Ligas com falha:\n" + "\n".join(f"• {e}" for e in _erros_lote))
-            if not _timeouts_lote and not _erros_lote:
-                st.success(f"✅ {_total_lote} liga(s) calibrada(s) com sucesso!")
+            if _lote_detalhes:
+                st.success(
+                    f"✅ {len(_lote_detalhes)} liga(s) calibrada(s):\n"
+                    + "\n".join(f"• {d}" for d in _lote_detalhes)
+                )
 
             try:
                 st.session_state["banco"] = dm.banco_em_memoria()
@@ -2518,10 +2539,18 @@ with tab_analise:
             st.session_state["analise_manual"] = {}
         _am = st.session_state["analise_manual"]
 
-        with st.expander(
-            f"🔭 {len(sem_cal)} jogos fora das ligas calibradas — análise manual disponível",
-            expanded=bool(any(f"{data_str}_{str(j['fixture']['id'])}" in _am for j in sem_cal)),
-        ):
+        # Conta quantos podem ser analisados com params cross-liga (custo = 1 cr. odds apenas)
+        _n_analisaveis_cross = sum(
+            1 for j in sem_cal
+            if j["teams"]["home"]["id"] in _times_todos_manual
+            and j["teams"]["away"]["id"] in _times_todos_manual
+        )
+        _expander_titulo = (
+            f"🔭 {len(sem_cal)} jogos fora das ligas calibradas — "
+            f"{_n_analisaveis_cross} com params cross-liga disponíveis (1 cr. cada)"
+        )
+
+        with st.expander(_expander_titulo, expanded=True):
             for (l_id, l_nome, l_pais), jogos in sorted(ligas_desc.items(), key=lambda x: -len(x[1])):
                 col_desc1, col_desc2 = st.columns([3, 1])
                 col_desc1.write(f"**{l_nome}** ({l_pais}, ID {l_id}) — {len(jogos)} jogo(s)")
@@ -2565,16 +2594,20 @@ with tab_analise:
                     a_found_m = a_id_m in _times_todos_manual
                     if h_found_m and a_found_m:
                         _cob_icon = "✅"
-                        _cob_tip  = "Ambos com params cross-liga"
+                        _cob_tip  = "Ambos com params cross-liga — resultado confiável"
                     elif h_found_m or a_found_m:
                         _cob_icon = "⚠️"
-                        _cob_tip  = "1 time usa média global"
+                        _cob_tip  = "1 time usa média global — resultado indicativo"
                     else:
                         _cob_icon = "❌"
-                        _cob_tip  = "Ambos usam médias globais"
+                        _cob_tip  = "Sem params — resultado baseado em médias globais apenas"
 
-                    custo_m      = 0 if odds_m else CUSTO_ESTIMADO_ODDS_JOGO
-                    btn_label_m  = f"🔍 Analisar ({custo_m} cr.)"
+                    custo_m = 0 if odds_m else CUSTO_ESTIMADO_ODDS_JOGO
+                    # Para ❌ sem dados, não vale gastar crédito de odds (resultado é ruído)
+                    if not h_found_m and not a_found_m:
+                        btn_label_m = f"🔍 Analisar* ({custo_m} cr.)"
+                    else:
+                        btn_label_m = f"🔍 Analisar ({custo_m} cr.)"
                     col_j1, col_j2, col_j3 = st.columns([5, 1, 2])
                     col_j1.write(f"　`{hora_m}` **{jogo_str_m}**")
                     col_j2.write(_cob_icon, help=_cob_tip)
@@ -2619,24 +2652,40 @@ with tab_analise:
 
                     # ── Exibe resultado inline se disponível ─────────────────
                     if state_key_m in _am:
-                        _res_m  = _am[state_key_m]
-                        _prev_r = _res_m["prev"]
-                        _odds_r = _res_m.get("odds") or {}
-                        _mktrs  = _prev_r.get("mercados", {})
-                        _lam_r  = float(_prev_r.get("lambda") or 1.3)
-                        _mu_r   = float(_prev_r.get("mu")     or 1.0)
-                        _cob_r  = _prev_r.get("cobertura_ok", False)
+                        _res_m   = _am[state_key_m]
+                        _prev_r  = _res_m["prev"]
+                        _odds_r  = _res_m.get("odds") or {}
+                        _mktrs   = _prev_r.get("mercados", {})
+                        _lam_r   = float(_prev_r.get("lambda") or 1.3)
+                        _mu_r    = float(_prev_r.get("mu")     or 1.0)
+                        _cob_r   = _prev_r.get("cobertura_ok", False)
+                        _hf_r    = _res_m.get("h_found", False)
+                        _af_r    = _res_m.get("a_found", False)
+
                         with st.container():
-                            st.caption(
-                                f"⚠️ **Análise indicativa** — sem calibração específica para "
-                                f"*{_res_m['liga']}*. Usar como referência, não como modelo homologado. "
-                                f"Params: {'ambos cross-liga' if _res_m['h_found'] and _res_m['a_found'] else 'parcial/global'}."
-                            )
+                            if _hf_r and _af_r:
+                                st.caption(
+                                    f"✅ **Análise cross-liga** — params de outros torneios calibrados. "
+                                    f"Confiabilidade: boa para seleções/clubes top. Não homologado para *{_res_m['liga']}*."
+                                )
+                            elif _hf_r or _af_r:
+                                _time_sem = _res_m['jogo'].split('×')[0 if not _hf_r else 1].strip()
+                                st.caption(
+                                    f"⚠️ **Análise parcial** — *{_time_sem}* usa média global. "
+                                    "Resultado indicativo. Para precisão: calibre a liga."
+                                )
+                            else:
+                                st.caption(
+                                    f"❌ **Análise básica** — ambos os times sem dados calibrados. "
+                                    "Valores baseados em médias globais (xG≈2.5). "
+                                    "**Custo-benefício baixo** — prefira calibrar a liga se ela for recorrente."
+                                )
+
                             _cr1, _cr2, _cr3, _cr4 = st.columns(4)
                             _cr1.metric("λ Casa",   f"{_lam_r:.2f}")
                             _cr2.metric("μ Fora",   f"{_mu_r:.2f}")
                             _cr3.metric("xG Total", f"{_lam_r + _mu_r:.2f}")
-                            _cr4.metric("Cobertura","✅ OK" if _cob_r else "⚠️ Baixa")
+                            _cr4.metric("Cobertura", "✅ OK" if _cob_r else "⚠️ Baixa")
                             _cm1, _cm2, _cm3, _cm4 = st.columns(4)
                             for _col_mk, _mk in zip(
                                 [_cm1, _cm2, _cm3, _cm4],

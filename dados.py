@@ -1439,6 +1439,30 @@ class DadosManager:
 
         # Threshold mínimo de jogos — padrão 20, override para copas e seleções
         min_jogos = LIGAS_MIN_JOGOS.get(league_id, 20)
+
+        # Para seleções/Copa: ciclos de qualificação podem estar indexados sob season diferente.
+        # Ex.: Eliminatórias CONMEBOL 2026 estão sob season=2026, mas detectar_temporada_atual()
+        # retorna 2025 (junho ainda é "segunda metade" da temporada europeia).
+        # Tenta ano_atual e ano_atual-1 antes de desistir.
+        if league_id in LIGAS_COPA_MUNDO and len(df) < min_jogos:
+            for _s_alt in [ano_atual, ano_atual - 1]:
+                if _s_alt == season_principal:
+                    continue
+                log.info(
+                    f"Liga {league_id}: season {season_principal} tem {len(df)} jogos "
+                    f"(mín {min_jogos}). Tentando season alternativa {_s_alt}…"
+                )
+                try:
+                    _df_alt, _nomes_alt = self._obter_historico_com_delta_xg(league_id, _s_alt, None)
+                    if len(_df_alt) >= min_jogos:
+                        df, nomes = _df_alt, _nomes_alt
+                        season_principal = _s_alt
+                        seasons_label    = [_s_alt]
+                        log.info(f"Liga {league_id}: usando season {_s_alt} ({len(df)} jogos).")
+                        break
+                except Exception as _e_alt:
+                    log.debug(f"Liga {league_id} season {_s_alt}: {_e_alt}")
+
         if len(df) < min_jogos:
             raise ValueError(
                 f"Liga {league_id} season {season_principal} tem apenas {len(df)} jogos finalizados. "
@@ -1531,6 +1555,11 @@ class DadosManager:
             usar_ano_atual = league_id in LIGAS_TEMPORADA_ANO_ATUAL
             if usar_ano_atual:
                 seasons = [ano_atual - 1, ano_atual]
+            elif league_id in LIGAS_COPA_MUNDO:
+                # Competições de seleções usam season do ciclo (ex.: eliminatórias 2026
+                # ficam sob season=2026 na API, não sob season_europeia=2025).
+                # Tenta ano_atual + ano_atual-1 + season_europeia (remove duplicatas).
+                seasons = list(dict.fromkeys([ano_atual, ano_atual - 1, season_europeia]))
             else:
                 # Para ligas europeias nunca calibradas (cache + params ambos vazios),
                 # inclui também a season anterior — espelha o Full Fetch Bootstrap de
