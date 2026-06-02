@@ -1118,8 +1118,8 @@ class DadosManager:
         # Local (append-only merge — nunca sobrescreve dados históricos)
         self._merge_salvar_local(b)
 
-        # Nuvem — sem `datas` (quota) e sem `historico_ids` (usa calibrado_em como
-        # cutoff no delta fetch — evita re-download mesmo sem os IDs no cloud).
+        # Nuvem — sem `datas` (quota). historico_ids incluído apenas para GistClient
+        # (10MB) — JSONBin (100KB) não comporta o dict de IDs.
         #
         # Calibradores: breakpoints x_thresh/y_thresh com cap de 50 pontos cada.
         # - Isotônica com 400 jogos pode gerar 400 breakpoints → ~25KB por mercado
@@ -1158,16 +1158,17 @@ class DadosManager:
                 p["calibradores"] = cals_compact
             params_nuvem[lid_str] = p
 
-        # historico_ids NÃO vai mais para o JSONBin — reduz payload em ~100KB.
-        # O delta fetch usa calibrado_em como cutoff após restart, o que é suficiente:
-        # todos os fixtures anteriores ao cutoff entram no cache sem xG (grátis),
-        # e apenas os novos recebem xG. Comportamento idêntico ao historico_ids.
         nuvem = {
             "picks":         b.picks,
             "banca_inicial": b.banca_inicial,
             "depositos":     b.depositos,
             "params_ligas":  params_nuvem,
         }
+        # Gist tem capacidade de 10MB — inclui historico_ids para que
+        # calcular_custo_delta funcione corretamente após restart de sessão.
+        # JSONBin (100KB) não comporta esse dict — mantém excluído.
+        if type(self.jsonbin).__name__ == "GistClient":
+            nuvem["historico_ids"] = b.historico_ids or {}
         ok = self.jsonbin.escrever(nuvem)
 
         # Retry com payload mínimo se primeiro attempt falhar (fallback de segurança
