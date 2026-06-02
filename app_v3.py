@@ -258,8 +258,13 @@ def calcular_score_qualidade(
 
 def render_mercado(col, label: str, mercado: str, prob_modelo_pct: float,
                    odd_mercado: float, banca: float, piso: float,
-                   teto_pct: float, lim_div: float):
-    """Renderiza card de mercado no estilo escuro (usado no Sniper e no sem_cal)."""
+                   teto_pct: float, lim_div: float,
+                   _extra_producao: frozenset = frozenset()):
+    """Renderiza card de mercado no estilo escuro (usado no Sniper e no sem_cal).
+
+    _extra_producao: mercados adicionais tratados como produção (ex: HOME/DRAW/AWAY
+    no sem_cal, onde não há calibrador separado do Estrategista).
+    """
     if odd_mercado <= 1.0:
         col.markdown(f"**{label}**\n\n_(sem odd)_")
         return None
@@ -268,11 +273,12 @@ def render_mercado(col, label: str, mercado: str, prob_modelo_pct: float,
     stake = calcular_stake_final(comp.get("kelly_fracao", 0), banca, piso, teto_pct)
     aprovado = filtrar_gatilho(mercado, comp["ev_pct"], prob_modelo_pct,
                                comp["divergencia_pp"], odd_mercado)
+    _is_producao = mercado in MERCADOS_PRODUCAO or mercado in _extra_producao
     if comp["anomalia"]:
         badge, cor = "🚨 ANOMALIA", "#dc3545"
     elif aprovado and stake > 0:
         badge, cor = "✅ APROVADO", "#28a745"
-    elif mercado not in MERCADOS_PRODUCAO:
+    elif not _is_producao:
         badge, cor = "📊 referência", "#6c757d"
     elif comp["ev_pct"] > 0:
         badge, cor = "🟡 marginal", "#ffc107"
@@ -2924,12 +2930,14 @@ with tab_analise:
                         unsafe_allow_html=True,
                     )
 
-                    # Score do melhor mercado — mesmo pipeline do Sniper
+                    # Score do melhor mercado — mesmo pipeline do Sniper + mercados de resultado
                     _mercados_score = [
                         "OVER_15","OVER_25","OVER_35",
                         "UNDER_15","UNDER_25","UNDER_35",
                         "BTTS_YES","BTTS_NO",
+                        "HOME","DRAW","AWAY",
                     ]
+                    _RESULTADO_MKS = frozenset({"HOME", "DRAW", "AWAY"})
                     _melhor_score, _melhor_mk = 0.0, ""
                     for _smk in _mercados_score:
                         _sp = _mktrs.get(_smk, 0)
@@ -2988,7 +2996,8 @@ with tab_analise:
                         ):
                             render_mercado(_c, _lbl, _k,
                                            _mktrs.get(_k, 0), _odds_r.get(_k, 0),
-                                           banca_atual, piso_kelly, teto_pct, limite_div)
+                                           banca_atual, piso_kelly, teto_pct, limite_div,
+                                           _extra_producao=_RESULTADO_MKS)
                 st.divider()
 
         # Botões de calibração por liga ao final
@@ -3073,7 +3082,10 @@ with tab_analise:
     jogos_com_odds = [j for j in calibrados if str(j["fixture"]["id"]) in odds_cache]
     previsoes      = cache_dia.get("previsoes", {})
 
-    # Injeta jogos sem_cal analisados manualmente no pipeline (scoring + cards)
+    # Injeta jogos sem_cal analisados manualmente no pipeline de scoring.
+    # Esses jogos NÃO aparecem nos cards do Sniper (já exibidos na seção acima).
+    # _sem_cal_fids rastreia quais fixture_ids foram injetados via análise manual.
+    _sem_cal_fids: set[str] = set()
     _ids_cal = {str(j["fixture"]["id"]) for j in jogos_com_odds}
     for _sc_fid, _sc_data in st.session_state.get("sem_cal_jogos", {}).items():
         if _sc_fid not in _ids_cal and _sc_data.get("odds"):
@@ -3081,6 +3093,7 @@ with tab_analise:
             previsoes[_sc_fid] = _sc_data["prev"]
             odds_cache[_sc_fid] = _sc_data["odds"]
             _ids_cal.add(_sc_fid)
+            _sem_cal_fids.add(_sc_fid)
 
     # Cross-liga fallback: times de Copa/Libertadores que não estão nos params da competição
     # são buscados na liga doméstica (ex.: time do Brasileirão aparece na Libertadores).
@@ -3559,10 +3572,14 @@ with tab_analise:
         # CARDS INDIVIDUAIS
         # =========================================================================
 
-        st.markdown(f"#### {len(jogos_com_odds)} jogos prontos para análise")
+        _n_cards = len(jogos_com_odds) - len(_sem_cal_fids)
+        st.markdown(f"#### {_n_cards} jogos prontos para análise")
 
         for j in jogos_com_odds:
             f_id   = str(j["fixture"]["id"])
+            # sem_cal: já exibido como card na seção acima — não duplicar aqui
+            if f_id in _sem_cal_fids:
+                continue
             prev   = previsoes[f_id]
             odds_j = odds_cache[f_id]
 
