@@ -127,6 +127,15 @@ if "banco" not in st.session_state:
 
 banco: BancoQG = st.session_state["banco"]
 
+# Ligas ativas = LIGAS_SUPORTADAS base + ligas calibradas manualmente
+# Leagues calibrated from sem_cal have "nome_liga" saved in params_ligas.
+_ligas_custom: dict[int, str] = {
+    int(k): v.get("nome_liga", f"Liga {k}")
+    for k, v in (banco.params_ligas or {}).items()
+    if v.get("nome_liga") and int(k) not in LIGAS_SUPORTADAS
+}
+_ligas_ativas: dict[int, str] = {**LIGAS_SUPORTADAS, **_ligas_custom}
+
 
 # =========================================================================
 # 3. FUNÇÕES UTILITÁRIAS
@@ -1863,7 +1872,7 @@ st.title("QG Barrios PRO V3")
 n_calibradas = len(banco.params_ligas)
 
 col_h1, col_h2 = st.columns(2)
-col_h1.metric("Ligas calibradas", f"{n_calibradas}/{len(LIGAS_SUPORTADAS)}")
+col_h1.metric("Ligas calibradas", f"{n_calibradas}/{len(_ligas_ativas)}")
 col_h2.metric("Banca atual", f"R$ {banca_atual:.2f}")
 
 # ── Aviso de sessão potencialmente stale ─────────────────────────────────────
@@ -1896,7 +1905,7 @@ tab_analise, tab_calibracao = st.tabs([
 # =========================================================================
 
 with tab_calibracao:
-    _n_ligas        = len(LIGAS_SUPORTADAS)   # fonte única — atualiza sozinho com a lista
+    _n_ligas        = len(_ligas_ativas)   # inclui ligas calibradas manualmente
     _custo_por_liga = CUSTO_ESTIMADO_HISTORICO_LIGA + CUSTO_ESTIMADO_XG_LIGA
 
     st.markdown(f"### Status das ligas ({_n_ligas} configuradas)")
@@ -1909,7 +1918,7 @@ with tab_calibracao:
 
     # Tabela de status
     rows_status = []
-    for league_id, nome in LIGAS_SUPORTADAS.items():
+    for league_id, nome in _ligas_ativas.items():
         params_d   = banco.params_ligas.get(str(league_id), {})
         _tem_times = bool(params_d.get("times")) and params_d.get("n_jogos_calibracao", 0) > 0
         n_times    = len(params_d.get("times", {})) if _tem_times else 0
@@ -2192,7 +2201,7 @@ with tab_calibracao:
 
         # Fallback: snapshot perdido (session reiniciada entre Passo 1 e 2) → recalibra tudo
         if not snapshot.get("ligas"):
-            com_novos = list(LIGAS_SUPORTADAS.keys())
+            com_novos = list(_ligas_ativas.keys())
 
         # SEGURANÇA: se o botão foi exibido como "0 créditos" (saldo insuficiente para ligas
         # com novos jogos), garantir que NÃO tentamos calibrar — apenas toca inativas.
@@ -2211,7 +2220,7 @@ with tab_calibracao:
 
         # Passo 2a: renova timestamps das ligas inativas (sem MLE, sem créditos)
         for lid in inativas:
-            nome = LIGAS_SUPORTADAS.get(lid, f"Liga {lid}")
+            nome = _ligas_ativas.get(lid, f"Liga {lid}")
             status_box.info(f"[{op_idx+1}/{total_ops}] ⏸️ Renovando timestamp: **{nome}**…")
             try:
                 dm.tocar_timestamp_liga(lid)
@@ -2223,7 +2232,7 @@ with tab_calibracao:
 
         # Passo 2b: recalibra ligas com jogos novos (MLE completo)
         for lid in com_novos:
-            nome = LIGAS_SUPORTADAS.get(lid, f"Liga {lid}")
+            nome = _ligas_ativas.get(lid, f"Liga {lid}")
             status_box.info(f"[{op_idx+1}/{total_ops}] ⚙️ Calibrando **{nome}**…")
             try:
                 _p = dm.obter_params_liga(lid, season, forcar_recalibracao=True)
@@ -2259,7 +2268,7 @@ with tab_calibracao:
         if aguardando:
             st.info(
                 f"⏳ {len(aguardando)} liga(s) aguardando início (sem dados na API — créditos preservados):\n"
-                + "\n".join(f"• {LIGAS_SUPORTADAS.get(l, str(l))}" for l in aguardando)
+                + "\n".join(f"• {_ligas_ativas.get(l, str(l))}" for l in aguardando)
             )
         if tocadas:
             st.info(f"⏸️ {tocadas} liga(s) inativa(s) marcadas como Frescas (0 créditos).")
@@ -2455,7 +2464,7 @@ with tab_calibracao:
                         "pais":    _lh.get("country", "?"),
                         "jogos":   [],
                         "status":  _status_h,
-                        "suport":  _lid_h in LIGAS_SUPORTADAS,
+                        "suport":  _lid_h in _ligas_ativas,
                     }
                 _hora_h = _jh["fixture"].get("date", "")[:16].replace("T", " ")[-5:]
                 _jogo_h = (
@@ -2512,12 +2521,12 @@ with tab_calibracao:
         # Atalhos de seleção rápida
         col_qs1, col_qs2, col_qs3 = st.columns(3)
         if col_qs1.button("✅ Todas as ligas", key="qs_todas", use_container_width=True):
-            st.session_state["cal_lote_multiselect"] = list(LIGAS_SUPORTADAS.keys())
+            st.session_state["cal_lote_multiselect"] = list(_ligas_ativas.keys())
             st.session_state.pop("delta_preview_lote", None)
             st.rerun()
         if col_qs2.button("❌ Não calibradas", key="qs_nunca", use_container_width=True):
             st.session_state["cal_lote_multiselect"] = [
-                lid for lid in LIGAS_SUPORTADAS if str(lid) not in banco.params_ligas
+                lid for lid in _ligas_ativas if str(lid) not in banco.params_ligas
             ]
             st.session_state.pop("delta_preview_lote", None)
             st.rerun()
@@ -2528,8 +2537,8 @@ with tab_calibracao:
 
         ligas_lote_sel = st.multiselect(
             "Ligas a calibrar",
-            options=list(LIGAS_SUPORTADAS.keys()),
-            format_func=lambda x: f"{LIGAS_SUPORTADAS[x]} (ID {x})",
+            options=list(_ligas_ativas.keys()),
+            format_func=lambda x: f"{_ligas_ativas[x]} (ID {x})",
             key="cal_lote_multiselect",
         )
 
@@ -2676,7 +2685,7 @@ with tab_calibracao:
 
             _lote_detalhes: list[str] = []
             for _i_l, _lid_l in enumerate(_ligas_batch):
-                _nome_l = LIGAS_SUPORTADAS.get(_lid_l, f"Liga {_lid_l}")
+                _nome_l = _ligas_ativas.get(_lid_l, f"Liga {_lid_l}")
                 _stat_lote.info(f"[{_i_l+1}/{_total_lote}] Calibrando **{_nome_l}**…")
                 try:
                     _p_l = dm.obter_params_liga(_lid_l, season, forcar_recalibracao=True)
@@ -3048,8 +3057,14 @@ with tab_analise:
                         try:
                             with st.spinner(f"Calibrando {_lnome_s} (ID {_lid_s})..."):
                                 dm.calibrar_liga_avulsa(_lid_s, season)
+                            # Salva nome/país para aparecer no menu principal de calibração
+                            _banco_upd = dm.carregar_banco()
+                            if str(_lid_s) in _banco_upd.params_ligas:
+                                _banco_upd.params_ligas[str(_lid_s)]["nome_liga"] = _lnome_s
+                                _banco_upd.params_ligas[str(_lid_s)]["pais_liga"]  = _lpais_s
+                                dm.salvar_banco(_banco_upd)
                             if dm.ultimo_save_jsonbin_ok:
-                                st.success(f"{_lnome_s} calibrada e salva!")
+                                st.success(f"{_lnome_s} calibrada e salva! Agora aparece no menu principal.")
                             else:
                                 _ce_s = getattr(dm, "ultimo_save_erro", "") or "verifique conexão"
                                 st.warning(
