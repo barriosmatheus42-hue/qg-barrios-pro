@@ -256,6 +256,51 @@ def calcular_score_qualidade(
     return round(score, 1)
 
 
+def render_mercado(col, label: str, mercado: str, prob_modelo_pct: float,
+                   odd_mercado: float, banca: float, piso: float,
+                   teto_pct: float, lim_div: float):
+    """Renderiza card de mercado no estilo escuro (usado no Sniper e no sem_cal)."""
+    if odd_mercado <= 1.0:
+        col.markdown(f"**{label}**\n\n_(sem odd)_")
+        return None
+    comp  = comparar_com_mercado(prob_modelo_pct, odd_mercado,
+                                 MARGEM_BOOKMAKER_DEFAULT, lim_div)
+    stake = calcular_stake_final(comp.get("kelly_fracao", 0), banca, piso, teto_pct)
+    aprovado = filtrar_gatilho(mercado, comp["ev_pct"], prob_modelo_pct,
+                               comp["divergencia_pp"], odd_mercado)
+    if comp["anomalia"]:
+        badge, cor = "🚨 ANOMALIA", "#dc3545"
+    elif aprovado and stake > 0:
+        badge, cor = "✅ APROVADO", "#28a745"
+    elif mercado not in MERCADOS_PRODUCAO:
+        badge, cor = "📊 referência", "#6c757d"
+    elif comp["ev_pct"] > 0:
+        badge, cor = "🟡 marginal", "#ffc107"
+    else:
+        badge, cor = "—", "#6c757d"
+    col.markdown(
+        f"""<div style='border-left:4px solid {cor};padding:6px 10px;
+                       margin-bottom:6px;background:#0e1117;'>
+          <div style='font-size:11px;color:#aaa;font-weight:bold;'>
+            {label}<span style='float:right;color:{cor};'>{badge}</span>
+          </div>
+          <div style='font-size:14px;color:#fff;margin-top:2px;'>
+            Modelo:<b>{prob_modelo_pct:.1f}%</b> | Mercado:{comp['prob_mercado_pct']:.1f}% |
+            Δ:{comp['divergencia_pp']:+.1f}pp
+          </div>
+          <div style='font-size:13px;color:#ccc;'>
+            Odd:<b>{odd_mercado:.2f}</b> | EV:{comp['ev_pct']:+.1f}% |
+            Kelly:{comp.get('kelly_fracao', 0)*100:.1f}%
+          </div>
+          <div style='font-size:12px;color:#17a2b8;margin-top:2px;'>
+            💵 {'R$ ' + str(stake) if stake > 0 else 'DESCARTAR'}
+          </div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+    return comp
+
+
 def avaliar_heuristicas(
     mercado: str,
     xg_lam: float,
@@ -2844,43 +2889,56 @@ with tab_analise:
                 _af_r   = _res_m.get("a_found", False)
 
                 with st.container():
+                    # Rótulo de fonte de dados
                     if _hf_r and _af_r:
-                        st.caption(
-                            "✅ **Análise cross-liga** — params de outros torneios calibrados. "
-                            "Confiabilidade: boa para seleções/clubes top."
-                        )
+                        _src_label = "✅ Análise cross-liga — params de torneios calibrados"
                     elif _hf_r or _af_r:
-                        _time_sem = _res_m["jogo"].split("×")[0 if not _hf_r else 1].strip()
-                        st.caption(
-                            f"⚠️ **Análise parcial** — *{_time_sem}* estimado do histórico da API. "
-                            "Resultado indicativo."
-                        )
+                        _t_sem = _res_m["jogo"].split("×")[0 if not _hf_r else 1].strip()
+                        _src_label = f"⚠️ Análise parcial — {_t_sem} estimado do histórico API"
                     else:
-                        st.caption(
-                            "🆕 **Análise ad-hoc** — alpha/beta estimados dos últimos 10 jogos (shrinkage 50%). "
-                            "D-C calculado com dados reais. Confiabilidade: moderada."
-                        )
+                        _src_label = "🆕 Análise ad-hoc — alpha/beta dos últimos 10 jogos (shrinkage 50%)"
 
-                    _cr1, _cr2, _cr3, _cr4 = st.columns(4)
-                    _cr1.metric("λ Casa",    f"{_lam_r:.2f}")
-                    _cr2.metric("μ Fora",    f"{_mu_r:.2f}")
-                    _cr3.metric("xG Total",  f"{_lam_r + _mu_r:.2f}")
-                    _cr4.metric("Cobertura", "✅ OK" if _cob_r else "⚠️ Baixa")
-                    _cm1, _cm2, _cm3, _cm4 = st.columns(4)
-                    for _col_mk, _mk in zip(
-                        [_cm1, _cm2, _cm3, _cm4],
-                        ["OVER_25", "UNDER_25", "BTTS_YES", "HOME"],
-                    ):
-                        _prob_mk = _mktrs.get(_mk, 0)
-                        _odd_mk  = _odds_r.get(_mk, 0)
-                        if _odd_mk > 1.0:
-                            _ev_val = round((_prob_mk / 100) * _odd_mk * 100 - 100, 1)
-                            _ev_str = f"EV {_ev_val:+.1f}%  @{_odd_mk:.2f}"
-                        else:
-                            _ev_str = "sem odd"
-                        _col_mk.metric(_mk, f"{_prob_mk:.1f}%", _ev_str, delta_color="normal")
-                    if _prev_r.get("flags"):
-                        st.caption("🚩 " + " · ".join(_prev_r["flags"]))
+                    _xg_tot_r = _lam_r + _mu_r
+                    _cob_str  = "✅" if _cob_r else "⚠️ dados parciais"
+                    _flags_r  = " | ".join(_prev_r["flags"]) if _prev_r.get("flags") else "—"
+
+                    # Header escuro igual ao Sniper
+                    st.markdown(
+                        f"""<div style='background:#0e1117;padding:10px;border-radius:6px;border:1px solid #333;'>
+                          <div style='display:flex;justify-content:space-between;color:#888;font-size:11px;'>
+                            <span>🕒 {hora_m} · {l_nome_m}</span>
+                            <span>xG total: <b>{_xg_tot_r:.2f}</b> · {_cob_str} · Flags: {_flags_r}</span>
+                          </div>
+                          <div style='font-size:18px;font-weight:bold;color:white;margin:6px 0;'>
+                            {h_nome_m} <span style='color:#666;font-size:13px;'>vs</span> {a_nome_m}
+                          </div>
+                          <div style='font-size:11px;color:#888;'>{_src_label}</div>
+                        </div>""",
+                        unsafe_allow_html=True,
+                    )
+
+                    _sub_m = st.tabs(["🔢 Gols", "🤝 BTTS"])
+                    with _sub_m[0]:
+                        _cols_o = st.columns(5)
+                        _cols_u = st.columns(5)
+                        for _c, _l in zip(_cols_o, ["05", "15", "25", "35", "45"]):
+                            _mk = f"OVER_{_l}"
+                            render_mercado(_c, f"Over {_l[0]}.{_l[1]}", _mk,
+                                           _mktrs.get(_mk, 0), _odds_r.get(_mk, 0),
+                                           banca_atual, piso_kelly, teto_pct, limite_div)
+                        for _c, _l in zip(_cols_u, ["05", "15", "25", "35", "45"]):
+                            _mk = f"UNDER_{_l}"
+                            render_mercado(_c, f"Under {_l[0]}.{_l[1]}", _mk,
+                                           _mktrs.get(_mk, 0), _odds_r.get(_mk, 0),
+                                           banca_atual, piso_kelly, teto_pct, limite_div)
+                    with _sub_m[1]:
+                        _cols_b = st.columns(2)
+                        for _c, _k, _lbl in zip(_cols_b,
+                                                 ["BTTS_YES", "BTTS_NO"],
+                                                 ["Ambas marcam", "Não ambas"]):
+                            render_mercado(_c, _lbl, _k,
+                                           _mktrs.get(_k, 0), _odds_r.get(_k, 0),
+                                           banca_atual, piso_kelly, teto_pct, limite_div)
                 st.divider()
 
         # Botões de calibração por liga ao final
@@ -3439,50 +3497,6 @@ with tab_analise:
         # =========================================================================
 
         st.markdown(f"#### {len(jogos_com_odds)} jogos prontos para análise")
-
-        def render_mercado(col, label, mercado, prob_modelo_pct, odd_mercado,
-                           banca, piso, teto_pct, lim_div):
-            if odd_mercado <= 1.0:
-                col.markdown(f"**{label}**\n\n_(sem odd)_")
-                return None
-            comp  = comparar_com_mercado(prob_modelo_pct, odd_mercado,
-                                         MARGEM_BOOKMAKER_DEFAULT, lim_div)
-            stake = calcular_stake_final(comp.get("kelly_fracao", 0), banca, piso, teto_pct)
-
-            aprovado = filtrar_gatilho(mercado, comp["ev_pct"], prob_modelo_pct,
-                                       comp["divergencia_pp"], odd_mercado)
-            if comp["anomalia"]:
-                badge, cor = "🚨 ANOMALIA", "#dc3545"
-            elif aprovado and stake > 0:
-                badge, cor = "✅ APROVADO", "#28a745"
-            elif mercado not in MERCADOS_PRODUCAO:
-                badge, cor = "📊 referência", "#6c757d"
-            elif comp["ev_pct"] > 0:
-                badge, cor = "🟡 marginal", "#ffc107"
-            else:
-                badge, cor = "—", "#6c757d"
-
-            col.markdown(
-                f"""<div style='border-left:4px solid {cor};padding:6px 10px;
-                               margin-bottom:6px;background:#0e1117;'>
-                  <div style='font-size:11px;color:#aaa;font-weight:bold;'>
-                    {label}<span style='float:right;color:{cor};'>{badge}</span>
-                  </div>
-                  <div style='font-size:14px;color:#fff;margin-top:2px;'>
-                    Modelo:<b>{prob_modelo_pct:.1f}%</b> | Mercado:{comp['prob_mercado_pct']:.1f}% |
-                    Δ:{comp['divergencia_pp']:+.1f}pp
-                  </div>
-                  <div style='font-size:13px;color:#ccc;'>
-                    Odd:<b>{odd_mercado:.2f}</b> | EV:{comp['ev_pct']:+.1f}% |
-                    Kelly:{comp.get('kelly_fracao', 0)*100:.1f}%
-                  </div>
-                  <div style='font-size:12px;color:#17a2b8;margin-top:2px;'>
-                    💵 {'R$ ' + str(stake) if stake > 0 else 'DESCARTAR'}
-                  </div>
-                </div>""",
-                unsafe_allow_html=True,
-            )
-            return comp
 
         for j in jogos_com_odds:
             f_id   = str(j["fixture"]["id"])
