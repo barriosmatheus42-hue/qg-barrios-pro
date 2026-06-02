@@ -3078,7 +3078,11 @@ with tab_analise:
     for j in jogos_com_odds:
         f_id   = str(j["fixture"]["id"])
         l_id   = j["league"]["id"]
-        params = ParametrosLiga.from_dict(banco.params_ligas[str(l_id)])
+        _params_raw = banco.params_ligas.get(str(l_id))
+        if _params_raw is None:
+            # Jogo sem_cal injetado — previsão já calculada, só o dc_ctx falta
+            continue
+        params = ParametrosLiga.from_dict(_params_raw)
         h_id   = j["teams"]["home"]["id"]
         a_id   = j["teams"]["away"]["id"]
         if f_id not in previsoes:
