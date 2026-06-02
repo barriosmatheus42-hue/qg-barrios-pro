@@ -2871,6 +2871,13 @@ with tab_analise:
                         "h_found": h_found_m,
                         "a_found": a_found_m,
                     }
+                    # Injeta no pipeline do Sniper para scoring automático
+                    _scj = st.session_state.setdefault("sem_cal_jogos", {})
+                    _scj[f_id_m] = {
+                        "j":    j_m,
+                        "prev": _prev_m,
+                        "odds": odds_m or {},
+                    }
                     st.rerun()
                 except CreditosInsuficientesError as e:
                     st.error(f"Saldo insuficiente: {e}")
@@ -2917,7 +2924,7 @@ with tab_analise:
                         unsafe_allow_html=True,
                     )
 
-                    _sub_m = st.tabs(["🔢 Gols", "🤝 BTTS"])
+                    _sub_m = st.tabs(["🔢 Gols", "🤝 BTTS", "🏆 Resultado"])
                     with _sub_m[0]:
                         _cols_o = st.columns(5)
                         _cols_u = st.columns(5)
@@ -2936,6 +2943,16 @@ with tab_analise:
                         for _c, _k, _lbl in zip(_cols_b,
                                                  ["BTTS_YES", "BTTS_NO"],
                                                  ["Ambas marcam", "Não ambas"]):
+                            render_mercado(_c, _lbl, _k,
+                                           _mktrs.get(_k, 0), _odds_r.get(_k, 0),
+                                           banca_atual, piso_kelly, teto_pct, limite_div)
+                    with _sub_m[2]:
+                        _cols_res = st.columns(3)
+                        for _c, _k, _lbl in zip(
+                            _cols_res,
+                            ["HOME", "DRAW", "AWAY"],
+                            [f"Casa ({h_nome_m})", "Empate", f"Fora ({a_nome_m})"],
+                        ):
                             render_mercado(_c, _lbl, _k,
                                            _mktrs.get(_k, 0), _odds_r.get(_k, 0),
                                            banca_atual, piso_kelly, teto_pct, limite_div)
@@ -3022,6 +3039,15 @@ with tab_analise:
     # ── Pré-calcular previsões (0 créditos) ─────────────────────────
     jogos_com_odds = [j for j in calibrados if str(j["fixture"]["id"]) in odds_cache]
     previsoes      = cache_dia.get("previsoes", {})
+
+    # Injeta jogos sem_cal analisados manualmente no pipeline (scoring + cards)
+    _ids_cal = {str(j["fixture"]["id"]) for j in jogos_com_odds}
+    for _sc_fid, _sc_data in st.session_state.get("sem_cal_jogos", {}).items():
+        if _sc_fid not in _ids_cal and _sc_data.get("odds"):
+            jogos_com_odds.append(_sc_data["j"])
+            previsoes[_sc_fid] = _sc_data["prev"]
+            odds_cache[_sc_fid] = _sc_data["odds"]
+            _ids_cal.add(_sc_fid)
 
     # Cross-liga fallback: times de Copa/Libertadores que não estão nos params da competição
     # são buscados na liga doméstica (ex.: time do Brasileirão aparece na Libertadores).
