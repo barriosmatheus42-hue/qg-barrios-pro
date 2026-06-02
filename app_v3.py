@@ -2785,7 +2785,7 @@ with tab_analise:
             col_j1, col_j2, col_j3, col_j4 = st.columns([1, 5, 1, 2])
             col_j1.caption(f"`{hora_m}`")
             col_j2.write(f"**{jogo_str_m}** · _{l_nome_m}_ ({l_pais_m})")
-            col_j3.write(_cob_icon, help=_cob_tip)
+            col_j3.markdown(f'<span title="{_cob_tip}">{_cob_icon}</span>', unsafe_allow_html=True)
 
             if col_j4.button(f"🔍 Analisar ({custo_m} cr.)", key=f"am_{f_id_m}", use_container_width=True):
                 try:
