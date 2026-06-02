@@ -2930,14 +2930,14 @@ with tab_analise:
                         unsafe_allow_html=True,
                     )
 
-                    # Score do melhor mercado — mesmo pipeline do Sniper + mercados de resultado
+                    # Score do melhor mercado — mesmo pipeline do Sniper + Estrategista
                     _mercados_score = [
                         "OVER_15","OVER_25","OVER_35",
                         "UNDER_15","UNDER_25","UNDER_35",
                         "BTTS_YES","BTTS_NO",
-                        "HOME","DRAW","AWAY",
+                        "HOME","DRAW","AWAY","1X","X2","12",
                     ]
-                    _RESULTADO_MKS = frozenset({"HOME", "DRAW", "AWAY"})
+                    _RESULTADO_MKS = frozenset({"HOME","DRAW","AWAY","1X","X2","12"})
                     _melhor_score, _melhor_mk = 0.0, ""
                     for _smk in _mercados_score:
                         _sp = _mktrs.get(_smk, 0)
@@ -2988,6 +2988,7 @@ with tab_analise:
                                            _mktrs.get(_k, 0), _odds_r.get(_k, 0),
                                            banca_atual, piso_kelly, teto_pct, limite_div)
                     with _sub_m[2]:
+                        _ALL_RESULTADO = frozenset({"HOME","DRAW","AWAY","1X","X2","12"})
                         _cols_res = st.columns(3)
                         for _c, _k, _lbl in zip(
                             _cols_res,
@@ -2997,7 +2998,31 @@ with tab_analise:
                             render_mercado(_c, _lbl, _k,
                                            _mktrs.get(_k, 0), _odds_r.get(_k, 0),
                                            banca_atual, piso_kelly, teto_pct, limite_div,
-                                           _extra_producao=_RESULTADO_MKS)
+                                           _extra_producao=_ALL_RESULTADO)
+                        # Dupla Chance derivada das odds 1X2
+                        _odd_h_r = _odds_r.get("HOME", 0)
+                        _odd_d_r = _odds_r.get("DRAW", 0)
+                        _odd_a_r = _odds_r.get("AWAY", 0)
+                        _odd_1x = (1.0/(1.0/_odd_h_r + 1.0/_odd_d_r)
+                                   if _odd_h_r > 1 and _odd_d_r > 1 else 0.0)
+                        _odd_x2 = (1.0/(1.0/_odd_d_r + 1.0/_odd_a_r)
+                                   if _odd_d_r > 1 and _odd_a_r > 1 else 0.0)
+                        _odd_12 = (1.0/(1.0/_odd_h_r + 1.0/_odd_a_r)
+                                   if _odd_h_r > 1 and _odd_a_r > 1 else 0.0)
+                        _p_home_r = _mktrs.get("HOME", 0)
+                        _p_draw_r = _mktrs.get("DRAW", 0)
+                        _p_away_r = _mktrs.get("AWAY", 0)
+                        _cols_dc = st.columns(3)
+                        for _c, _k, _lbl, _prob_dc, _odd_dc in zip(
+                            _cols_dc,
+                            ["1X", "X2", "12"],
+                            ["Dupla 1X", "Dupla X2", "Dupla 12"],
+                            [_p_home_r + _p_draw_r, _p_draw_r + _p_away_r, _p_home_r + _p_away_r],
+                            [_odd_1x, _odd_x2, _odd_12],
+                        ):
+                            render_mercado(_c, _lbl, _k, _prob_dc, _odd_dc,
+                                           banca_atual, piso_kelly, teto_pct, limite_div,
+                                           _extra_producao=_ALL_RESULTADO)
                 st.divider()
 
         # Botões de calibração por liga ao final
@@ -3698,11 +3723,14 @@ with tab_analise:
                 overround = calcular_overround_1x2(odd_h, odd_d, odd_a)
 
                 # H1-HOME-Only: calibrador isotônico em HOME; DRAW/AWAY ficam RAW
+                # Para sem_cal (liga não calibrada): usa probabilidade bruta do D-C —
+                # mesmo pipeline completo, sem isotônica (que não existe para essa liga).
                 _params_raw_j = banco.params_ligas.get(str(l_id))
-                if _params_raw_j is None:
-                    continue  # sem_cal — sem calibrador 1X2, pula Estrategista
-                params_j   = ParametrosLiga.from_dict(_params_raw_j)
-                cal_home   = params_j.calibradores.get("1X2_HOME")
+                if _params_raw_j is not None:
+                    params_j = ParametrosLiga.from_dict(_params_raw_j)
+                    cal_home = params_j.calibradores.get("1X2_HOME")
+                else:
+                    cal_home = None
                 p_home_raw = prev["mercados"]["HOME"]
                 p_home     = cal_home.calibrar(p_home_raw) if cal_home else p_home_raw
                 p_draw     = prev["mercados"]["DRAW"]
