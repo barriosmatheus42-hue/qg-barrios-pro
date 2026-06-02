@@ -579,6 +579,39 @@ class ApiSportsClient:
         }
 
     # ----------------------------------------------------------------
+    # Endpoint: todos os fixtures de uma copa (inclui jogos futuros)
+    # ----------------------------------------------------------------
+    def buscar_times_copa(self, league_id: int, season: int) -> list[int]:
+        """
+        Retorna IDs de todos os times inscritos em um torneio, descobertos via lista
+        de fixtures (passados + futuros). Usado para Bootstrap Copa do Mundo.
+        Custo: ~1 crédito.
+        """
+        self.trava_saldo(1)
+        try:
+            res = requests.get(
+                f"{BASE_URL}/fixtures",
+                headers=self.headers,
+                params={"league": league_id, "season": season},
+                timeout=TIMEOUT_API,
+            )
+            data = res.json()
+            if data.get("errors"):
+                raise APIError(f"buscar_times_copa({league_id},{season}): {data['errors']}")
+            fixtures = data.get("response", [])
+        except requests.RequestException as e:
+            raise APIError(f"Falha de rede buscar_times_copa: {e}") from e
+
+        time_ids: set[int] = set()
+        for f in fixtures:
+            try:
+                time_ids.add(f["teams"]["home"]["id"])
+                time_ids.add(f["teams"]["away"]["id"])
+            except (KeyError, TypeError):
+                continue
+        return sorted(time_ids)
+
+    # ----------------------------------------------------------------
     # Endpoint: últimos N jogos finalizados de um time
     # ----------------------------------------------------------------
     def buscar_historico_time(self, team_id: int, n: int = 10) -> pd.DataFrame:
@@ -1818,6 +1851,53 @@ class DadosManager:
     def buscar_historico_time(self, team_id: int, n: int = 10) -> pd.DataFrame:
         """Últimos N jogos finalizados de um time. ~1 crédito. Delega para ApiSportsClient."""
         return self.api.buscar_historico_time(team_id, n)
+
+    def buscar_times_copa_2026(self, season: int = 2026) -> list[int]:
+        """IDs das 32 seleções da Copa do Mundo 2026 via lista de fixtures. ~1 crédito."""
+        return self.api.buscar_times_copa(league_id=1, season=season)
+
+    def bootstrap_copa_forma_recente(
+        self,
+        df_jogos: pd.DataFrame,
+        season_copa: int = 2026,
+    ) -> ParametrosLiga:
+        """
+        Calibra Copa 2026 a partir de um DataFrame pré-construído com jogos recentes
+        das seleções qualificadas.
+
+        Recebe o DataFrame já montado pelo app (deduplicated, loop com progress bar na UI).
+        Colunas necessárias: fixture_id, home_id, away_id, home_goals, away_goals, date.
+
+        Usa calibrar_copa_mundo com xi=0.010:
+          - Jogo de 30 dias atrás: peso 0.74
+          - Jogo de 90 dias atrás: peso 0.41
+          - Jogo de 180 dias atrás: peso 0.17  ← só 6 meses já pesa ~17%
+          - Jogo de 365 dias atrás: peso 0.03  ← praticamente irrelevante
+        """
+        if df_jogos is None or df_jogos.empty:
+            raise ValueError("DataFrame de jogos vazio — não é possível calibrar.")
+
+        df = df_jogos.copy()
+        if not pd.api.types.is_datetime64_any_dtype(df["date"]):
+            df["date"] = pd.to_datetime(df["date"])
+
+        params = calibrar_copa_mundo(
+            df, league_id=1, season=season_copa,
+            xi=0.010,
+            min_aparicoes_time=2,
+            max_times=64,
+        )
+        params.home_advantage = 1.0    # campo neutro Copa do Mundo
+        params.calibrado_em += "_forma_recente"
+
+        banco = self.carregar_banco()
+        banco.params_ligas["1"] = params.to_dict()
+        self.salvar_banco(banco)
+        log.info(
+            f"Bootstrap Copa Forma Recente: {params.n_jogos_calibracao} jogos, "
+            f"{len(params.times)} seleções, xi=0.010"
+        )
+        return params
 
 
 # =========================================================================

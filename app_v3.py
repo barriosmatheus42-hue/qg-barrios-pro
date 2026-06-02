@@ -2294,8 +2294,166 @@ with tab_calibracao:
             except Exception as _e_wc:
                 st.error(f"Falha no bootstrap: {_e_wc}")
 
+        st.markdown("---")
+        st.markdown("#### 🔥 Bootstrap Forma Recente *(recomendado para Copa)*")
+        st.info(
+            "Ignora Eliminatórias históricas e calibra cada seleção pelos seus **últimos 20 jogos "
+            "finalizados** (de qualquer competição).  \n"
+            "Decay `xi=0.010` — jogo de 6 meses conta apenas 17%. Só os últimos 3–4 meses "
+            "têm peso real.  \n"
+            "**Custo:** ~1 cr. (lista de times) + 1 cr. × 32 seleções ≈ **33 créditos** no total."
+        )
+        _fr_is_bootstrap = "_forma_recente" in str(_wc_params.get("calibrado_em", ""))
+        if _fr_is_bootstrap:
+            st.success("✅ Forma Recente já executada — params ativos incluem dados recentes.")
+        elif _wc_calibrado:
+            st.warning("⚠️ Copa calibrada via Bootstrap Eliminatórias. Para melhor precisão, execute Forma Recente.")
+
+        if st.button(
+            "🔥 Bootstrap Forma Recente (~33 cr.)",
+            use_container_width=True,
+            type="primary" if not _fr_is_bootstrap else "secondary",
+            key="btn_bootstrap_forma_recente",
+            help="Busca os últimos 20 jogos de cada seleção qualificada e calibra com decay agressivo.",
+        ):
+            try:
+                _fr_pb_area = st.empty()
+                _fr_status  = st.empty()
+
+                _fr_status.info("Buscando times da Copa 2026 na API (1 cr.)…")
+                _fr_team_ids = dm.buscar_times_copa_2026(season=2026)
+                _fr_total    = len(_fr_team_ids)
+
+                if _fr_total == 0:
+                    st.error(
+                        "A API não retornou times para Copa 2026. "
+                        "Tente novamente — os grupos podem ainda não estar publicados."
+                    )
+                    st.stop()
+
+                _fr_records: dict[int, dict] = {}
+                _fr_erros: list[str] = []
+
+                for _fr_idx, _fr_tid in enumerate(_fr_team_ids):
+                    _fr_pb_area.progress(
+                        _fr_idx / _fr_total,
+                        text=f"Buscando seleção {_fr_idx + 1}/{_fr_total} (ID {_fr_tid})…",
+                    )
+                    try:
+                        _fr_df_t = dm.buscar_historico_time(_fr_tid, n=20)
+                        for _, _fr_row in _fr_df_t.iterrows():
+                            _fr_fid = int(_fr_row["fixture_id"])
+                            if _fr_fid not in _fr_records:
+                                _fr_records[_fr_fid] = {
+                                    "fixture_id": _fr_fid,
+                                    "home_id":    int(_fr_row["home_id"]),
+                                    "away_id":    int(_fr_row["away_id"]),
+                                    "home_goals": int(_fr_row["home_goals"]),
+                                    "away_goals": int(_fr_row["away_goals"]),
+                                    "date":       str(_fr_row["date"])[:10],
+                                }
+                    except Exception as _fr_e:
+                        _fr_erros.append(str(_fr_tid))
+
+                _fr_pb_area.progress(1.0, text="Calibrando modelo Copa 2026 (xi=0.010)…")
+
+                _fr_df = pd.DataFrame(list(_fr_records.values()))
+                _fr_res = dm.bootstrap_copa_forma_recente(_fr_df, season_copa=2026)
+
+                _fr_pb_area.empty()
+                _fr_status.empty()
+
+                _aviso_erros = f" · ⚠️ {len(_fr_erros)} times sem dados" if _fr_erros else ""
+                st.success(
+                    f"✅ Forma Recente concluída!  \n"
+                    f"**{_fr_res.n_jogos_calibracao}** jogos únicos · "
+                    f"**{len(_fr_res.times)}** seleções calibradas{_aviso_erros}  \n"
+                    f"xi=0.010 · home_advantage={_fr_res.home_advantage:.2f} (neutro)"
+                )
+                if _fr_erros:
+                    st.caption(f"Times sem dados na API: {', '.join(_fr_erros)}")
+                st.session_state["banco"] = dm.carregar_banco(força_recarregar=True)
+                st.rerun()
+            except CreditosInsuficientesError as _e_fr:
+                st.error(f"Saldo insuficiente: {_e_fr}")
+            except Exception as _e_fr:
+                st.error(f"Falha no Bootstrap Forma Recente: {_e_fr}")
+
     # ── Calibrar ligas em lote ────────────────────────────────────────
     with st.expander("⚙️ Calibrar ligas em lote"):
+        # ── Agenda do dia: jogos de hoje por liga ──────────────────────
+        _agenda_cal = banco.datas.get(data_str, {}).get("agenda", [])
+        if _agenda_cal:
+            st.markdown(f"**📅 Jogos de hoje ({data_str}) — clique para adicionar ao lote:**")
+            # Agrupa por liga e ordena por quantidade de jogos (desc)
+            _ligas_hoje: dict[int, dict] = {}
+            for _jh in _agenda_cal:
+                _lh = _jh.get("league", {})
+                _lid_h = _lh.get("id", 0)
+                if _lid_h not in _ligas_hoje:
+                    _pd_h = banco.params_ligas.get(str(_lid_h), {})
+                    _cal_h = bool(_pd_h.get("times"))
+                    try:
+                        _dt_cal = dt.datetime.fromisoformat(_pd_h.get("calibrado_em", ""))
+                        _dias_h = (dt.datetime.now() - _dt_cal).days
+                        _status_h = f"🟢 {_dias_h}d" if _dias_h < INTERVALO_RECALIBRACAO_DIAS else f"🟡 {_dias_h}d"
+                    except Exception:
+                        _status_h = "❌ nunca" if not _cal_h else "❓"
+                    _ligas_hoje[_lid_h] = {
+                        "nome":    _lh.get("name", f"Liga {_lid_h}"),
+                        "pais":    _lh.get("country", "?"),
+                        "jogos":   [],
+                        "status":  _status_h,
+                        "suport":  _lid_h in LIGAS_SUPORTADAS,
+                    }
+                _hora_h = _jh["fixture"].get("date", "")[:16].replace("T", " ")[-5:]
+                _jogo_h = (
+                    f"`{_hora_h}` "
+                    f"{_jh['teams']['home']['name']} × {_jh['teams']['away']['name']}"
+                )
+                _ligas_hoje[_lid_h]["jogos"].append(_jogo_h)
+
+            _ligas_hoje_sorted = sorted(
+                _ligas_hoje.items(), key=lambda x: -len(x[1]["jogos"])
+            )
+            for _lid_h, _info_h in _ligas_hoje_sorted:
+                _col_la, _col_lb, _col_lc = st.columns([4, 1, 2])
+                _n_j_h = len(_info_h["jogos"])
+                _col_la.write(
+                    f"**{_info_h['nome']}** ({_info_h['pais']}) — "
+                    f"{_n_j_h} jogo{'s' if _n_j_h > 1 else ''}"
+                )
+                _col_lb.caption(_info_h["status"])
+                _btn_add_key = f"add_lote_{_lid_h}"
+                _ja_no_lote = _lid_h in st.session_state.get("cal_lote_multiselect", [])
+                if not _ja_no_lote:
+                    if _col_lc.button(
+                        "+ Adicionar ao lote",
+                        key=_btn_add_key,
+                        use_container_width=True,
+                    ):
+                        _sel = list(st.session_state.get("cal_lote_multiselect", []))
+                        if _lid_h not in _sel:
+                            _sel.append(_lid_h)
+                        st.session_state["cal_lote_multiselect"] = _sel
+                        st.session_state.pop("delta_preview_lote", None)
+                        st.rerun()
+                else:
+                    _col_lc.success("✅ no lote", icon=None)
+                # Lista de jogos colapsável
+                with st.expander(
+                    f"Ver {_n_j_h} jogo(s) de {_info_h['nome']}",
+                    expanded=False,
+                ):
+                    for _jg_h in _info_h["jogos"]:
+                        st.caption(_jg_h)
+            st.markdown("---")
+        else:
+            st.caption(
+                "📅 Agenda do dia não carregada. Abra a aba **Análise Diária** e carregue a agenda "
+                "para ver os jogos de hoje aqui."
+            )
+
         # Inicializa chave do multiselect antes de renderizar os atalhos
         if "cal_lote_multiselect" not in st.session_state:
             st.session_state["cal_lote_multiselect"] = []
