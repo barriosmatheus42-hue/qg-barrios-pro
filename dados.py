@@ -1641,33 +1641,26 @@ class DadosManager:
 
             has_params = bool(banco.params_ligas.get(chave, {}).get("times"))
 
+            # Ligas nunca calibradas e ligas de Copa precisam de Bootstrap completo,
+            # não de delta. Incluí-las no preview infla o custo em 10-15k créditos.
+            # Passo 2 lida com elas separadamente; aqui reportamos custo 0.
+            if not has_params or league_id in LIGAS_COPA_MUNDO:
+                resultado_ligas.append({
+                    "league_id":    league_id,
+                    "nome":         LIGAS_SUPORTADAS.get(league_id, f"Liga {league_id}"),
+                    "n_novos_liga": 0,
+                    "n_cache_liga": 0,
+                    "n_api_liga":   0,
+                    "seasons":      [{"season": season_europeia, "n_api": 0, "n_cache": 0,
+                                      "n_novos": 0, "erro": "bootstrap necessário"}],
+                })
+                continue
+
             usar_ano_atual = league_id in LIGAS_TEMPORADA_ANO_ATUAL
             if usar_ano_atual:
                 seasons = [ano_atual - 1, ano_atual]
-            elif league_id in LIGAS_COPA_MUNDO:
-                # Competições de seleções usam season do ciclo (ex.: eliminatórias 2026
-                # ficam sob season=2026 na API, não sob season_europeia=2025).
-                # Tenta ano_atual + ano_atual-1 + season_europeia (remove duplicatas).
-                seasons = list(dict.fromkeys([ano_atual, ano_atual - 1, season_europeia]))
             else:
-                # Para ligas europeias nunca calibradas (cache + params ambos vazios),
-                # inclui também a season anterior — espelha o Full Fetch Bootstrap de
-                # obter_params_liga (que faz season_anterior = season_principal - 1).
-                # Isso garante que o preview mostre os dados reais que a calibração usará,
-                # em vez de "sem dados API" quando season_atual tem poucos jogos finalizados
-                # (ex: liga com season 2025/26 acabando em maio, mas API retorna 0 FT por
-                # paginação ou timing — a season 2024/25 completa sempre tem dados).
-                _cache_vazio = not cache_liga.get("registros") and not ids_jsonbin
-                if _cache_vazio and not has_params:
-                    seasons = [season_europeia - 1, season_europeia]  # bootstrap: 2 seasons
-                else:
-                    seasons = [season_europeia]                        # delta normal: 1 season
-
-            # NOTA: removido o skip automático para ligas nunca calibradas.
-            # O skip causava bug: League One, Copa del Rey etc. retornavam 0 créditos
-            # mesmo tendo centenas de jogos na API — a lista de fixtures (1 crédito/chamada)
-            # é necessária para descobrir se a liga tem dados ou não.
-            # Ligas verdadeiramente inativas (n_api=0) ainda vão para "aguardando" no Passo 2.
+                seasons = [season_europeia]  # delta normal: 1 season
 
             detalhes_seasons = []
             n_novos_liga = 0
