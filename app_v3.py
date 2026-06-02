@@ -2924,6 +2924,39 @@ with tab_analise:
                         unsafe_allow_html=True,
                     )
 
+                    # Score do melhor mercado — mesmo pipeline do Sniper
+                    _mercados_score = [
+                        "OVER_15","OVER_25","OVER_35",
+                        "UNDER_15","UNDER_25","UNDER_35",
+                        "BTTS_YES","BTTS_NO",
+                    ]
+                    _melhor_score, _melhor_mk = 0.0, ""
+                    for _smk in _mercados_score:
+                        _sp = _mktrs.get(_smk, 0)
+                        _so = _odds_r.get(_smk, 0)
+                        if _so <= 1.0 or _sp <= 0:
+                            continue
+                        _sc = comparar_com_mercado(_sp, _so, MARGEM_BOOKMAKER_DEFAULT, limite_div)
+                        if not filtrar_gatilho(_smk, _sc["ev_pct"], _sp, _sc["divergencia_pp"], _so):
+                            continue
+                        _sv = calcular_score_qualidade(
+                            ev_pct=_sc["ev_pct"], divergencia_pp=_sc["divergencia_pp"],
+                            prob_modelo=_sp, kelly_fracao=_sc.get("kelly_fracao", 0),
+                            odd=_so, cobertura_ok=_cob_r,
+                        )
+                        _heur_adj, _ = avaliar_heuristicas(
+                            _smk, _lam_r, _mu_r, _xg_tot_r, _prev_r.get("dc_ctx")
+                        )
+                        _sv = round(max(0.0, _sv + _heur_adj), 1)
+                        if _sv > _melhor_score:
+                            _melhor_score, _melhor_mk = _sv, _smk
+                    if _melhor_score >= SCORE_MINIMO_RANKING:
+                        st.success(f"✅ **Score {_melhor_score:.0f}/100** em {_melhor_mk} — aparece no Sniper abaixo")
+                    elif _melhor_score > 0:
+                        st.info(f"📊 Score máximo: **{_melhor_score:.0f}/100** ({_melhor_mk}) — abaixo do limiar {SCORE_MINIMO_RANKING}")
+                    else:
+                        st.caption(f"📊 Nenhum mercado passou o gatilho EV/divergência do Sniper")
+
                     _sub_m = st.tabs(["🔢 Gols", "🤝 BTTS", "🏆 Resultado"])
                     with _sub_m[0]:
                         _cols_o = st.columns(5)
@@ -3648,7 +3681,10 @@ with tab_analise:
                 overround = calcular_overround_1x2(odd_h, odd_d, odd_a)
 
                 # H1-HOME-Only: calibrador isotônico em HOME; DRAW/AWAY ficam RAW
-                params_j   = ParametrosLiga.from_dict(banco.params_ligas[str(l_id)])
+                _params_raw_j = banco.params_ligas.get(str(l_id))
+                if _params_raw_j is None:
+                    continue  # sem_cal — sem calibrador 1X2, pula Estrategista
+                params_j   = ParametrosLiga.from_dict(_params_raw_j)
                 cal_home   = params_j.calibradores.get("1X2_HOME")
                 p_home_raw = prev["mercados"]["HOME"]
                 p_home     = cal_home.calibrar(p_home_raw) if cal_home else p_home_raw
