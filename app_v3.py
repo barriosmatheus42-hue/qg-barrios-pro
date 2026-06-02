@@ -39,6 +39,7 @@ from dados import (
     ARQUIVO_BANCO_LOCAL,
     LIGAS_SUPORTADAS,
     LIGAS_TEMPORADA_ANO_ATUAL,
+    LIGAS_COPA_MUNDO,
     INTERVALO_RECALIBRACAO_DIAS,
     SALDO_MINIMO_EMERGENCIA,
     SALDO_MIN_PARA_CALIBRACAO,
@@ -1882,7 +1883,10 @@ with tab_calibracao:
 
         # Status da safra: leva em conta tanto a idade da calibração quanto a data do último jogo
         if not params_d or not _tem_times:
-            status = "❌ Nunca calibrada"
+            if league_id in LIGAS_COPA_MUNDO:
+                status = "🏆 Aguardando torneio"  # Copa/Eliminatórias sem dados na API — normal
+            else:
+                status = "❌ Nunca calibrada"
         else:
             try:
                 data_cal = dt.datetime.fromisoformat(params_d.get("calibrado_em", ""))
@@ -1930,21 +1934,29 @@ with tab_calibracao:
 
     st.dataframe(rows_status, use_container_width=True, hide_index=True)
 
-    # ── Resumo de status (sem susto de custo total de bootstrap) ─────
-    _n_frescas    = sum(1 for r in rows_status if r["Status"].startswith("🟢"))
-    _n_velhas     = sum(1 for r in rows_status if r["Status"].startswith("🟡"))
-    _n_congeladas = sum(1 for r in rows_status if r["Status"].startswith(("❄️", "⏸️")))
-    _n_nunca      = sum(1 for r in rows_status if r["Status"].startswith("❌"))
+    # ── Resumo de status ──────────────────────────────────────────────
+    _n_frescas     = sum(1 for r in rows_status if r["Status"].startswith("🟢"))
+    _n_velhas      = sum(1 for r in rows_status if r["Status"].startswith("🟡"))
+    _n_congeladas  = sum(1 for r in rows_status if r["Status"].startswith(("❄️", "⏸️")))
+    _n_nunca       = sum(1 for r in rows_status if r["Status"].startswith("❌"))
+    _n_aguardando  = sum(1 for r in rows_status if r["Status"].startswith("🏆"))
     _partes_res = []
     if _n_frescas:    _partes_res.append(f"🟢 {_n_frescas} frescas")
     if _n_velhas:     _partes_res.append(f"🟡 {_n_velhas} velhas")
     if _n_congeladas: _partes_res.append(f"⏸️ {_n_congeladas} congeladas/finalizadas")
     if _n_nunca:      _partes_res.append(f"❌ {_n_nunca} nunca calibradas")
+    if _n_aguardando: _partes_res.append(f"🏆 {_n_aguardando} aguardando torneio")
     st.info(
         "**Resumo:** " + " · ".join(_partes_res) + "  \n"
         "💡 **Custo real de atualização** = apenas os jogos novos × 2 créditos (delta fetch) — "
         "não o bootstrap completo. Use **Passo 1** abaixo para ver o custo exato antes de gastar."
     )
+    if _n_aguardando:
+        st.caption(
+            f"🏆 {_n_aguardando} liga(s) Copa/Eliminatórias marcadas como **Aguardando torneio** — "
+            "sem dados disponíveis na API para a season atual. Isso é normal fora do período de jogos. "
+            "Para seleções, use a seção **Bootstrap Copa 2026** abaixo."
+        )
 
     # ── Trava de Custo — Calibrar TODAS (2 fases) ────────────────────
     st.markdown("#### 🔄 Atualizar Todas as Ligas")

@@ -1638,11 +1638,28 @@ class DadosManager:
             detalhes_seasons = []
             n_novos_liga = 0
 
+            # Cutoff calibrado_em: mirrors _delta_fetch_liga logic.
+            # When historico_ligas is empty (after restart or first delta run)
+            # but the league was already calibrated, fixtures before calibrado_em
+            # were already in the MLE training set — they don't need xG re-download.
+            _calibrado_em_str = banco.params_ligas.get(chave, {}).get("calibrado_em", "") if not ids_cache and has_params else ""
+            _cutoff_dt = pd.to_datetime(_calibrado_em_str[:10]) if _calibrado_em_str else None
+
             for s in seasons:
                 try:
                     df_api, _ = self.api.buscar_historico_liga(league_id, s, com_xg=False)
                     ids_api = set(df_api["fixture_id"].astype(int).tolist()) if not df_api.empty else set()
                     novos_ids = ids_api - ids_cache
+                    # Apply calibrado_em date cutoff when cache is empty (same logic as _delta_fetch_liga)
+                    if novos_ids and _cutoff_dt is not None and not df_api.empty and "date" in df_api.columns:
+                        try:
+                            _df_truly_new = df_api[
+                                (df_api["date"] >= _cutoff_dt) &
+                                (~df_api["fixture_id"].isin(ids_cache))
+                            ]
+                            novos_ids = set(_df_truly_new["fixture_id"].astype(int).tolist())
+                        except Exception:
+                            pass  # malformed date column — keep original novos_ids
                     n_novos = len(novos_ids)
                     detalhes_seasons.append({
                         "season":  s,
