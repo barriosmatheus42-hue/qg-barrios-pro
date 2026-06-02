@@ -1671,28 +1671,34 @@ class DadosManager:
             detalhes_seasons = []
             n_novos_liga = 0
 
-            # Cutoff calibrado_em: mirrors _delta_fetch_liga logic.
-            # When historico_ligas is empty (after restart or first delta run)
-            # but the league was already calibrated, fixtures before calibrado_em
-            # were already in the MLE training set — they don't need xG re-download.
-            _calibrado_em_str = banco.params_ligas.get(chave, {}).get("calibrado_em", "") if not ids_cache and has_params else ""
-            _cutoff_dt = pd.to_datetime(_calibrado_em_str[:10]) if _calibrado_em_str else None
-
             for s in seasons:
                 try:
                     df_api, _ = self.api.buscar_historico_liga(league_id, s, com_xg=False)
                     ids_api = set(df_api["fixture_id"].astype(int).tolist()) if not df_api.empty else set()
                     novos_ids = ids_api - ids_cache
-                    # Apply calibrado_em date cutoff when cache is empty (same logic as _delta_fetch_liga)
-                    if novos_ids and _cutoff_dt is not None and not df_api.empty and "date" in df_api.columns:
-                        try:
-                            _df_truly_new = df_api[
-                                (df_api["date"] >= _cutoff_dt) &
-                                (~df_api["fixture_id"].isin(ids_cache))
-                            ]
-                            novos_ids = set(_df_truly_new["fixture_id"].astype(int).tolist())
-                        except Exception:
-                            pass  # malformed date column — keep original novos_ids
+
+                    # Cutoff calibrado_em: quando ids_cache está vazio mas a liga já tem params,
+                    # fixtures anteriores a calibrado_em já foram usados no MLE — não precisam
+                    # de xG novamente. Espelha a lógica de _delta_fetch_liga.
+                    # fallback = set() (0 novos) em QUALQUER caso de falha — evita phantom 22k.
+                    if novos_ids and not ids_cache and has_params:
+                        _ce_str = banco.params_ligas.get(chave, {}).get("calibrado_em", "")
+                        if _ce_str and not df_api.empty and "date" in df_api.columns:
+                            try:
+                                _cutoff = pd.to_datetime(_ce_str[:10])
+                                novos_ids = set(
+                                    df_api.loc[
+                                        df_api["date"] >= _cutoff,
+                                        "fixture_id",
+                                    ].astype(int).tolist()
+                                ) - ids_cache
+                            except Exception:
+                                novos_ids = set()  # qualquer erro → assume tudo conhecido
+                        else:
+                            # calibrado_em ausente → assume tudo já baixado
+                            # (Passo 2 encontra o delta real via _delta_fetch_liga)
+                            novos_ids = set()
+
                     n_novos = len(novos_ids)
                     detalhes_seasons.append({
                         "season":  s,
